@@ -269,7 +269,6 @@ async def start_command(message: types.Message):
     USER_CHAT_ID = message.chat.id
     await message.answer("Привет! Бот готов к работе. Используй меню ниже для управления.", reply_markup=get_main_keyboard())
 
-# --- УМНЫЕ ОБРАБОТЧИКИ (ЛОВЯТ ТЕКСТ В ЛЮБОМ МЕСТЕ) ---
 @dp.message(lambda message: "Прогноз" in message.text or message.text == "/signal")
 async def signal_handler(message: types.Message):
     await send_signal(message.chat.id, is_auto=False)
@@ -319,11 +318,18 @@ async def history_handler(message: types.Message):
 
         balance_usd = 0.0
         for t in trades:
+            # Проверка на None для старых записей
+            entry_price = t[2] if t[2] is not None else 0.0
+            exit_price = t[3] if t[3] is not None else entry_price
+            
+            if entry_price == 0.0:
+                continue # Пропускаем битые сделки
+
             if "WIN" in t[5]:
-                profit_pct = abs(t[3] - t[2]) / t[2]
+                profit_pct = abs(exit_price - entry_price) / entry_price
                 balance_usd += profit_pct
             else:
-                loss_pct = abs(t[3] - t[2]) / t[2]
+                loss_pct = abs(exit_price - entry_price) / entry_price
                 balance_usd -= loss_pct
 
         text = (
@@ -339,12 +345,11 @@ async def history_handler(message: types.Message):
 
         for t in trades[:5]:
             icon = "✅" if "WIN" in t[5] else "❌"
-            cp = t[3] if t[3] else 0.0
+            cp = t[3] if t[3] is not None else t[2] # Если нет цены выхода, показываем цену входа
             text += f"{icon} #{t[0]} | Вход: ${t[2]:.2f} -> Выход: ${cp:.2f}\n"
 
         await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
     except Exception as e:
-        # Если случится ошибка, бот пришлет её прямо в чат
         await message.answer(f"⚠️ Ошибка истории: {e}", reply_markup=get_main_keyboard())
 
 async def main():
