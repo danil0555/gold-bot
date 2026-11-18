@@ -20,21 +20,17 @@ dp = Dispatcher()
 AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
 
-# --- БАЗА ДАННЫХ С ЗАЩИТОЙ ОТ СТАРЫХ ТАБЛИЦ ---
 def init_db():
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
-    # Создаем таблицу, если ее нет
     c.execute('''CREATE TABLE IF NOT EXISTS history
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, price REAL, rsi REAL, forecast TEXT, 
                   target_price REAL, stop_loss REAL, close_price REAL, result TEXT)''')
-    
-    # ПРОВЕРКА: Если таблица уже была создана раньше и в ней нет колонки close_price, добавляем её
     try:
         c.execute("ALTER TABLE history ADD COLUMN close_price REAL")
     except sqlite3.OperationalError:
-        pass # Колонка уже есть, ничего не делаем
+        pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS weights
                  (factor TEXT PRIMARY KEY, weight REAL)''')
@@ -260,7 +256,7 @@ def get_main_keyboard():
         keyboard=[
             [KeyboardButton(text="📈 Прогноз")],
             [KeyboardButton(text="🚀 Вкл Авто"), KeyboardButton(text="🛑 Выкл Авто")],
-            [KeyboardButton(text="🧠 Веса"), KeyboardButton(text="📜 История сделок")]
+            [KeyboardButton(text="🧠 Веса"), KeyboardButton(text="📜 История")]
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие..."
@@ -273,24 +269,25 @@ async def start_command(message: types.Message):
     USER_CHAT_ID = message.chat.id
     await message.answer("Привет! Бот готов к работе. Используй меню ниже для управления.", reply_markup=get_main_keyboard())
 
-@dp.message(lambda message: message.text == "📈 Прогноз" or message.text == "/signal")
+# --- УМНЫЕ ОБРАБОТЧИКИ (ЛОВЯТ ТЕКСТ В ЛЮБОМ МЕСТЕ) ---
+@dp.message(lambda message: "Прогноз" in message.text or message.text == "/signal")
 async def signal_handler(message: types.Message):
     await send_signal(message.chat.id, is_auto=False)
 
-@dp.message(lambda message: message.text == "🚀 Вкл Авто" or message.text == "/autostart")
+@dp.message(lambda message: "Вкл Авто" in message.text or message.text == "/autostart")
 async def autostart_handler(message: types.Message):
     global AUTO_SIGNAL_ENABLED, USER_CHAT_ID
     AUTO_SIGNAL_ENABLED = True
     USER_CHAT_ID = message.chat.id
     await message.answer("🚀 Авто-режим ВКЛЮЧЕН.", reply_markup=get_main_keyboard())
 
-@dp.message(lambda message: message.text == "🛑 Выкл Авто" or message.text == "/autostop")
+@dp.message(lambda message: "Выкл Авто" in message.text or message.text == "/autostop")
 async def autostop_handler(message: types.Message):
     global AUTO_SIGNAL_ENABLED
     AUTO_SIGNAL_ENABLED = False
     await message.answer("🛑 Авто-режим ВЫКЛЮЧЕН.", reply_markup=get_main_keyboard())
 
-@dp.message(lambda message: message.text == "🧠 Веса" or message.text == "/weights")
+@dp.message(lambda message: "Веса" in message.text or message.text == "/weights")
 async def weights_handler(message: types.Message):
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
@@ -302,50 +299,53 @@ async def weights_handler(message: types.Message):
         text += f"• {factor}: <b>{weight:.1f}</b>\n"
     await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
-@dp.message(lambda message: message.text == "📜 История сделок" or message.text == "/history")
+@dp.message(lambda message: "История" in message.text or "history" in message.text.lower() or message.text == "/history")
 async def history_handler(message: types.Message):
-    conn = sqlite3.connect('signals.db')
-    c = conn.cursor()
-    c.execute("SELECT id, timestamp, price, close_price, forecast, result FROM history WHERE result IS NOT NULL ORDER BY id DESC")
-    trades = c.fetchall()
-    conn.close()
+    try:
+        conn = sqlite3.connect('signals.db')
+        c = conn.cursor()
+        c.execute("SELECT id, timestamp, price, close_price, forecast, result FROM history WHERE result IS NOT NULL ORDER BY id DESC")
+        trades = c.fetchall()
+        conn.close()
 
-    if not trades:
-        await message.answer("📭 История пуста. Пока нет закрытых сделок.", reply_markup=get_main_keyboard())
-        return
+        if not trades:
+            await message.answer("📭 История пуста. Пока нет закрытых сделок.", reply_markup=get_main_keyboard())
+            return
 
-    total = len(trades)
-    wins = sum(1 for t in trades if "WIN" in t[5])
-    losses = total - wins
-    winrate = (wins / total) * 100 if total > 0 else 0
+        total = len(trades)
+        wins = sum(1 for t in trades if "WIN" in t[5])
+        losses = total - wins
+        winrate = (wins / total) * 100 if total > 0 else 0
 
-    balance_usd = 0.0
-    for t in trades:
-        if "WIN" in t[5]:
-            profit_pct = abs(t[3] - t[2]) / t[2]
-            balance_usd += profit_pct
-        else:
-            loss_pct = abs(t[3] - t[2]) / t[2]
-            balance_usd -= loss_pct
+        balance_usd = 0.0
+        for t in trades:
+            if "WIN" in t[5]:
+                profit_pct = abs(t[3] - t[2]) / t[2]
+                balance_usd += profit_pct
+            else:
+                loss_pct = abs(t[3] - t[2]) / t[2]
+                balance_usd -= loss_pct
 
-    text = (
-        f"📜 <b>Статистика торговли</b>\n\n"
-        f"Всего сделок: <b>{total}</b>\n"
-        f"🟢 Прибыльных: <b>{wins}</b>\n"
-        f"🔴 Убыточных: <b>{losses}</b>\n"
-        f"🎯 Винрейт: <b>{winrate:.1f}%</b>\n\n"
-        f"💰 <b>Симуляция ($1 на сделку):</b>\n"
-        f"Чистый результат: <b>${balance_usd:.4f}</b>\n\n"
-        f"<i>Последние 5 сделок:</i>\n"
-    )
+        text = (
+            f"📜 <b>Статистика торговли</b>\n\n"
+            f"Всего сделок: <b>{total}</b>\n"
+            f"🟢 Прибыльных: <b>{wins}</b>\n"
+            f"🔴 Убыточных: <b>{losses}</b>\n"
+            f"🎯 Винрейт: <b>{winrate:.1f}%</b>\n\n"
+            f"💰 <b>Симуляция ($1 на сделку):</b>\n"
+            f"Чистый результат: <b>${balance_usd:.4f}</b>\n\n"
+            f"<i>Последние 5 сделок:</i>\n"
+        )
 
-    for t in trades[:5]:
-        icon = "✅" if "WIN" in t[5] else "❌"
-        # Проверка, если close_price пустой (например, старые сделки), выводим 0
-        cp = t[3] if t[3] else 0.0
-        text += f"{icon} #{t[0]} | Вход: ${t[2]:.2f} -> Выход: ${cp:.2f}\n"
+        for t in trades[:5]:
+            icon = "✅" if "WIN" in t[5] else "❌"
+            cp = t[3] if t[3] else 0.0
+            text += f"{icon} #{t[0]} | Вход: ${t[2]:.2f} -> Выход: ${cp:.2f}\n"
 
-    await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
+        await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
+    except Exception as e:
+        # Если случится ошибка, бот пришлет её прямо в чат
+        await message.answer(f"⚠️ Ошибка истории: {e}", reply_markup=get_main_keyboard())
 
 async def main():
     init_db()
