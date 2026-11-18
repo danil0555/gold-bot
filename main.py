@@ -128,16 +128,30 @@ def get_analysis():
         elif any(w in news_lower for w in ["hike", "strong dollar", "growth", "surge"]):
             score -= 1
             reasons.append("Новости↓ (-1)")
-
-        if score > 0:
+            if score > 0:
             forecast = "🟢 ВВЕРХ"
             target = current_price + (1.5 * current_atr)
         elif score < 0:
             forecast = "🔴 ВНИЗ"
             target = current_price - (1.5 * current_atr)
         else:
-            forecast = "⚪️ НЕЙТРАЛЬНО"
-            target = current_price
+            # Если баллы равны 0, смотрим на 1-часовой тренд для принятия решения
+            if trend_1h == "BULL":
+                forecast = "🟢 ВВЕРХ (по тренду)"
+                target = current_price + (1.5 * current_atr)
+            elif trend_1h == "BEAR":
+                forecast = "🔴 ВНИЗ (по тренду)"
+                target = current_price - (1.5 * current_atr)
+            else:
+                # Если даже тренд не определился, смотрим на 15-минутный тренд (цена выше SMA50)
+                if current_price > df_15m['SMA50'].iloc[-1]:
+                    forecast = "🟢 ВВЕРХ (слабый)"
+                    target = current_price + (1.5 * current_atr)
+                else:
+                    forecast = "🔴 ВНИЗ (слабый)"
+                    target = current_price - (1.5 * current_atr)
+
+        
 
         recent_data = df_15m.tail(48 * 4) 
         support = float(recent_data['Low'].min())
