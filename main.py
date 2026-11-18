@@ -26,7 +26,7 @@ AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
 CURRENT_TICKER = "GC=F"
 CURRENT_NAME = "Золото (XAUUSD)"
-USER_BALANCE = 1000.0 # Депозит (его вы задаете сами)
+USER_BALANCE = 1000.0 # Депозит
 
 class UserSettings(StatesGroup):
     waiting_for_balance = State()
@@ -67,6 +67,10 @@ def get_biquote_data(bq_symbol, interval="1h", limit=200):
         df = pd.DataFrame(env["bars"])
         df["openTime"] = pd.to_datetime(df["openTime"])
         df = df.set_index("openTime").sort_index()
+        
+        # ИСПРАВЛЕНИЕ: Убираем часовой пояс UTC
+        df.index = df.index.tz_localize(None) 
+        
         df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
         return df
     except Exception as e:
@@ -112,15 +116,10 @@ def get_ict_session_score():
     elif 8 <= hour < 17: return 1.0, "Нью-Йорк"
     else: return 0, "Закрытие"
 
-# --- НОВАЯ ЛОГИКА РАСЧЕТА РИСКА И ЛОТА ---
 def calculate_risk_and_lot(balance, entry, stop, ticker, confidence):
-    # Бот сам решает, какой процент риска выделить (от 0.5% до 3%)
-    if confidence >= 85:
-        risk_pct = 3.0  # Снайпер - максимальный риск
-    elif confidence >= 75:
-        risk_pct = 2.0  # Сильный сигнал - средний риск
-    else:
-        risk_pct = 1.0  # Обычный - минимальный риск
+    if confidence >= 85: risk_pct = 3.0
+    elif confidence >= 75: risk_pct = 2.0
+    else: risk_pct = 1.0
         
     risk_amount = balance * (risk_pct / 100)
     distance = abs(entry - stop)
@@ -277,7 +276,6 @@ def get_analysis(ticker):
             target = current_price - (1.5 * current_atr)
             stop_loss = current_price + (1.0 * current_atr)
 
-        # Бот сам предлагает риск и лот
         risk_pct, lot = calculate_risk_and_lot(USER_BALANCE, current_price, stop_loss, ticker, confidence)
         
         support = float(df_1h['Low'].tail(24).min())
@@ -322,7 +320,7 @@ async def send_signal(chat_id, ticker, is_auto=False):
                 f"🔮 Уверенность: <b>{confidence}%</b> {conf_bar}\n\n"
                 f"Цена входа: <b>{price:.5f}</b> | RSI: {rsi:.1f}\n"
                 f"🎯 TP: <b>{target:.5f}</b> | 🛑 SL: <b>{sl:.5f}</b>\n"
-                f"📦 Лот: <b>{lot}</b> (Риск: {risk_pct}% от депозита)\n\n"
+                f"📦 Лот: <b>{lot}</b> (Риск: {risk_pct}% от депо)\n\n"
                 f"🧠 <b>Факторы:</b>\n{reasons}\n\n"
                 f"🛡️ <b>Ликвидность:</b>\nПоддержка: {support:.5f} | Сопротивление: {resistance:.5f}\n\n"
                 f"📰 <b>Новость:</b>\n<i>{safe_news}</i>\n\n"
@@ -439,7 +437,7 @@ async def start_command(message: types.Message, state: FSMContext):
     USER_CHAT_ID = message.chat.id
     await state.clear()
     await message.answer(
-        f"Привет! Бот готов.\nВаш депозит: ${USER_BALANCE:.2f}\n(Риск на сделку бот рассчитывает сам от 0.5% до 3% в зависимости от уверенности)", 
+        f"Привет! Бот готов.\nВаш депозит: ${USER_BALANCE:.2f}\n(Риск на сделку рассчитывается ботом от 1% до 3%)", 
         reply_markup=get_main_keyboard()
     )
 
@@ -477,7 +475,7 @@ async def set_audjpy(message: types.Message, state: FSMContext):
 @dp.message(lambda message: "Депозит" in message.text)
 async def ask_balance(message: types.Message, state: FSMContext):
     await state.set_state(UserSettings.waiting_for_balance)
-    await message.answer("Введите ваш общий депозит в USD (например: 1000).\nБот будет рассчитывать лот и риск автоматически.")
+    await message.answer("Введите ваш общий депозит в USD (например: 1000).")
 
 @dp.message(UserSettings.waiting_for_balance)
 async def process_balance(message: types.Message, state: FSMContext):
