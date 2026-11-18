@@ -20,6 +20,14 @@ dp = Dispatcher()
 
 AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
+CURRENT_TICKER = "GC=F"  # Для ручного запроса
+CURRENT_NAME = "Золото (XAUUSD)"
+
+ASSETS = {
+    "GC=F": "Золото (XAUUSD)",
+    "GBPJPY=X": "Фунт/Йена (GBP/JPY)",
+    "AUDJPY=X": "Австрал/Йена (AUD/JPY)"
+}
 
 def init_db():
     conn = sqlite3.connect('signals.db')
@@ -28,12 +36,12 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, price REAL, rsi REAL, forecast TEXT, 
                   target_price REAL, stop_loss REAL, close_price REAL, result TEXT,
-                  confidence INTEGER)''')
-    try:
-        c.execute("ALTER TABLE history ADD COLUMN close_price REAL")
+                  confidence INTEGER, ticker TEXT)''')
+    try: c.execute("ALTER TABLE history ADD COLUMN close_price REAL")
     except sqlite3.OperationalError: pass
-    try:
-        c.execute("ALTER TABLE history ADD COLUMN confidence INTEGER")
+    try: c.execute("ALTER TABLE history ADD COLUMN confidence INTEGER")
+    except sqlite3.OperationalError: pass
+    try: c.execute("ALTER TABLE history ADD COLUMN ticker TEXT")
     except sqlite3.OperationalError: pass
     
     c.execute('''CREATE TABLE IF NOT EXISTS weights
@@ -44,9 +52,9 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_live_price_and_data():
+def get_live_price_and_data(ticker):
     headers = {'User-Agent': 'Mozilla/5.0'}
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=1h"
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=5d&interval=1h"
     try:
         response = requests.get(url, headers=headers, timeout=10)
         data = response.json()
@@ -64,7 +72,7 @@ def get_live_price_and_data():
         df.index = df.index.tz_localize(None)
         return df
     except Exception as e:
-        print(f"Ошибка получения цены: {e}")
+        print(f"Ошибка получения {ticker}: {e}")
         return pd.DataFrame()
 
 def detect_rsi_divergence(df):
@@ -106,12 +114,11 @@ def get_ict_session_score():
     elif 8 <= hour < 17: return 1.0, "Нью-Йорк"
     else: return 0, "Закрытие"
 
-def get_analysis():
+def get_analysis(ticker):
     try:
-        df = get_live_price_and_data()
+        df = get_live_price_and_data(ticker)
         if df.empty: return None
 
-        # Индикаторы
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -151,10 +158,9 @@ def get_analysis():
         conn.close()
 
         score = 0.0
-        max_possible_score = 0.0 # Для расчета процента уверенности
+        max_possible_score = 0.0
         reasons = [f"Сессия: {ict_name}"]
 
-        # 1. Глобальный тренд (EMA 200) - Макс 1
         max_possible_score += 1 * weights.get('TREND', 1.0)
         if current_price > current_ema200:
             score += 1 * weights.get('TREND', 1.0)
@@ -163,14 +169,10 @@ def get_analysis():
             score -= 1 * weights.get('TREND', 1.0)
             reasons.append(f"Тренд↓ (-{1 * weights['TREND']:.1f})")
 
-        # 2. Трендовый канал EMA 50 - Макс 0.5
         max_possible_score += 0.5 * weights.get('TREND', 1.0)
-        if current_price > current_ema50:
-            score += 0.5 * weights.get('TREND', 1.0)
-        else:
-            score -= 0.5 * weights.get('TREND', 1.0)
+        if current_price > current_ema50: score += 0.5 * weights.get('TREND', 1.0)
+        else: score -= 0.5 * weights.get('TREND', 1.0)
 
-        # 3. MACD - Макс 1.5
         max_possible_score += 1.5 * weights.get('MACD', 1.0)
         if prev_macd < prev_macd_signal and current_macd > current_macd_signal:
             score += 1.5 * weights.get('MACD', 1.0)
@@ -179,7 +181,6 @@ def get_analysis():
             score -= 1.5 * weights.get('MACD', 1.0)
             reasons.append(f"MACD↓ (-{1.5 * weights['MACD']:.1f})")
 
-        # 4. RSI - Макс 2
         max_possible_score += 2 * weights.get('RSI', 1.0)
         if current_rsi < 30:
             score += 2 * weights.get('RSI', 1.0)
@@ -188,7 +189,6 @@ def get_analysis():
             score -= 2 * weights.get('RSI', 1.0)
             reasons.append(f"RSI>70 (-{2 * weights['RSI']:.1f})")
 
-        # 5. Дивергенция - Макс 2.5
         max_possible_score += 2.5 * weights.get('DIVERGENCE', 1.0)
         if divergence == 1:
             score += 2.5 * weights.get('DIVERGENCE', 1.0)
@@ -197,7 +197,6 @@ def get_analysis():
             score -= 2.5 * weights.get('DIVERGENCE', 1.0)
             reasons.append(f"Дивергенция↓ (-{2.5 * weights['DIVERGENCE']:.1f})")
 
-        # 6. SMC Liquidity Sweep - Макс 3
         max_possible_score += 3.0 * weights.get('SMC_SWEEP', 1.0)
         if sweep_signal == 1:
             score += 3.0 * weights.get('SMC_SWEEP', 1.0)
@@ -206,7 +205,6 @@ def get_analysis():
             score -= 3.0 * weights.get('SMC_SWEEP', 1.0)
             reasons.append(f"SMC Sweep↓ (-{3.0 * weights['SMC_SWEEP']:.1f})")
 
-        # 7. SMC Breaker Block - Макс 2
         max_possible_score += 2.0 * weights.get('BREAKER_BLOCK', 1.0)
         if breaker_signal == 1:
             score += 2.0 * weights.get('BREAKER_BLOCK', 1.0)
@@ -215,26 +213,24 @@ def get_analysis():
             score -= 2.0 * weights.get('BREAKER_BLOCK', 1.0)
             reasons.append(f"Breaker Block↓ (-{2.0 * weights['BREAKER_BLOCK']:.1f})")
 
-        # 8. ICT Power of 3 (Макс 1.0)
         max_possible_score += 1.0 * weights.get('ICT_P3', 1.0)
         score += ict_score * weights.get('ICT_P3', 1.0)
 
-        # 9. ИИ Новости (Макс 5.0)
         max_possible_score += 5.0 * weights.get('AI_NEWS', 1.0)
+        news_keywords = ["gold", "xau", "fed", "interest rate", "inflation", "dollar", "fomc", "powell", "gbp", "jpy", "yen", "pound", "boj", "boe"]
         news = "Новостей нет." 
         try:
             feed = feedparser.parse("https://finance.yahoo.com/rss/2.0/headline?s=GC=F")
             if feed.entries: 
                 raw_news = feed.entries[0].title
-                keywords = ["gold", "xau", "fed", "interest rate", "inflation", "dollar", "fomc", "powell"]
-                if any(kw in raw_news.lower() for kw in keywords):
+                if any(kw in raw_news.lower() for kw in news_keywords):
                     news = raw_news
         except: pass
         
         if news != "Новостей нет.":
             response = ai_client.chat.completions.create(
                 model="meta-llama/llama-3.1-8b-instruct",
-                messages=[{"role": "user", "content": f"Оцени новость для золота от -5 до +5. '{news}'. Ответь только цифрой."}],
+                messages=[{"role": "user", "content": f"Оцени новость для {ticker} от -5 до +5. '{news}'. Ответь только цифрой."}],
                 temperature=0.1, max_tokens=5
             )
             import re
@@ -244,12 +240,9 @@ def get_analysis():
                 score += ai_score * weights.get('AI_NEWS', 1.0)
                 reasons.append(f"ИИ ({ai_score * weights['AI_NEWS']:+.1f})")
 
-        # --- РАСЧЕТ ПРОЦЕНТА УВЕРЕННОСТИ ---
-        # Берем абсолютное значение набранных баллов и делим на максимум
         confidence = int((abs(score) / max_possible_score) * 100)
-        if confidence > 100: confidence = 100 # Ограничитель
+        if confidence > 100: confidence = 100
 
-        # Итоговый прогноз
         if score >= 0:
             forecast = "🟢 ВВЕРХ"
             target = current_price + (1.5 * current_atr)
@@ -264,24 +257,24 @@ def get_analysis():
 
         return current_price, current_rsi, forecast, target, stop_loss, support, resistance, " | ".join(reasons), news, confidence
     except Exception as e:
-        print(f"Ошибка анализа: {e}")
+        print(f"Ошибка анализа {ticker}: {e}")
         return None
 
-async def send_signal(chat_id, is_auto=False):
+async def send_signal(chat_id, ticker, is_auto=False):
     try:
         await bot.send_chat_action(chat_id, 'typing')
-        result = await asyncio.wait_for(asyncio.to_thread(get_analysis), timeout=30.0)
+        result = await asyncio.wait_for(asyncio.to_thread(get_analysis, ticker), timeout=30.0)
         if not result:
             if not is_auto: await bot.send_message(chat_id, "⚠️ Ошибка данных. Попробуйте позже.")
             return
 
         price, rsi, forecast, target, sl, support, resistance, reasons, news, confidence = result
+        asset_name = ASSETS.get(ticker, ticker)
         
-        # --- ЛОГИКА ДЛЯ АВТО-РЕЖИМА (СНАЙПЕР) ---
         if is_auto:
             if confidence < 70:
-                print(f"Авто-режим: Сигнал пропущен, уверенность {confidence}% < 70%")
-                return # Не отправляем сообщение, если уверенность низкая
+                print(f"Авто: {asset_name} уверенность {confidence}% < 70%")
+                return
             else:
                 status_text = "🎯 <b>СНАЙПЕР (Высокая уверенность)</b>" if confidence >= 85 else "⚡️ <b>Сильный сигнал</b>"
                 await bot.send_message(chat_id, status_text)
@@ -290,23 +283,21 @@ async def send_signal(chat_id, is_auto=False):
 
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
-        c.execute("INSERT INTO history (timestamp, price, rsi, forecast, target_price, stop_loss, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                  (now_str, price, rsi, forecast, target, sl, confidence))
+        c.execute("INSERT INTO history (timestamp, price, rsi, forecast, target_price, stop_loss, confidence, ticker) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                  (now_str, price, rsi, forecast, target, sl, confidence, ticker))
         signal_id = c.lastrowid
         conn.commit()
         conn.close()
 
         safe_news = news.replace("_", " ").replace("*", " ").replace("[", " ").replace("`", " ")
-        
-        # Красивое отображение уверенности
         conf_bar = "🟩" * (confidence // 20) + "⬜️" * (5 - (confidence // 20))
 
-        text = (f"📊 <b>Анализ XAUUSD</b> {'(АВТО)' if is_auto else ''} #{signal_id}\n"
+        text = (f"📊 <b>Анализ {asset_name}</b> {'(АВТО)' if is_auto else ''} #{signal_id}\n"
                 f"🔮 Уверенность: <b>{confidence}%</b> {conf_bar}\n\n"
-                f"Цена входа: <b>${price:.2f}</b> | RSI: {rsi:.1f}\n"
-                f"🎯 TP: <b>${target:.2f}</b> | 🛑 SL: <b>${sl:.2f}</b>\n\n"
+                f"Цена входа: <b>{price:.5f}</b> | RSI: {rsi:.1f}\n"
+                f"🎯 TP: <b>{target:.5f}</b> | 🛑 SL: <b>{sl:.5f}</b>\n\n"
                 f"🧠 <b>Факторы:</b>\n{reasons}\n\n"
-                f"🛡️ <b>Ликвидность:</b>\nПоддержка: ${support:.2f} | Сопротивление: ${resistance:.2f}\n\n"
+                f"🛡️ <b>Ликвидность:</b>\nПоддержка: {support:.5f} | Сопротивление: {resistance:.5f}\n\n"
                 f"📰 <b>Новость:</b>\n<i>{safe_news}</i>\n\n"
                 f"Прогноз: <b>{forecast}</b>\n"
                 f"⏳ <i>Сделка активна (следим за TP/SL)</i>")
@@ -320,90 +311,136 @@ async def background_worker():
     while True:
         try:
             if AUTO_SIGNAL_ENABLED and USER_CHAT_ID:
-                await send_signal(USER_CHAT_ID, is_auto=True)
+                # Сканируем ВСЕ активы
+                for ticker in ASSETS.keys():
+                    await send_signal(USER_CHAT_ID, ticker, is_auto=True)
+                    await asyncio.sleep(2) # Небольшая пауза между запросами
                 await asyncio.sleep(5 * 60) 
             else:
                 await asyncio.sleep(10)
 
+            # Проверка закрытых сделок (фоновый процесс)
             conn = sqlite3.connect('signals.db')
             c = conn.cursor()
-            c.execute("SELECT id, timestamp, price, target_price, stop_loss, forecast FROM history WHERE result IS NULL")
+            c.execute("SELECT id, timestamp, price, target_price, stop_loss, forecast, ticker FROM history WHERE result IS NULL")
             pending = c.fetchall()
 
             if pending:
-                current_data = await asyncio.to_thread(get_live_price_and_data)
-                if not current_data.empty:
-                    for sig_id, sig_time, old_price, tp, sl, forecast in pending:
-                        sig_dt = pd.to_datetime(sig_time)
-                        recent_data = current_data[current_data.index >= sig_dt]
-                        
-                        if recent_data.empty: continue
-                        high_price = recent_data['High'].max()
-                        low_price = recent_data['Low'].min()
-                        
-                        result_text = ""
-                        close_price = 0.0
-                        
-                        if "ВВЕРХ" in forecast:
-                            if high_price >= tp: result_text, close_price = "WIN ✅", tp
-                            elif low_price <= sl: result_text, close_price = "LOSS ❌", sl
-                        elif "ВНИЗ" in forecast:
-                            if low_price <= tp: result_text, close_price = "WIN ✅", tp
-                            elif high_price >= sl: result_text, close_price = "LOSS ❌", sl
+                for sig_id, sig_time, old_price, tp, sl, forecast, ticker in pending:
+                    current_data = await asyncio.to_thread(get_live_price_and_data, ticker)
+                    if current_data.empty: continue
+                    
+                    sig_dt = pd.to_datetime(sig_time)
+                    recent_data = current_data[current_data.index >= sig_dt]
+                    
+                    if recent_data.empty: continue
+                    high_price = recent_data['High'].max()
+                    low_price = recent_data['Low'].min()
+                    
+                    result_text = ""
+                    close_price = 0.0
+                    
+                    if "ВВЕРХ" in forecast:
+                        if high_price >= tp: result_text, close_price = "WIN ✅", tp
+                        elif low_price <= sl: result_text, close_price = "LOSS ❌", sl
+                    elif "ВНИЗ" in forecast:
+                        if low_price <= tp: result_text, close_price = "WIN ✅", tp
+                        elif high_price >= sl: result_text, close_price = "LOSS ❌", sl
 
-                        if result_text:
-                            c.execute("UPDATE history SET result = ?, close_price = ? WHERE id = ?", (result_text, close_price, sig_id))
-                            conn.commit()
-                            
-                            all_factors = ['TREND', 'RSI', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3']
-                            if "LOSS" in result_text:
-                                for factor in all_factors:
-                                    c.execute("UPDATE weights SET weight = MAX(0.2, weight - 0.1) WHERE factor = ?", (factor,))
-                            else:
-                                for factor in all_factors:
-                                    c.execute("UPDATE weights SET weight = MIN(2.0, weight + 0.1) WHERE factor = ?", (factor,))
-                            conn.commit()
+                    if result_text:
+                        c.execute("UPDATE history SET result = ?, close_price = ? WHERE id = ?", (result_text, close_price, sig_id))
+                        conn.commit()
+                        
+                        all_factors = ['TREND', 'RSI', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3']
+                        if "LOSS" in result_text:
+                            for factor in all_factors:
+                                c.execute("UPDATE weights SET weight = MAX(0.2, weight - 0.1) WHERE factor = ?", (factor,))
+                        else:
+                            for factor in all_factors:
+                                c.execute("UPDATE weights SET weight = MIN(2.0, weight + 0.1) WHERE factor = ?", (factor,))
+                        conn.commit()
 
-                            if USER_CHAT_ID:
-                                msg = (f"🏁 <b>Сделка #{sig_id} ЗАКРЫТА</b>\n"
-                                       f"Цена входа: <b>${old_price:.2f}</b>\n"
-                                       f"Цена выхода: <b>${close_price:.2f}</b>\n"
-                                       f"Результат: <b>{result_text}</b>\n\n"
-                                       f"🧠 <i>Бот обновил свои веса.</i>")
-                                await bot.send_message(USER_CHAT_ID, msg, parse_mode="HTML")
+                        if USER_CHAT_ID:
+                            msg = (f"🏁 <b>Сделка #{sig_id} ({ticker}) ЗАКРЫТА</b>\n"
+                                   f"Вход: <b>{old_price:.5f}</b> → Выход: <b>{close_price:.5f}</b>\n"
+                                   f"Результат: <b>{result_text}</b>\n\n"
+                                   f"🧠 <i>Бот обновил веса.</i>")
+                            await bot.send_message(USER_CHAT_ID, msg, parse_mode="HTML")
             conn.close()
         except Exception as e:
             print(f"Ошибка фона: {e}")
         await asyncio.sleep(30)
 
+# --- Клавиатуры ---
 def get_main_keyboard():
-    keyboard = ReplyKeyboardMarkup(
+    return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📈 Прогноз")],
             [KeyboardButton(text="🚀 Вкл Авто"), KeyboardButton(text="🛑 Выкл Авто")],
-            [KeyboardButton(text="🧠 Веса"), KeyboardButton(text="📜 История")]
+            [KeyboardButton(text="🧠 Веса"), KeyboardButton(text="📜 История")],
+            [KeyboardButton(text="⚙️ Выбрать Актив (для ручного)")]
         ],
-        resize_keyboard=True,
-        input_field_placeholder="Выберите действие..."
+        resize_keyboard=True
     )
-    return keyboard
 
+def get_asset_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🥇 Золото (XAUUSD)")],
+            [KeyboardButton(text="🇬🇧 Фунт/Йена (GBP/JPY)")],
+            [KeyboardButton(text="🇦🇺 Австрал/Йена (AUD/JPY)")],
+            [KeyboardButton(text="⬅️ Назад")]
+        ],
+        resize_keyboard=True
+    )
+
+# --- Обработчики ---
 @dp.message(CommandStart())
 async def start_command(message: types.Message):
     global USER_CHAT_ID
     USER_CHAT_ID = message.chat.id
-    await message.answer("Привет! Бот (Снайпер) готов к работе. В авто-режиме он пришлет сигнал только если уверен на 70% и выше.", reply_markup=get_main_keyboard())
+    await message.answer(
+        "Привет! Бот готов. В авто-режиме он сканирует ВСЕ активы (Золото, GBP/JPY, AUD/JPY) и присылает лучшие.\n\n"
+        "Для ручного запроса используйте кнопку 'Прогноз' (анализирует выбранный актив).", 
+        reply_markup=get_main_keyboard()
+    )
+
+@dp.message(lambda message: "Выбрать Актив" in message.text)
+async def asset_menu_handler(message: types.Message):
+    await message.answer("Выберите актив для РУЧНОГО анализа:", reply_markup=get_asset_keyboard())
+
+@dp.message(lambda message: "Назад" in message.text)
+async def back_handler(message: types.Message):
+    await message.answer("Возврат в меню.", reply_markup=get_main_keyboard())
+
+@dp.message(lambda message: "Золото" in message.text)
+async def set_gold(message: types.Message):
+    global CURRENT_TICKER
+    CURRENT_TICKER = "GC=F"
+    await message.answer("Актив для ручного анализа: <b>Золото</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
+
+@dp.message(lambda message: "Фунт/Йена" in message.text)
+async def set_gbpjpy(message: types.Message):
+    global CURRENT_TICKER
+    CURRENT_TICKER = "GBPJPY=X"
+    await message.answer("Актив для ручного анализа: <b>Фунт/Йена</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
+
+@dp.message(lambda message: "Австрал/Йена" in message.text)
+async def set_audjpy(message: types.Message):
+    global CURRENT_TICKER
+    CURRENT_TICKER = "AUDJPY=X"
+    await message.answer("Актив для ручного анализа: <b>Австрал/Йена</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 @dp.message(lambda message: "Прогноз" in message.text or message.text == "/signal")
 async def signal_handler(message: types.Message):
-    await send_signal(message.chat.id, is_auto=False)
+    await send_signal(message.chat.id, CURRENT_TICKER, is_auto=False)
 
 @dp.message(lambda message: "Вкл Авто" in message.text or message.text == "/autostart")
 async def autostart_handler(message: types.Message):
     global AUTO_SIGNAL_ENABLED, USER_CHAT_ID
     AUTO_SIGNAL_ENABLED = True
     USER_CHAT_ID = message.chat.id
-    await message.answer("🚀 Авто-режим ВКЛЮЧЕН. Бот будет присылать только сигналы с уверенностью >70%.", reply_markup=get_main_keyboard())
+    await message.answer("🚀 Авто-режим ВКЛЮЧЕН. Сканирую Золото, GBP/JPY, AUD/JPY.", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "Выкл Авто" in message.text or message.text == "/autostop")
 async def autostop_handler(message: types.Message):
@@ -423,17 +460,17 @@ async def weights_handler(message: types.Message):
         text += f"• {factor}: <b>{weight:.1f}</b>\n"
     await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
-@dp.message(lambda message: "История" in message.text or "history" in message.text.lower() or message.text == "/history")
+@dp.message(lambda message: "История" in message.text or message.text == "/history")
 async def history_handler(message: types.Message):
     try:
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
-        c.execute("SELECT id, timestamp, price, close_price, forecast, result, confidence FROM history WHERE result IS NOT NULL ORDER BY id DESC")
+        c.execute("SELECT id, timestamp, price, close_price, forecast, result, confidence, ticker FROM history WHERE result IS NOT NULL ORDER BY id DESC")
         trades = c.fetchall()
         conn.close()
 
         if not trades:
-            await message.answer("📭 История пуста. Пока нет закрытых сделок.", reply_markup=get_main_keyboard())
+            await message.answer("📭 История пуста.", reply_markup=get_main_keyboard())
             return
 
         total = len(trades)
@@ -441,24 +478,22 @@ async def history_handler(message: types.Message):
         losses = total - wins
         winrate = (wins / total) * 100 if total > 0 else 0
 
-        balance_usd = 0.0
+        balance_pct = 0.0
         for t in trades:
             entry_price = t[2] if t[2] is not None else 0.0
             exit_price = t[3] if t[3] is not None else entry_price
             if entry_price == 0.0: continue
             if "WIN" in t[5]:
-                balance_usd += abs(exit_price - entry_price) / entry_price
+                balance_pct += abs(exit_price - entry_price) / entry_price
             else:
-                balance_usd -= abs(exit_price - entry_price) / entry_price
+                balance_pct -= abs(exit_price - entry_price) / entry_price
 
         text = (
-            f"📜 <b>Статистика торговли</b>\n\n"
+            f"📜 <b>Статистика (все активы)</b>\n\n"
             f"Всего сделок: <b>{total}</b>\n"
-            f"🟢 Прибыльных: <b>{wins}</b>\n"
-            f"🔴 Убыточных: <b>{losses}</b>\n"
+            f"🟢 WIN: <b>{wins}</b> | 🔴 LOSS: <b>{losses}</b>\n"
             f"🎯 Винрейт: <b>{winrate:.1f}%</b>\n\n"
-            f"💰 <b>Симуляция ($1 на сделку):</b>\n"
-            f"Чистый результат: <b>${balance_usd:.4f}</b>\n\n"
+            f"💰 Симуляция ($1): <b>{balance_pct*100:+.2f}%</b>\n\n"
             f"<i>Последние 5 сделок:</i>\n"
         )
 
@@ -466,11 +501,12 @@ async def history_handler(message: types.Message):
             icon = "✅" if "WIN" in t[5] else "❌"
             cp = t[3] if t[3] is not None else t[2]
             conf = t[6] if t[6] else 0
-            text += f"{icon} #{t[0]} ({conf}%) | ${t[2]:.2f} -> ${cp:.2f}\n"
+            tick = t[7] if t[7] else "GC=F"
+            text += f"{icon} {tick} #{t[0]} ({conf}%) | {t[2]:.3f}→{cp:.3f}\n"
 
         await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
     except Exception as e:
-        await message.answer(f"⚠️ Ошибка истории: {e}", reply_markup=get_main_keyboard())
+        await message.answer(f"⚠️ Ошибка: {e}", reply_markup=get_main_keyboard())
 
 async def main():
     init_db()
