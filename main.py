@@ -7,6 +7,7 @@ from openai import OpenAI
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 # ВАШИ КЛЮЧИ
 BOT_TOKEN = "8990920545:AAFbVp_UNRg3a-_9xIFEaLdTc5J4Oyru0NM"
@@ -23,25 +24,21 @@ USER_CHAT_ID = None
 def init_db():
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
-    # Таблица истории сигналов
     c.execute('''CREATE TABLE IF NOT EXISTS history
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, price REAL, rsi REAL, forecast TEXT, 
-                  target_price REAL, stop_loss REAL, user_confirmed INTEGER, result TEXT)''')
-    # Таблица для самообучения (веса факторов)
+                  target_price REAL, stop_loss REAL, result TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS weights
                  (factor TEXT PRIMARY KEY, weight REAL)''')
-    # Инициализация начальных весов
     for factor in ['RSI', 'TREND', 'AI_NEWS']:
         c.execute("INSERT OR IGNORE INTO weights (factor, weight) VALUES (?, ?)", (factor, 1.0))
     conn.commit()
     conn.close()
 
-# --- ПОЛУЧЕНИЕ ТОЧНОЙ ЦЕНЫ (REAL-TIME) ---
+# --- ПОЛУЧЕНИЕ ТОЧНОЙ ЦЕНЫ ---
 def get_live_price_and_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=1m"
-    
     try:
         response = requests.get(url, headers=headers, timeout=10)
         data = response.json()
@@ -55,14 +52,13 @@ def get_live_price_and_data():
             'Low': quotes['low'],
             'Close': quotes['close']
         }, index=pd.to_datetime(timestamps, unit='s'))
-        
         df = df.dropna()
         return df
     except Exception as e:
         print(f"Ошибка получения цены: {e}")
         return pd.DataFrame()
 
-# --- УМНЫЙ АНАЛИЗ С УЧЕТОМ САМООБУЧЕНИЯ ---
+# --- УМНЫЙ АНАЛИЗ ---
 def get_analysis():
     try:
         df = get_live_price_and_data()
@@ -114,7 +110,6 @@ def get_analysis():
         
         if news != "Новостей нет.":
             response = ai_client.chat.completions.create(
-                # ИСПРАВЛЕНА МОДЕЛЬ ЗДЕСЬ
                 model="meta-llama/llama-3.1-8b-instruct",
                 messages=[{"role": "user", "content": f"Оцени новость для золота от -5 до +5. '{news}'. Ответь только цифрой."}],
                 temperature=0.1, max_tokens=5
@@ -162,20 +157,19 @@ async def send_signal(chat_id, is_auto=False):
         conn.commit()
         conn.close()
 
-        text = (f"📊 **Анализ XAUUSD** {'(АВТО)' if is_auto else ''} #{signal_id}\n\n"
-                f"Текущая цена: **${price:.2f}** | RSI: {rsi:.1f}\n"
-                f"🎯 TP: **${target:.2f}** | 🛑 SL: **${sl:.2f}**\n\n"
-                f"🧠 **Факторы:**\n{reasons}\n\n"
-                f"🛡️ **Ликвидность:**\nПоддержка: ${support:.2f} | Сопротивление: ${resistance:.2f}\n\n"
-                f"📰 **Новость:**\n_{news}_\n\n"
-                f"Прогноз: **{forecast}**\n"
-                f"⏳ _Сделка активна (следим за TP/SL)_")
+        safe_news = news.replace("_", " ").replace("*", " ").replace("[", " ").replace("`", " ")
 
-        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="✅ Подтверждаю", callback_data=f"confirm_{signal_id}"),
-             types.InlineKeyboardButton(text="❌ Отклоняю", callback_data=f"reject_{signal_id}")]
-        ])
-        await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="Markdown")
+        text = (f"📊 <b>Анализ XAUUSD</b> {'(АВТО)' if is_auto else ''} #{signal_id}\n\n"
+                f"Текущая цена: <b>${price:.2f}</b> | RSI: {rsi:.1f}\n"
+                f"🎯 TP: <b>${target:.2f}</b> | 🛑 SL: <b>${sl:.2f}</b>\n\n"
+                f"🧠 <b>Факторы:</b>\n{reasons}\n\n"
+                f"🛡️ <b>Ликвидность:</b>\nПоддержка: ${support:.2f} | Сопротивление: ${resistance:.2f}\n\n"
+                f"📰 <b>Новость:</b>\n<i>{safe_news}</i>\n\n"
+                f"Прогноз: <b>{forecast}</b>\n"
+                f"⏳ <i>Сделка активна (следим за TP/SL)</i>")
+
+        # Убрали инлайн-кнопки, отправляем просто текст
+        await bot.send_message(chat_id, text, parse_mode="HTML")
     except Exception as e:
         print(f"Ошибка отправки: {e}")
 
@@ -234,60 +228,65 @@ async def background_worker():
                             conn.commit()
 
                             if USER_CHAT_ID:
-                                await bot.send_message(USER_CHAT_ID, f"🏁 **Сделка #{sig_id} ЗАКРЫТА**\nРезультат: **{result_text}**\n\n🧠 *Бот проанализировал ошибку и скорректировал веса.*")
+                                await bot.send_message(USER_CHAT_ID, f"🏁 <b>Сделка #{sig_id} ЗАКРЫТА</b>\nРезультат: <b>{result_text}</b>\n\n🧠 <i>Бот проанализировал ошибку и скорректировал веса.</i>", parse_mode="HTML")
             conn.close()
         except Exception as e:
             print(f"Ошибка фона: {e}")
         await asyncio.sleep(30)
 
+# --- СОЗДАНИЕ МЕНЮ ---
+def get_main_keyboard():
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📈 Прогноз (Signal)")],
+            [KeyboardButton(text="🚀 Включить Авто"), KeyboardButton(text="🛑 Выключить Авто")],
+            [KeyboardButton(text="🧠 Мозг бота (Веса)")]
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие на панели ниже..."
+    )
+    return keyboard
+
 @dp.message(CommandStart())
 async def start_command(message: types.Message):
     global USER_CHAT_ID
     USER_CHAT_ID = message.chat.id
-    await message.answer(f"Привет! Бот v5.0 (Самообучающийся) готов.\n/signal - точный прогноз\n/autostart - авто-режим\n/history - история\n/weights - показать текущие веса факторов")
+    await message.answer(
+        "Привет! Я твой самообучающийся ИИ-помощник по золоту (XAUUSD).\n\n"
+        "Теперь кнопки всегда под рукой. Просто нажимай на них!", 
+        reply_markup=get_main_keyboard()
+    )
 
-@dp.message(Command("autostart"))
-async def autostart_command(message: types.Message):
+# --- ОБРАБОТЧИКИ КНОПОК И КОМАНД ---
+@dp.message(lambda message: message.text == "📈 Прогноз (Signal)" or message.text == "/signal")
+async def signal_handler(message: types.Message):
+    await send_signal(message.chat.id, is_auto=False)
+
+@dp.message(lambda message: message.text == "🚀 Включить Авто" or message.text == "/autostart")
+async def autostart_handler(message: types.Message):
     global AUTO_SIGNAL_ENABLED, USER_CHAT_ID
     AUTO_SIGNAL_ENABLED = True
     USER_CHAT_ID = message.chat.id
-    await message.answer("🚀 Авто-режим ВКЛЮЧЕН. Бот будет присылать сигналы каждые 5 минут и учиться на ошибках.")
+    await message.answer("🚀 Авто-режим ВКЛЮЧЕН. Бот будет присылать сигналы каждые 5 минут и учиться на ошибках.", reply_markup=get_main_keyboard())
 
-@dp.message(Command("autostop"))
-async def autostop_command(message: types.Message):
+@dp.message(lambda message: message.text == "🛑 Выключить Авто" or message.text == "/autostop")
+async def autostop_handler(message: types.Message):
     global AUTO_SIGNAL_ENABLED
     AUTO_SIGNAL_ENABLED = False
-    await message.answer("🛑 Авто-режим ВЫКЛЮЧЕН.")
+    await message.answer("🛑 Авто-режим ВЫКЛЮЧЕН.", reply_markup=get_main_keyboard())
 
-@dp.message(Command("signal"))
-async def signal_command(message: types.Message):
-    await send_signal(message.chat.id, is_auto=False)
-
-@dp.message(Command("weights"))
-async def weights_command(message: types.Message):
+@dp.message(lambda message: message.text == "🧠 Мозг бота (Веса)" or message.text == "/weights")
+async def weights_handler(message: types.Message):
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
     c.execute("SELECT factor, weight FROM weights")
     weights = c.fetchall()
     conn.close()
-    text = "🧠 **Текущие веса факторов (мозг бота):**\n\n"
+    text = "🧠 <b>Текущие веса факторов (мозг бота):</b>\n\n"
     for factor, weight in weights:
-        text += f"• {factor}: **{weight:.1f}**\n"
-    text += "\n_Чем выше вес, тем больше бот доверяет этому фактору._"
-    await message.answer(text, parse_mode="Markdown")
-
-@dp.callback_query(lambda c: c.data.startswith("confirm_") or c.data.startswith("reject_"))
-async def process_callback(callback_query: types.CallbackQuery):
-    action, sig_id = callback_query.data.split("_")
-    confirmed = 1 if action == "confirm" else 0
-    conn = sqlite3.connect('signals.db')
-    c = conn.cursor()
-    c.execute("UPDATE history SET user_confirmed = ? WHERE id = ?", (confirmed, sig_id))
-    conn.commit()
-    conn.close()
-    await callback_query.message.answer("✅ Принято!" if confirmed else "❌ Отклонено.")
-    await callback_query.message.edit_reply_markup(reply_markup=None)
-    await callback_query.answer()
+        text += f"• {factor}: <b>{weight:.1f}</b>\n"
+    text += "\n<i>Чем выше вес, тем больше бот доверяет этому фактору.</i>"
+    await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
 async def main():
     init_db()
