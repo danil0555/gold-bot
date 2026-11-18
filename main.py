@@ -15,29 +15,23 @@ dp = Dispatcher()
 AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
 
-# --- БАЗА ДАННЫХ (ОБНОВЛЕННАЯ) ---
+# --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
-    # Создаем таблицу с новыми колонками
     c.execute('''CREATE TABLE IF NOT EXISTS history
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, price REAL, rsi REAL, sma50 REAL, sma200 REAL, 
                   forecast TEXT, target_price REAL, user_confirmed INTEGER,
                   check_time TEXT, result TEXT)''')
-    
-    # Проверяем, есть ли колонка check_time. Если база старая - добавляем её.
     try:
         c.execute("ALTER TABLE history ADD COLUMN check_time TEXT")
     except sqlite3.OperationalError:
-        pass # Колонка уже существует
-        
-    # Проверяем, есть ли колонка result. Если базы старая - добавляем её.
+        pass
     try:
         c.execute("ALTER TABLE history ADD COLUMN result TEXT")
     except sqlite3.OperationalError:
-        pass # Колонка уже существует
-        
+        pass
     conn.commit()
     conn.close()
 
@@ -71,6 +65,7 @@ def get_analysis():
         except:
             df_dxy = pd.DataFrame()
 
+        # Считаем индикаторы для 15м
         delta = df_15m['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -82,15 +77,21 @@ def get_analysis():
                                   (df_15m['Low'] - df_15m['Close'].shift()).abs()], axis=1).max(axis=1)
         df_15m['ATR'] = df_15m['TR'].rolling(window=14).mean()
         
+        # ВАЖНО: Добавили расчет SMA50 для 15м графика
+        df_15m['SMA50'] = df_15m['Close'].rolling(window=50).mean()
+        
         current_price = float(df_15m.iloc[-1]['Close'])
         current_rsi = float(df_15m.iloc[-1]['RSI'])
         current_atr = float(df_15m.iloc[-1]['ATR']) if not pd.isna(df_15m.iloc[-1]['ATR']) else 3.0
+        current_sma50_15m = float(df_15m.iloc[-1]['SMA50']) if not pd.isna(df_15m.iloc[-1]['SMA50']) else current_price
         
+        # Тренд 1H
         trend_1h = "NEUTRAL"
         if not df_1h.empty and len(df_1h) > 50:
             df_1h['SMA50'] = df_1h['Close'].rolling(window=50).mean()
             trend_1h = "BULL" if df_1h.iloc[-1]['Close'] > df_1h.iloc[-1]['SMA50'] else "BEAR"
         
+        # Тренд доллара
         trend_dxy = "NEUTRAL"
         if not df_dxy.empty and len(df_dxy) > 50:
             df_dxy['SMA50'] = df_dxy['Close'].rolling(window=50).mean()
@@ -128,14 +129,16 @@ def get_analysis():
         elif any(w in news_lower for w in ["hike", "strong dollar", "growth", "surge"]):
             score -= 1
             reasons.append("Новости↓ (-1)")
-            if score > 0:
+
+        # Итоговая логика без НЕЙТРАЛЬНО
+        if score > 0:
             forecast = "🟢 ВВЕРХ"
             target = current_price + (1.5 * current_atr)
         elif score < 0:
             forecast = "🔴 ВНИЗ"
             target = current_price - (1.5 * current_atr)
         else:
-            # Если баллы равны 0, смотрим на 1-часовой тренд для принятия решения
+            # Если баллы равны 0, смотрим на 1-часовой тренд
             if trend_1h == "BULL":
                 forecast = "🟢 ВВЕРХ (по тренду)"
                 target = current_price + (1.5 * current_atr)
@@ -143,15 +146,13 @@ def get_analysis():
                 forecast = "🔴 ВНИЗ (по тренду)"
                 target = current_price - (1.5 * current_atr)
             else:
-                # Если даже тренд не определился, смотрим на 15-минутный тренд (цена выше SMA50)
-                if current_price > df_15m['SMA50'].iloc[-1]:
+                # Если 1Ч не определился, смотрим на 15-минутный SMA50
+                if current_price > current_sma50_15m:
                     forecast = "🟢 ВВЕРХ (слабый)"
                     target = current_price + (1.5 * current_atr)
                 else:
                     forecast = "🔴 ВНИЗ (слабый)"
                     target = current_price - (1.5 * current_atr)
-
-        
 
         recent_data = df_15m.tail(48 * 4) 
         support = float(recent_data['Low'].min())
