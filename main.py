@@ -5,6 +5,7 @@ import feedparser
 import requests
 from openai import OpenAI
 from datetime import datetime
+import pytz
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
@@ -33,15 +34,17 @@ def init_db():
         pass
     c.execute('''CREATE TABLE IF NOT EXISTS weights
                  (factor TEXT PRIMARY KEY, weight REAL)''')
-    for factor in ['RSI', 'TREND', 'AI_NEWS', 'MACD', 'DIVERGENCE']:
+    # Добавили новые факторы для обучения
+    factors = ['RSI', 'TREND', 'AI_NEWS', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3']
+    for factor in factors:
         c.execute("INSERT OR IGNORE INTO weights (factor, weight) VALUES (?, ?)", (factor, 1.0))
     conn.commit()
     conn.close()
 
 def get_live_price_and_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
-    # Берем больше данных (range=5d), чтобы EMA 200 успела рассчитаться
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=15m"
+    # Берем 1-часовые свечи за 5 дней для поиска структур (SMC) и EMA 200
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=1h"
     try:
         response = requests.get(url, headers=headers, timeout=10)
         data = response.json()
@@ -63,43 +66,88 @@ def get_live_price_and_data():
         return pd.DataFrame()
 
 def detect_rsi_divergence(df):
-    # Ищем расхождения за последние 20 свечей
     if len(df) < 20: return 0
     recent = df.tail(20)
-    # Ищем локальные минимумы и максимумы
-    local_min_idx = recent['Low'].idxmin()
-    local_max_idx = recent['High'].idxmax()
-    
-    # Упрощенная логика для бычьего расхождения (цена падает, RSI растет)
     if recent['Low'].iloc[-1] < recent['Low'].iloc[-5] and recent['RSI'].iloc[-1] > recent['RSI'].iloc[-5]:
-        return 1 # Бычье расхождение (сигнал вверх)
-    # Медвежье расхождение (цена растет, RSI падает)
+        return 1
     elif recent['High'].iloc[-1] > recent['High'].iloc[-5] and recent['RSI'].iloc[-1] < recent['RSI'].iloc[-5]:
-        return -1 # Медвежье расхождение (сигнал вниз)
+        return -1
     return 0
+
+# --- SMC: Поиск снятия ликвидности (Liquidity Sweep) ---
+def check_liquidity_sweep(df):
+    if len(df) < 10: return 0
+    last_candle = df.iloc[-1]
+    prev_candles = df.iloc[-10:-1]
+    
+    local_low = prev_candles['Low'].min()
+    local_high = prev_candles['High'].max()
+    
+    # Бычий Sweep (сняли стопы снизу и ушли вверх)
+    if last_candle['Low'] < local_low and last_candle['Close'] > local_low:
+        return 1
+    # Медвежий Sweep (сняли стопы сверху и упали)
+    elif last_candle['High'] > local_high and last_candle['Close'] < local_high:
+        return -1
+    return 0
+
+# --- SMC: Поиск Breaker Block (возврат к пробитой зоне) ---
+def check_breaker_block(df):
+    if len(df) < 5: return 0
+    # Упрощенно: ищем резкий импульс (свечу) и проверяем, вернулась ли цена в ее тело
+    last_candle = df.iloc[-1]
+    for i in range(2, 6):
+        candle = df.iloc[-i]
+        body = abs(candle['Close'] - candle['Open'])
+        atr = df['ATR'].iloc[-i] if 'ATR' in df else 1.0
+        
+        # Если это был бычий импульс (сильная зеленая свеча)
+        if candle['Close'] > candle['Open'] and body > atr * 1.5:
+            if last_candle['Low'] <= candle['Close'] and last_candle['Close'] > candle['Open']:
+                return 1 # Возврат к блоку для покупки
+        # Если это был медвежий импульс (сильная красная свеча)
+        elif candle['Close'] < candle['Open'] and body > atr * 1.5:
+            if last_candle['High'] >= candle['Close'] and last_candle['Close'] < candle['Open']:
+                return -1 # Возврат к блоку для продажи
+    return 0
+
+# --- ICT Power of 3 (Время сессий) ---
+def get_ict_session_score():
+    # Определяем время по Нью-Йорку
+    ny_tz = pytz.timezone('America/New_York')
+    now_ny = datetime.now(ny_tz)
+    hour = now_ny.hour
+    
+    # Азиатская сессия (накопление) - 20:00 до 02:00
+    if 20 <= hour or hour < 2:
+        return 0, "Азия (Накопление)"
+    # Лондон (Манипуляция) - 02:00 до 08:00
+    elif 2 <= hour < 8:
+        return -0.5, "Лондон (Манипуляция)"
+    # Нью-Йорк (Распределение) - 08:00 до 17:00
+    elif 8 <= hour < 17:
+        return 1.0, "Нью-Йорк (Импульс)"
+    else:
+        return 0, "Закрытие"
 
 def get_analysis():
     try:
         df = get_live_price_and_data()
         if df.empty: return None
 
-        # 1. Считаем RSI
+        # Индикаторы
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         df['RSI'] = 100 - (100 / (1 + (gain / loss)))
-
-        # 2. Считаем EMA 200 (глобальный тренд)
+        df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
         df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
-
-        # 3. Считаем MACD (12, 26, 9)
+        
         exp12 = df['Close'].ewm(span=12, adjust=False).mean()
         exp26 = df['Close'].ewm(span=26, adjust=False).mean()
         df['MACD'] = exp12 - exp26
         df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
-
-        # 4. Считаем ATR для целей
+        
         df['TR'] = pd.concat([df['High'] - df['Low'],
                               (df['High'] - df['Close'].shift()).abs(),
                               (df['Low'] - df['Close'].shift()).abs()], axis=1).max(axis=1)
@@ -109,12 +157,16 @@ def get_analysis():
         current_rsi = float(df.iloc[-1]['RSI'])
         current_atr = float(df.iloc[-1]['ATR'])
         current_ema200 = float(df.iloc[-1]['EMA200'])
+        current_ema50 = float(df.iloc[-1]['EMA50'])
         current_macd = float(df.iloc[-1]['MACD'])
         current_macd_signal = float(df.iloc[-1]['MACD_Signal'])
         prev_macd = float(df.iloc[-2]['MACD'])
         prev_macd_signal = float(df.iloc[-2]['MACD_Signal'])
         
         divergence = detect_rsi_divergence(df)
+        sweep_signal = check_liquidity_sweep(df)
+        breaker_signal = check_breaker_block(df)
+        ict_score, ict_name = get_ict_session_score()
 
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
@@ -123,26 +175,31 @@ def get_analysis():
         conn.close()
 
         score = 0.0
-        reasons = []
+        reasons = [f"Сессия: {ict_name}"]
 
-        # --- ЛОГИКА ТРЕНДА (EMA 200) ---
+        # 1. Глобальный тренд (EMA 200)
         if current_price > current_ema200:
             score += 1 * weights.get('TREND', 1.0)
-            reasons.append(f"Тренд↑ (EMA200) (+{1 * weights['TREND']:.1f})")
+            reasons.append(f"Тренд↑ (+{1 * weights['TREND']:.1f})")
         else:
             score -= 1 * weights.get('TREND', 1.0)
-            reasons.append(f"Тренд↓ (EMA200) (-{1 * weights['TREND']:.1f})")
+            reasons.append(f"Тренд↓ (-{1 * weights['TREND']:.1f})")
 
-        # --- ЛОГИКА MACD ---
-        # Пересечение MACD и сигнальной линии
+        # 2. Трендовый канал EMA 50
+        if current_price > current_ema50:
+            score += 0.5 * weights.get('TREND', 1.0)
+        else:
+            score -= 0.5 * weights.get('TREND', 1.0)
+
+        # 3. MACD
         if prev_macd < prev_macd_signal and current_macd > current_macd_signal:
             score += 1.5 * weights.get('MACD', 1.0)
-            reasons.append(f"MACD Пересечение↑ (+{1.5 * weights['MACD']:.1f})")
+            reasons.append(f"MACD↑ (+{1.5 * weights['MACD']:.1f})")
         elif prev_macd > prev_macd_signal and current_macd < current_macd_signal:
             score -= 1.5 * weights.get('MACD', 1.0)
-            reasons.append(f"MACD Пересечение↓ (-{1.5 * weights['MACD']:.1f})")
+            reasons.append(f"MACD↓ (-{1.5 * weights['MACD']:.1f})")
 
-        # --- ЛОГИКА RSI ---
+        # 4. RSI
         if current_rsi < 30:
             score += 2 * weights.get('RSI', 1.0)
             reasons.append(f"RSI<30 (+{2 * weights['RSI']:.1f})")
@@ -150,15 +207,34 @@ def get_analysis():
             score -= 2 * weights.get('RSI', 1.0)
             reasons.append(f"RSI>70 (-{2 * weights['RSI']:.1f})")
 
-        # --- ЛОГИКА ДИВЕРГЕНЦИИ ---
+        # 5. Дивергенция
         if divergence == 1:
             score += 2.5 * weights.get('DIVERGENCE', 1.0)
-            reasons.append(f"Бычья Дивергенция (+{2.5 * weights['DIVERGENCE']:.1f})")
+            reasons.append(f"Дивергенция↑ (+{2.5 * weights['DIVERGENCE']:.1f})")
         elif divergence == -1:
             score -= 2.5 * weights.get('DIVERGENCE', 1.0)
-            reasons.append(f"Медвежья Дивергенция (-{2.5 * weights['DIVERGENCE']:.1f})")
+            reasons.append(f"Дивергенция↓ (-{2.5 * weights['DIVERGENCE']:.1f})")
 
-        # --- НОВОСТИ ---
+        # 6. SMC Liquidity Sweep (Снятие ликвидности)
+        if sweep_signal == 1:
+            score += 3.0 * weights.get('SMC_SWEEP', 1.0)
+            reasons.append(f"SMC Sweep↑ (+{3.0 * weights['SMC_SWEEP']:.1f})")
+        elif sweep_signal == -1:
+            score -= 3.0 * weights.get('SMC_SWEEP', 1.0)
+            reasons.append(f"SMC Sweep↓ (-{3.0 * weights['SMC_SWEEP']:.1f})")
+
+        # 7. SMC Breaker Block
+        if breaker_signal == 1:
+            score += 2.0 * weights.get('BREAKER_BLOCK', 1.0)
+            reasons.append(f"Breaker Block↑ (+{2.0 * weights['BREAKER_BLOCK']:.1f})")
+        elif breaker_signal == -1:
+            score -= 2.0 * weights.get('BREAKER_BLOCK', 1.0)
+            reasons.append(f"Breaker Block↓ (-{2.0 * weights['BREAKER_BLOCK']:.1f})")
+
+        # 8. ICT Power of 3 (Время сессии)
+        score += ict_score * weights.get('ICT_P3', 1.0)
+
+        # 9. Новости (ИИ)
         news = "Новостей нет." 
         try:
             feed = feedparser.parse("https://finance.yahoo.com/rss/2.0/headline?s=GC=F")
@@ -180,10 +256,9 @@ def get_analysis():
             ai_score = int(match.group()) if match else 0
             if ai_score != 0:
                 score += ai_score * weights.get('AI_NEWS', 1.0)
-                reasons.append(f"ИИ Новости ({ai_score * weights['AI_NEWS']:+.1f})")
-        else:
-            reasons.append("Новости нейтральны (0)")
+                reasons.append(f"ИИ ({ai_score * weights['AI_NEWS']:+.1f})")
 
+        # Итоговый прогноз
         if score >= 0:
             forecast = "🟢 ВВЕРХ"
             target = current_price + (1.5 * current_atr)
@@ -193,8 +268,8 @@ def get_analysis():
             target = current_price - (1.5 * current_atr)
             stop_loss = current_price + (1.0 * current_atr)
 
-        support = float(df['Low'].tail(60).min())
-        resistance = float(df['High'].tail(60).max())
+        support = float(df['Low'].tail(24).min())
+        resistance = float(df['High'].tail(24).max())
 
         return current_price, current_rsi, forecast, target, stop_loss, support, resistance, " | ".join(reasons), news
     except Exception as e:
@@ -283,12 +358,13 @@ async def background_worker():
                             c.execute("UPDATE history SET result = ?, close_price = ? WHERE id = ?", (result_text, close_price, sig_id))
                             conn.commit()
                             
-                            # САМООБУЧЕНИЕ
+                            # САМООБУЧЕНИЕ (все факторы)
+                            all_factors = ['TREND', 'RSI', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3']
                             if "LOSS" in result_text:
-                                for factor in ['TREND', 'RSI', 'MACD', 'DIVERGENCE']:
+                                for factor in all_factors:
                                     c.execute("UPDATE weights SET weight = MAX(0.2, weight - 0.1) WHERE factor = ?", (factor,))
                             else:
-                                for factor in ['TREND', 'RSI', 'MACD', 'DIVERGENCE']:
+                                for factor in all_factors:
                                     c.execute("UPDATE weights SET weight = MIN(2.0, weight + 0.1) WHERE factor = ?", (factor,))
                             conn.commit()
 
@@ -320,7 +396,7 @@ def get_main_keyboard():
 async def start_command(message: types.Message):
     global USER_CHAT_ID
     USER_CHAT_ID = message.chat.id
-    await message.answer("Привет! Бот готов к работе. Используй меню ниже для управления.", reply_markup=get_main_keyboard())
+    await message.answer("Привет! Бот (SMC + ICT) готов к работе. Используй меню ниже.", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "Прогноз" in message.text or message.text == "/signal")
 async def signal_handler(message: types.Message):
