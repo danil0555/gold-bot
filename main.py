@@ -65,7 +65,7 @@ def get_biquote_data(bq_symbol, interval="1h", limit=200):
         df = pd.DataFrame(env["bars"])
         df["openTime"] = pd.to_datetime(df["openTime"])
         df = df.set_index("openTime").sort_index()
-        df.index = df.index.tz_localize(None) # Убираем часовой пояс
+        df.index = df.index.tz_localize(None)
         df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
         return df
     except Exception as e:
@@ -293,7 +293,10 @@ async def send_signal(chat_id, ticker, is_auto=False):
         asset_name = ASSETS.get(ticker, {}).get("name", ticker)
         
         if is_auto:
-            if confidence < 70: return
+            # ДЛЯ АВТО-РЕЖИМА: Отправляем только если уверенность >= 75%
+            if confidence < 75: 
+                print(f"Авто: {asset_name} уверенность {confidence}% < 75%, пропускаем.")
+                return
             else:
                 status_text = "🎯 <b>СНАЙПЕР (Высокая уверенность)</b>" if confidence >= 85 else "⚡️ <b>Сильный сигнал</b>"
                 await bot.send_message(chat_id, status_text)
@@ -333,7 +336,7 @@ async def background_worker():
             if AUTO_SIGNAL_ENABLED and USER_CHAT_ID:
                 for ticker in ASSETS.keys():
                     await send_signal(USER_CHAT_ID, ticker, is_auto=True)
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(3) # Пауза, чтобы не спамить API
                 await asyncio.sleep(5 * 60) 
             else:
                 await asyncio.sleep(10)
@@ -384,7 +387,6 @@ async def background_worker():
                         
                         all_factors = ['TREND', 'RSI', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3']
                         if "LOSS" in result_text:
-                            # УМНОЕ САМООБУЧЕНИЕ (мягкое падение, но не ниже 0.8)
                             for factor in all_factors:
                                 c.execute("UPDATE weights SET weight = MAX(0.8, weight - 0.05) WHERE factor = ?", (factor,))
                         else:
@@ -495,7 +497,7 @@ async def autostart_handler(message: types.Message, state: FSMContext):
     AUTO_SIGNAL_ENABLED = True
     USER_CHAT_ID = message.chat.id
     await state.clear()
-    await message.answer("🚀 Авто-режим ВКЛЮЧЕН.", reply_markup=get_main_keyboard())
+    await message.answer("🚀 Авто-режим ВКЛЮЧЕН.\nБот будет сканировать 3 актива каждые 5 минут и присылать сигналы только если уверенность от 75%.", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "Выкл Авто" in message.text or message.text == "/autostop")
 async def autostop_handler(message: types.Message, state: FSMContext):
@@ -518,7 +520,6 @@ async def weights_handler(message: types.Message, state: FSMContext):
     text += "\n<i>Чтобы сбросить веса, напишите /reset_weights</i>"
     await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
-# НОВАЯ КОМАНДА СБРОСА ВЕСОВ
 @dp.message(lambda message: "reset_weights" in message.text or message.text == "/reset_weights")
 async def reset_weights_handler(message: types.Message, state: FSMContext):
     await state.clear()
