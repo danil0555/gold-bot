@@ -10,8 +10,8 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
 
 # ВСТАВЬТЕ СВОИ КЛЮЧИ СЮДА МЕЖДУ КАВЫЧКАМИ
-BOT_TOKEN = "ТУТ_ВАШ_ТОКЕН_ОТ_BOTFATHER"
-OPENROUTER_KEY = "ТУТ_ВАШ_КЛЮЧ_sk-or-v1-..."
+BOT_TOKEN = "8990920545:AAFbVp_UNRg3a-_9xIFEaLdTc5J4Oyru0NM"
+OPENROUTER_KEY = "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"
 
 # Настройка ИИ
 ai_client = OpenAI(
