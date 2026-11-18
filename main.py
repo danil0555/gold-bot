@@ -9,6 +9,9 @@ import pytz
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
 # ВАШИ КЛЮЧИ
 BOT_TOKEN = "8990920545:AAFbVp_UNRg3a-_9xIFEaLdTc5J4Oyru0NM"
@@ -16,15 +19,20 @@ OPENROUTER_KEY = "sk-or-v1-96a169e554f4fc3aeaa51c8eb36ae744ceb96fca42ddf99a4e3da
 
 ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 
-# Глобальные настройки
+# Глобальные настройки (в реальном проекте лучше хранить в БД, но для одного пользователя сойдет)
 AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
 CURRENT_TICKER = "GC=F"
 CURRENT_NAME = "Золото (XAUUSD)"
-USER_BALANCE = 1000.0  # Депозит по умолчанию
-USER_RISK_PCT = 1.0    # Риск на сделку (1%)
+USER_BALANCE = 1000.0
+USER_RISK_PCT = 1.0
+
+# Машина состояний для настроек
+class UserSettings(StatesGroup):
+    waiting_for_balance = State()
+    waiting_for_risk = State()
 
 ASSETS = {
     "GC=F": {"name": "Золото (XAUUSD)", "bq": "XAUUSD"},
@@ -32,7 +40,6 @@ ASSETS = {
     "AUDJPY=X": {"name": "Австрал/Йена (AUD/JPY)", "bq": "AUDJPY"}
 }
 
-# --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
@@ -41,7 +48,6 @@ def init_db():
                   timestamp TEXT, price REAL, rsi REAL, forecast TEXT, 
                   target_price REAL, stop_loss REAL, close_price REAL, result TEXT,
                   confidence INTEGER, ticker TEXT, lot_size REAL)''')
-    # Добавляем колонки, если их нет (для старых баз)
     for col in ["close_price REAL", "confidence INTEGER", "ticker TEXT", "lot_size REAL"]:
         try: c.execute(f"ALTER TABLE history ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
@@ -54,29 +60,22 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- ПОЛУЧЕНИЕ ДАННЫХ ЧЕРЕЗ BIQUOTE ---
 def get_biquote_data(bq_symbol, interval="1h", limit=200):
     try:
-        # Получаем OHLC свечи
         url = f"https://biquote.io/api/{bq_symbol}/ohlc"
         params = {"interval": interval, "limit": limit}
         resp = requests.get(url, params=params, timeout=10)
         env = resp.json()
-        
-        if "bars" not in env or not env["bars"]:
-            return pd.DataFrame()
-            
+        if "bars" not in env or not env["bars"]: return pd.DataFrame()
         df = pd.DataFrame(env["bars"])
         df["openTime"] = pd.to_datetime(df["openTime"])
         df = df.set_index("openTime").sort_index()
-        # Переименовываем колонки для совместимости
         df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
         return df
     except Exception as e:
         print(f"Ошибка biquote {bq_symbol}: {e}")
         return pd.DataFrame()
 
-# --- АНАЛИЗ ---
 def detect_rsi_divergence(df):
     if len(df) < 20: return 0
     recent = df.tail(20)
@@ -117,34 +116,28 @@ def get_ict_session_score():
     else: return 0, "Закрытие"
 
 def calculate_lot_size(balance, risk_pct, entry, stop, ticker):
-    # Упрощенный расчет лота для XAUUSD и JPY пар
     risk_amount = balance * (risk_pct / 100)
     distance = abs(entry - stop)
     if distance == 0: return 0.01
-    
     if "XAU" in ticker:
-        pip_value = 1.0 # 1 лот = $1 за 0.01 движения (приблизительно)
+        pip_value = 1.0
         pip_dist = distance / 0.01
         lot = risk_amount / (pip_dist * pip_value)
-    else: # JPY пары
-        pip_value = 0.67 # Приблизительно для USDJPY
+    else:
+        pip_value = 0.67
         pip_dist = distance / 0.01
         lot = risk_amount / (pip_dist * pip_value)
-    
-    return round(max(0.01, min(lot, 10.0)), 2) # Ограничиваем лот
+    return round(max(0.01, min(lot, 10.0)), 2)
 
 def get_analysis(ticker):
     try:
         asset_info = ASSETS.get(ticker, ASSETS["GC=F"])
         bq_sym = asset_info["bq"]
         
-        # 1. Получаем данные 1H и 4H
         df_1h = get_biquote_data(bq_sym, "1h", 200)
         df_4h = get_biquote_data(bq_sym, "4h", 100)
-        
         if df_1h.empty: return None
 
-        # 2. Индикаторы на 1H
         delta = df_1h['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -177,14 +170,11 @@ def get_analysis(ticker):
         breaker_signal = check_breaker_block(df_1h)
         ict_score, ict_name = get_ict_session_score()
 
-        # 3. Глобальный тренд на 4H
         trend_4h = 0
         if not df_4h.empty:
             df_4h['EMA50'] = df_4h['Close'].ewm(span=50, adjust=False).mean()
-            if df_4h['Close'].iloc[-1] > df_4h['EMA50'].iloc[-1]:
-                trend_4h = 1
-            else:
-                trend_4h = -1
+            if df_4h['Close'].iloc[-1] > df_4h['EMA50'].iloc[-1]: trend_4h = 1
+            else: trend_4h = -1
 
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
@@ -196,70 +186,49 @@ def get_analysis(ticker):
         max_possible_score = 0.0
         reasons = [f"Сессия: {ict_name}", f"4H Тренд: {'↑' if trend_4h > 0 else '↓' if trend_4h < 0 else 'Нет'}"]
 
-        # EMA 200
         max_possible_score += 1 * weights.get('TREND', 1.0)
         if current_price > current_ema200:
-            score += 1 * weights.get('TREND', 1.0)
-            reasons.append(f"Тренд↑ (+{1 * weights['TREND']:.1f})")
+            score += 1 * weights.get('TREND', 1.0); reasons.append(f"Тренд↑ (+{1 * weights['TREND']:.1f})")
         else:
-            score -= 1 * weights.get('TREND', 1.0)
-            reasons.append(f"Тренд↓ (-{1 * weights['TREND']:.1f})")
+            score -= 1 * weights.get('TREND', 1.0); reasons.append(f"Тренд↓ (-{1 * weights['TREND']:.1f})")
 
-        # EMA 50
         max_possible_score += 0.5 * weights.get('TREND', 1.0)
         if current_price > current_ema50: score += 0.5 * weights.get('TREND', 1.0)
         else: score -= 0.5 * weights.get('TREND', 1.0)
 
-        # MACD
         max_possible_score += 1.5 * weights.get('MACD', 1.0)
         if prev_macd < prev_macd_signal and current_macd > current_macd_signal:
-            score += 1.5 * weights.get('MACD', 1.0)
-            reasons.append(f"MACD↑ (+{1.5 * weights['MACD']:.1f})")
+            score += 1.5 * weights.get('MACD', 1.0); reasons.append(f"MACD↑ (+{1.5 * weights['MACD']:.1f})")
         elif prev_macd > prev_macd_signal and current_macd < current_macd_signal:
-            score -= 1.5 * weights.get('MACD', 1.0)
-            reasons.append(f"MACD↓ (-{1.5 * weights['MACD']:.1f})")
+            score -= 1.5 * weights.get('MACD', 1.0); reasons.append(f"MACD↓ (-{1.5 * weights['MACD']:.1f})")
 
-        # RSI
         max_possible_score += 2 * weights.get('RSI', 1.0)
         if current_rsi < 30:
-            score += 2 * weights.get('RSI', 1.0)
-            reasons.append(f"RSI<30 (+{2 * weights['RSI']:.1f})")
+            score += 2 * weights.get('RSI', 1.0); reasons.append(f"RSI<30 (+{2 * weights['RSI']:.1f})")
         elif current_rsi > 70:
-            score -= 2 * weights.get('RSI', 1.0)
-            reasons.append(f"RSI>70 (-{2 * weights['RSI']:.1f})")
+            score -= 2 * weights.get('RSI', 1.0); reasons.append(f"RSI>70 (-{2 * weights['RSI']:.1f})")
 
-        # Дивергенция
         max_possible_score += 2.5 * weights.get('DIVERGENCE', 1.0)
         if divergence == 1:
-            score += 2.5 * weights.get('DIVERGENCE', 1.0)
-            reasons.append(f"Дивергенция↑ (+{2.5 * weights['DIVERGENCE']:.1f})")
+            score += 2.5 * weights.get('DIVERGENCE', 1.0); reasons.append(f"Дивергенция↑ (+{2.5 * weights['DIVERGENCE']:.1f})")
         elif divergence == -1:
-            score -= 2.5 * weights.get('DIVERGENCE', 1.0)
-            reasons.append(f"Дивергенция↓ (-{2.5 * weights['DIVERGENCE']:.1f})")
+            score -= 2.5 * weights.get('DIVERGENCE', 1.0); reasons.append(f"Дивергенция↓ (-{2.5 * weights['DIVERGENCE']:.1f})")
 
-        # SMC Sweep
         max_possible_score += 3.0 * weights.get('SMC_SWEEP', 1.0)
         if sweep_signal == 1:
-            score += 3.0 * weights.get('SMC_SWEEP', 1.0)
-            reasons.append(f"SMC Sweep↑ (+{3.0 * weights['SMC_SWEEP']:.1f})")
+            score += 3.0 * weights.get('SMC_SWEEP', 1.0); reasons.append(f"SMC Sweep↑ (+{3.0 * weights['SMC_SWEEP']:.1f})")
         elif sweep_signal == -1:
-            score -= 3.0 * weights.get('SMC_SWEEP', 1.0)
-            reasons.append(f"SMC Sweep↓ (-{3.0 * weights['SMC_SWEEP']:.1f})")
+            score -= 3.0 * weights.get('SMC_SWEEP', 1.0); reasons.append(f"SMC Sweep↓ (-{3.0 * weights['SMC_SWEEP']:.1f})")
 
-        # Breaker Block
         max_possible_score += 2.0 * weights.get('BREAKER_BLOCK', 1.0)
         if breaker_signal == 1:
-            score += 2.0 * weights.get('BREAKER_BLOCK', 1.0)
-            reasons.append(f"Breaker Block↑ (+{2.0 * weights['BREAKER_BLOCK']:.1f})")
+            score += 2.0 * weights.get('BREAKER_BLOCK', 1.0); reasons.append(f"Breaker Block↑ (+{2.0 * weights['BREAKER_BLOCK']:.1f})")
         elif breaker_signal == -1:
-            score -= 2.0 * weights.get('BREAKER_BLOCK', 1.0)
-            reasons.append(f"Breaker Block↓ (-{2.0 * weights['BREAKER_BLOCK']:.1f})")
+            score -= 2.0 * weights.get('BREAKER_BLOCK', 1.0); reasons.append(f"Breaker Block↓ (-{2.0 * weights['BREAKER_BLOCK']:.1f})")
 
-        # ICT
         max_possible_score += 1.0 * weights.get('ICT_P3', 1.0)
         score += ict_score * weights.get('ICT_P3', 1.0)
 
-        # Новости
         max_possible_score += 5.0 * weights.get('AI_NEWS', 1.0)
         news = "Новостей нет." 
         try:
@@ -267,8 +236,7 @@ def get_analysis(ticker):
             if feed.entries: 
                 raw_news = feed.entries[0].title
                 keywords = ["gold", "xau", "fed", "interest rate", "inflation", "dollar", "fomc", "powell", "gbp", "jpy", "yen", "pound", "boj", "boe"]
-                if any(kw in raw_news.lower() for kw in keywords):
-                    news = raw_news
+                if any(kw in raw_news.lower() for kw in keywords): news = raw_news
         except: pass
         
         if news != "Новостей нет.":
@@ -284,14 +252,10 @@ def get_analysis(ticker):
                 score += ai_score * weights.get('AI_NEWS', 1.0)
                 reasons.append(f"ИИ ({ai_score * weights['AI_NEWS']:+.1f})")
 
-        # --- МУЛЬТИТАЙМФРЕЙМ ФИЛЬТР ---
-        # Если 4H тренд вверх, а мы хотим продавать — штрафуем
         if trend_4h == 1 and score < 0:
-            score *= 0.5
-            reasons.append("⚠️ 4H против")
+            score *= 0.5; reasons.append("⚠️ 4H против")
         elif trend_4h == -1 and score > 0:
-            score *= 0.5
-            reasons.append("⚠️ 4H против")
+            score *= 0.5; reasons.append("⚠️ 4H против")
 
         confidence = int((abs(score) / max_possible_score) * 100)
         if confidence > 100: confidence = 100
@@ -305,9 +269,7 @@ def get_analysis(ticker):
             target = current_price - (1.5 * current_atr)
             stop_loss = current_price + (1.0 * current_atr)
 
-        # Расчет лота
         lot = calculate_lot_size(USER_BALANCE, USER_RISK_PCT, current_price, stop_loss, ticker)
-
         support = float(df_1h['Low'].tail(24).min())
         resistance = float(df_1h['High'].tail(24).max())
 
@@ -328,8 +290,7 @@ async def send_signal(chat_id, ticker, is_auto=False):
         asset_name = ASSETS.get(ticker, {}).get("name", ticker)
         
         if is_auto:
-            if confidence < 70:
-                return
+            if confidence < 70: return
             else:
                 status_text = "🎯 <b>СНАЙПЕР (Высокая уверенность)</b>" if confidence >= 85 else "⚡️ <b>Сильный сигнал</b>"
                 await bot.send_message(chat_id, status_text)
@@ -374,7 +335,6 @@ async def background_worker():
             else:
                 await asyncio.sleep(10)
 
-            # Проверка закрытых сделок + Trailing Stop
             conn = sqlite3.connect('signals.db')
             c = conn.cursor()
             c.execute("SELECT id, timestamp, price, target_price, stop_loss, forecast, ticker FROM history WHERE result IS NULL")
@@ -388,21 +348,18 @@ async def background_worker():
                     
                     sig_dt = pd.to_datetime(sig_time)
                     recent_data = current_data[current_data.index >= sig_dt]
-                    
                     if recent_data.empty: continue
+                    
                     high_price = recent_data['High'].max()
                     low_price = recent_data['Low'].min()
-                    current_close = recent_data['Close'].iloc[-1]
                     
                     result_text = ""
                     close_price = 0.0
                     
-                    # Проверка Trailing Stop (если цена прошла 50% до TP)
                     if "ВВЕРХ" in forecast:
                         if high_price >= tp: result_text, close_price = "WIN ✅", tp
                         elif low_price <= sl: result_text, close_price = "LOSS ❌", sl
                         elif high_price >= (old_price + (tp - old_price) * 0.5):
-                            # Двигаем SL в безубыток
                             new_sl = max(sl, old_price)
                             if new_sl > sl:
                                 c.execute("UPDATE history SET stop_loss = ? WHERE id = ?", (new_sl, sig_id))
@@ -467,80 +424,116 @@ def get_asset_keyboard():
 
 # --- ОБРАБОТЧИКИ ---
 @dp.message(CommandStart())
-async def start_command(message: types.Message):
+async def start_command(message: types.Message, state: FSMContext):
     global USER_CHAT_ID
     USER_CHAT_ID = message.chat.id
+    await state.clear()
     await message.answer(
-        f"Привет! Бот (biquote + МультиТФ + Риск) готов.\n"
-        f"Депозит: ${USER_BALANCE:.2f} | Риск: {USER_RISK_PCT}%\n\n"
-        f"В авто-режиме сканирует все активы и присылает сигналы >70%.", 
+        f"Привет! Бот готов.\nДепозит: ${USER_BALANCE:.2f} | Риск: {USER_RISK_PCT}%", 
         reply_markup=get_main_keyboard()
     )
 
 @dp.message(lambda message: "Актив" in message.text)
-async def asset_menu_handler(message: types.Message):
-    await message.answer("Выберите актив для РУЧНОГО анализа:", reply_markup=get_asset_keyboard())
+async def asset_menu_handler(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Выберите актив:", reply_markup=get_asset_keyboard())
 
 @dp.message(lambda message: "Назад" in message.text)
-async def back_handler(message: types.Message):
+async def back_handler(message: types.Message, state: FSMContext):
+    await state.clear()
     await message.answer("Возврат.", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "Золото" in message.text)
-async def set_gold(message: types.Message):
+async def set_gold(message: types.Message, state: FSMContext):
     global CURRENT_TICKER
     CURRENT_TICKER = "GC=F"
+    await state.clear()
     await message.answer("Актив: <b>Золото</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 @dp.message(lambda message: "Фунт/Йена" in message.text)
-async def set_gbpjpy(message: types.Message):
+async def set_gbpjpy(message: types.Message, state: FSMContext):
     global CURRENT_TICKER
     CURRENT_TICKER = "GBPJPY=X"
+    await state.clear()
     await message.answer("Актив: <b>Фунт/Йена</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 @dp.message(lambda message: "Австрал/Йена" in message.text)
-async def set_audjpy(message: types.Message):
+async def set_audjpy(message: types.Message, state: FSMContext):
     global CURRENT_TICKER
     CURRENT_TICKER = "AUDJPY=X"
+    await state.clear()
     await message.answer("Актив: <b>Австрал/Йена</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
 
+# --- НАСТРОЙКИ РИСКА (FSM) ---
 @dp.message(lambda message: "Настройки риска" in message.text)
-async def risk_settings(message: types.Message):
-    await message.answer(f"Текущий депозит: <b>${USER_BALANCE:.2f}</b>\nРиск: <b>{USER_RISK_PCT}%</b>\n\n"
-                         f"Отправьте новое значение депозита (например: <code>1500</code>) или риска в процентах (например: <code>2</code>).",
-                         parse_mode="HTML")
+async def risk_menu(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        f"Текущий депозит: <b>${USER_BALANCE:.2f}</b>\nТекущий риск: <b>{USER_RISK_PCT}%</b>\n\n"
+        f"Что хотите изменить?\n"
+        f"Напишите <code>депозит</code> или <code>риск</code>.",
+        parse_mode="HTML"
+    )
 
-@dp.message(lambda message: message.text.replace('.','',1).isdigit())
-async def update_risk_settings(message: types.Message):
-    global USER_BALANCE, USER_RISK_PCT
-    val = float(message.text)
-    if val > 100:
-        USER_BALANCE = val
+@dp.message(lambda message: message.text.lower() == "депозит")
+async def ask_balance(message: types.Message, state: FSMContext):
+    await state.set_state(UserSettings.waiting_for_balance)
+    await message.answer("Введите новый размер депозита в USD (например: 1500):")
+
+@dp.message(lambda message: message.text.lower() == "риск")
+async def ask_risk(message: types.Message, state: FSMContext):
+    await state.set_state(UserSettings.waiting_for_risk)
+    await message.answer("Введите процент риска на сделку (например: 2):")
+
+@dp.message(UserSettings.waiting_for_balance)
+async def process_balance(message: types.Message, state: FSMContext):
+    global USER_BALANCE
+    try:
+        new_bal = float(message.text)
+        USER_BALANCE = new_bal
+        await state.clear()
         await message.answer(f"✅ Депозит обновлен: <b>${USER_BALANCE:.2f}</b>", parse_mode="HTML", reply_markup=get_main_keyboard())
-    elif 0 < val <= 10:
-        USER_RISK_PCT = val
-        await message.answer(f"✅ Риск обновлен: <b>{USER_RISK_PCT}%</b>", parse_mode="HTML", reply_markup=get_main_keyboard())
-    else:
-        await message.answer("Введите сумму (больше 100) или процент риска (1-10).", reply_markup=get_main_keyboard())
+    except ValueError:
+        await message.answer("Ошибка. Введите число (например: 1000).")
 
+@dp.message(UserSettings.waiting_for_risk)
+async def process_risk(message: types.Message, state: FSMContext):
+    global USER_RISK_PCT
+    try:
+        new_risk = float(message.text)
+        if 0 < new_risk <= 10:
+            USER_RISK_PCT = new_risk
+            await state.clear()
+            await message.answer(f"✅ Риск обновлен: <b>{USER_RISK_PCT}%</b>", parse_mode="HTML", reply_markup=get_main_keyboard())
+        else:
+            await message.answer("Риск должен быть от 0.1 до 10 (процентов). Попробуйте снова.")
+    except ValueError:
+        await message.answer("Ошибка. Введите число (например: 1.5).")
+
+# --- ОСТАЛЬНЫЕ КОМАНДЫ ---
 @dp.message(lambda message: "Прогноз" in message.text or message.text == "/signal")
-async def signal_handler(message: types.Message):
+async def signal_handler(message: types.Message, state: FSMContext):
+    await state.clear()
     await send_signal(message.chat.id, CURRENT_TICKER, is_auto=False)
 
 @dp.message(lambda message: "Вкл Авто" in message.text or message.text == "/autostart")
-async def autostart_handler(message: types.Message):
+async def autostart_handler(message: types.Message, state: FSMContext):
     global AUTO_SIGNAL_ENABLED, USER_CHAT_ID
     AUTO_SIGNAL_ENABLED = True
     USER_CHAT_ID = message.chat.id
-    await message.answer("🚀 Авто-режим ВКЛЮЧЕН (biquote, 4H фильтр).", reply_markup=get_main_keyboard())
+    await state.clear()
+    await message.answer("🚀 Авто-режим ВКЛЮЧЕН.", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "Выкл Авто" in message.text or message.text == "/autostop")
-async def autostop_handler(message: types.Message):
+async def autostop_handler(message: types.Message, state: FSMContext):
     global AUTO_SIGNAL_ENABLED
     AUTO_SIGNAL_ENABLED = False
+    await state.clear()
     await message.answer("🛑 Авто-режим ВЫКЛЮЧЕН.", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "Веса" in message.text or message.text == "/weights")
-async def weights_handler(message: types.Message):
+async def weights_handler(message: types.Message, state: FSMContext):
+    await state.clear()
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
     c.execute("SELECT factor, weight FROM weights")
@@ -552,7 +545,8 @@ async def weights_handler(message: types.Message):
     await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "История" in message.text or message.text == "/history")
-async def history_handler(message: types.Message):
+async def history_handler(message: types.Message, state: FSMContext):
+    await state.clear()
     try:
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
@@ -574,10 +568,8 @@ async def history_handler(message: types.Message):
             entry_price = t[2] if t[2] is not None else 0.0
             exit_price = t[3] if t[3] is not None else entry_price
             if entry_price == 0.0: continue
-            if "WIN" in t[5]:
-                balance_pct += abs(exit_price - entry_price) / entry_price
-            else:
-                balance_pct -= abs(exit_price - entry_price) / entry_price
+            if "WIN" in t[5]: balance_pct += abs(exit_price - entry_price) / entry_price
+            else: balance_pct -= abs(exit_price - entry_price) / entry_price
 
         text = (
             f"📜 <b>Статистика</b>\n\n"
