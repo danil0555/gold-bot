@@ -6,7 +6,7 @@ import requests
 from openai import OpenAI
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 # ВАШИ КЛЮЧИ
@@ -20,14 +20,13 @@ dp = Dispatcher()
 AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
 
-# --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS history
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, price REAL, rsi REAL, forecast TEXT, 
-                  target_price REAL, stop_loss REAL, result TEXT)''')
+                  target_price REAL, stop_loss REAL, close_price REAL, result TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS weights
                  (factor TEXT PRIMARY KEY, weight REAL)''')
     for factor in ['RSI', 'TREND', 'AI_NEWS']:
@@ -35,7 +34,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- ПОЛУЧЕНИЕ ТОЧНОЙ ЦЕНЫ ---
 def get_live_price_and_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=1m"
@@ -58,7 +56,6 @@ def get_live_price_and_data():
         print(f"Ошибка получения цены: {e}")
         return pd.DataFrame()
 
-# --- УМНЫЙ АНАЛИЗ ---
 def get_analysis():
     try:
         df = get_live_price_and_data()
@@ -160,7 +157,7 @@ async def send_signal(chat_id, is_auto=False):
         safe_news = news.replace("_", " ").replace("*", " ").replace("[", " ").replace("`", " ")
 
         text = (f"📊 <b>Анализ XAUUSD</b> {'(АВТО)' if is_auto else ''} #{signal_id}\n\n"
-                f"Текущая цена: <b>${price:.2f}</b> | RSI: {rsi:.1f}\n"
+                f"Цена входа: <b>${price:.2f}</b> | RSI: {rsi:.1f}\n"
                 f"🎯 TP: <b>${target:.2f}</b> | 🛑 SL: <b>${sl:.2f}</b>\n\n"
                 f"🧠 <b>Факторы:</b>\n{reasons}\n\n"
                 f"🛡️ <b>Ликвидность:</b>\nПоддержка: ${support:.2f} | Сопротивление: ${resistance:.2f}\n\n"
@@ -168,7 +165,6 @@ async def send_signal(chat_id, is_auto=False):
                 f"Прогноз: <b>{forecast}</b>\n"
                 f"⏳ <i>Сделка активна (следим за TP/SL)</i>")
 
-        # Убрали инлайн-кнопки, отправляем просто текст
         await bot.send_message(chat_id, text, parse_mode="HTML")
     except Exception as e:
         print(f"Ошибка отправки: {e}")
@@ -203,20 +199,32 @@ async def background_worker():
                         current_close = recent_data['Close'].iloc[-1]
                         
                         result_text = ""
+                        close_price = 0.0
                         
+                        # Логика закрытия
                         if "ВВЕРХ" in forecast:
-                            if high_price >= tp: result_text = f"WIN ✅ (TP ${tp:.2f})"
-                            elif low_price <= sl: result_text = f"LOSS ❌ (SL ${sl:.2f})"
+                            if high_price >= tp: 
+                                result_text = "WIN ✅"
+                                close_price = tp
+                            elif low_price <= sl: 
+                                result_text = "LOSS ❌"
+                                close_price = sl
                             elif (datetime.now() - sig_dt).total_seconds() > 300 and current_close < old_price:
-                                result_text = f"LOSS ❌ (Цена пошла против нас)"
+                                result_text = "LOSS ❌ (По времени)"
+                                close_price = current_close
                         elif "ВНИЗ" in forecast:
-                            if low_price <= tp: result_text = f"WIN ✅ (TP ${tp:.2f})"
-                            elif high_price >= sl: result_text = f"LOSS ❌ (SL ${sl:.2f})"
+                            if low_price <= tp: 
+                                result_text = "WIN ✅"
+                                close_price = tp
+                            elif high_price >= sl: 
+                                result_text = "LOSS ❌"
+                                close_price = sl
                             elif (datetime.now() - sig_dt).total_seconds() > 300 and current_close > old_price:
-                                result_text = f"LOSS ❌ (Цена пошла против нас)"
+                                result_text = "LOSS ❌ (По времени)"
+                                close_price = current_close
 
                         if result_text:
-                            c.execute("UPDATE history SET result = ? WHERE id = ?", (result_text, sig_id))
+                            c.execute("UPDATE history SET result = ?, close_price = ? WHERE id = ?", (result_text, close_price, sig_id))
                             conn.commit()
                             
                             if "LOSS" in result_text:
@@ -228,22 +236,26 @@ async def background_worker():
                             conn.commit()
 
                             if USER_CHAT_ID:
-                                await bot.send_message(USER_CHAT_ID, f"🏁 <b>Сделка #{sig_id} ЗАКРЫТА</b>\nРезультат: <b>{result_text}</b>\n\n🧠 <i>Бот проанализировал ошибку и скорректировал веса.</i>", parse_mode="HTML")
+                                msg = (f"🏁 <b>Сделка #{sig_id} ЗАКРЫТА</b>\n"
+                                       f"Цена входа: <b>${old_price:.2f}</b>\n"
+                                       f"Цена выхода: <b>${close_price:.2f}</b>\n"
+                                       f"Результат: <b>{result_text}</b>\n\n"
+                                       f"🧠 <i>Бот обновил свои веса.</i>")
+                                await bot.send_message(USER_CHAT_ID, msg, parse_mode="HTML")
             conn.close()
         except Exception as e:
             print(f"Ошибка фона: {e}")
         await asyncio.sleep(30)
 
-# --- СОЗДАНИЕ МЕНЮ ---
 def get_main_keyboard():
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📈 Прогноз (Signal)")],
-            [KeyboardButton(text="🚀 Включить Авто"), KeyboardButton(text="🛑 Выключить Авто")],
-            [KeyboardButton(text="🧠 Мозг бота (Веса)")]
+            [KeyboardButton(text="📈 Прогноз")],
+            [KeyboardButton(text="🚀 Вкл Авто"), KeyboardButton(text="🛑 Выкл Авто")],
+            [KeyboardButton(text="🧠 Веса"), KeyboardButton(text="📜 История сделок")]
         ],
         resize_keyboard=True,
-        input_field_placeholder="Выберите действие на панели ниже..."
+        input_field_placeholder="Выберите действие..."
     )
     return keyboard
 
@@ -251,41 +263,84 @@ def get_main_keyboard():
 async def start_command(message: types.Message):
     global USER_CHAT_ID
     USER_CHAT_ID = message.chat.id
-    await message.answer(
-        "Привет! Я твой самообучающийся ИИ-помощник по золоту (XAUUSD).\n\n"
-        "Теперь кнопки всегда под рукой. Просто нажимай на них!", 
-        reply_markup=get_main_keyboard()
-    )
+    await message.answer("Привет! Бот готов к работе. Используй меню ниже для управления.", reply_markup=get_main_keyboard())
 
-# --- ОБРАБОТЧИКИ КНОПОК И КОМАНД ---
-@dp.message(lambda message: message.text == "📈 Прогноз (Signal)" or message.text == "/signal")
+@dp.message(lambda message: message.text == "📈 Прогноз" or message.text == "/signal")
 async def signal_handler(message: types.Message):
     await send_signal(message.chat.id, is_auto=False)
 
-@dp.message(lambda message: message.text == "🚀 Включить Авто" or message.text == "/autostart")
+@dp.message(lambda message: message.text == "🚀 Вкл Авто" or message.text == "/autostart")
 async def autostart_handler(message: types.Message):
     global AUTO_SIGNAL_ENABLED, USER_CHAT_ID
     AUTO_SIGNAL_ENABLED = True
     USER_CHAT_ID = message.chat.id
-    await message.answer("🚀 Авто-режим ВКЛЮЧЕН. Бот будет присылать сигналы каждые 5 минут и учиться на ошибках.", reply_markup=get_main_keyboard())
+    await message.answer("🚀 Авто-режим ВКЛЮЧЕН.", reply_markup=get_main_keyboard())
 
-@dp.message(lambda message: message.text == "🛑 Выключить Авто" or message.text == "/autostop")
+@dp.message(lambda message: message.text == "🛑 Выкл Авто" or message.text == "/autostop")
 async def autostop_handler(message: types.Message):
     global AUTO_SIGNAL_ENABLED
     AUTO_SIGNAL_ENABLED = False
     await message.answer("🛑 Авто-режим ВЫКЛЮЧЕН.", reply_markup=get_main_keyboard())
 
-@dp.message(lambda message: message.text == "🧠 Мозг бота (Веса)" or message.text == "/weights")
+@dp.message(lambda message: message.text == "🧠 Веса" or message.text == "/weights")
 async def weights_handler(message: types.Message):
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
     c.execute("SELECT factor, weight FROM weights")
     weights = c.fetchall()
     conn.close()
-    text = "🧠 <b>Текущие веса факторов (мозг бота):</b>\n\n"
+    text = "🧠 <b>Текущие веса факторов:</b>\n\n"
     for factor, weight in weights:
         text += f"• {factor}: <b>{weight:.1f}</b>\n"
-    text += "\n<i>Чем выше вес, тем больше бот доверяет этому фактору.</i>"
+    await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
+
+# --- НОВАЯ ФУНКЦИЯ СТАТИСТИКИ ---
+@dp.message(lambda message: message.text == "📜 История сделок" or message.text == "/history")
+async def history_handler(message: types.Message):
+    conn = sqlite3.connect('signals.db')
+    c = conn.cursor()
+    c.execute("SELECT id, timestamp, price, close_price, forecast, result FROM history WHERE result IS NOT NULL ORDER BY id DESC")
+    trades = c.fetchall()
+    conn.close()
+
+    if not trades:
+        await message.answer("📭 История пуста. Пока нет закрытых сделок.", reply_markup=get_main_keyboard())
+        return
+
+    total = len(trades)
+    wins = sum(1 for t in trades if "WIN" in t[5])
+    losses = total - wins
+    winrate = (wins / total) * 100 if total > 0 else 0
+
+    # Симуляция торговли (фиксированный лот)
+    # Если WIN: зарабатываем разницу между TP и входом, но мы берем фиксированную прибыль за сделку +1%
+    # Если LOSS: теряем -0.5% (соотношение 1 к 2)
+    # (Упрощенная математика, чтобы показать относительную доходность)
+    balance_usd = 0.0
+    for t in trades:
+        if "WIN" in t[5]:
+            # Прибыль = (Цена выхода - Цена входа) / Цена входа
+            profit_pct = abs(t[3] - t[2]) / t[2]
+            balance_usd += profit_pct # Симуляция в "процентах от 1 доллара"
+        else:
+            loss_pct = abs(t[3] - t[2]) / t[2]
+            balance_usd -= loss_pct
+
+    text = (
+        f"📜 <b>Статистика торговли</b>\n\n"
+        f"Всего сделок: <b>{total}</b>\n"
+        f"🟢 Прибыльных: <b>{wins}</b>\n"
+        f"🔴 Убыточных: <b>{losses}</b>\n"
+        f"🎯 Винрейт: <b>{winrate:.1f}%</b>\n\n"
+        f"💰 <b>Симуляция ($1 на сделку):</b>\n"
+        f"Чистый результат: <b>${balance_usd:.4f}</b>\n\n"
+        f"<i>Последние 5 сделок:</i>\n"
+    )
+
+    for t in trades[:5]:
+        icon = "✅" if "WIN" in t[5] else "❌"
+        text += f"{icon} #{t[0]} | Вход: ${t[2]:.2f} -> Выход: ${t[3]:.2f}\n"
+
     await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
 async def main():
