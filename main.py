@@ -31,17 +31,17 @@ def init_db():
         c.execute("ALTER TABLE history ADD COLUMN close_price REAL")
     except sqlite3.OperationalError:
         pass
-
     c.execute('''CREATE TABLE IF NOT EXISTS weights
                  (factor TEXT PRIMARY KEY, weight REAL)''')
-    for factor in ['RSI', 'TREND', 'AI_NEWS']:
+    for factor in ['RSI', 'TREND', 'AI_NEWS', 'MACD', 'DIVERGENCE']:
         c.execute("INSERT OR IGNORE INTO weights (factor, weight) VALUES (?, ?)", (factor, 1.0))
     conn.commit()
     conn.close()
 
 def get_live_price_and_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=1m"
+    # Берем больше данных (range=5d), чтобы EMA 200 успела рассчитаться
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=15m"
     try:
         response = requests.get(url, headers=headers, timeout=10)
         data = response.json()
@@ -56,23 +56,50 @@ def get_live_price_and_data():
             'Close': quotes['close']
         }, index=pd.to_datetime(timestamps, unit='s'))
         df = df.dropna()
-        # Убираем часовой пояс, чтобы избежать ошибок сравнения
         df.index = df.index.tz_localize(None)
         return df
     except Exception as e:
         print(f"Ошибка получения цены: {e}")
         return pd.DataFrame()
 
+def detect_rsi_divergence(df):
+    # Ищем расхождения за последние 20 свечей
+    if len(df) < 20: return 0
+    recent = df.tail(20)
+    # Ищем локальные минимумы и максимумы
+    local_min_idx = recent['Low'].idxmin()
+    local_max_idx = recent['High'].idxmax()
+    
+    # Упрощенная логика для бычьего расхождения (цена падает, RSI растет)
+    if recent['Low'].iloc[-1] < recent['Low'].iloc[-5] and recent['RSI'].iloc[-1] > recent['RSI'].iloc[-5]:
+        return 1 # Бычье расхождение (сигнал вверх)
+    # Медвежье расхождение (цена растет, RSI падает)
+    elif recent['High'].iloc[-1] > recent['High'].iloc[-5] and recent['RSI'].iloc[-1] < recent['RSI'].iloc[-5]:
+        return -1 # Медвежье расхождение (сигнал вниз)
+    return 0
+
 def get_analysis():
     try:
         df = get_live_price_and_data()
         if df.empty: return None
 
+        # 1. Считаем RSI
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         df['RSI'] = 100 - (100 / (1 + (gain / loss)))
-        
+
+        # 2. Считаем EMA 200 (глобальный тренд)
+        df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+
+        # 3. Считаем MACD (12, 26, 9)
+        exp12 = df['Close'].ewm(span=12, adjust=False).mean()
+        exp26 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = exp12 - exp26
+        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+
+        # 4. Считаем ATR для целей
         df['TR'] = pd.concat([df['High'] - df['Low'],
                               (df['High'] - df['Close'].shift()).abs(),
                               (df['Low'] - df['Close'].shift()).abs()], axis=1).max(axis=1)
@@ -81,6 +108,13 @@ def get_analysis():
         current_price = float(df.iloc[-1]['Close'])
         current_rsi = float(df.iloc[-1]['RSI'])
         current_atr = float(df.iloc[-1]['ATR'])
+        current_ema200 = float(df.iloc[-1]['EMA200'])
+        current_macd = float(df.iloc[-1]['MACD'])
+        current_macd_signal = float(df.iloc[-1]['MACD_Signal'])
+        prev_macd = float(df.iloc[-2]['MACD'])
+        prev_macd_signal = float(df.iloc[-2]['MACD_Signal'])
+        
+        divergence = detect_rsi_divergence(df)
 
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
@@ -91,6 +125,24 @@ def get_analysis():
         score = 0.0
         reasons = []
 
+        # --- ЛОГИКА ТРЕНДА (EMA 200) ---
+        if current_price > current_ema200:
+            score += 1 * weights.get('TREND', 1.0)
+            reasons.append(f"Тренд↑ (EMA200) (+{1 * weights['TREND']:.1f})")
+        else:
+            score -= 1 * weights.get('TREND', 1.0)
+            reasons.append(f"Тренд↓ (EMA200) (-{1 * weights['TREND']:.1f})")
+
+        # --- ЛОГИКА MACD ---
+        # Пересечение MACD и сигнальной линии
+        if prev_macd < prev_macd_signal and current_macd > current_macd_signal:
+            score += 1.5 * weights.get('MACD', 1.0)
+            reasons.append(f"MACD Пересечение↑ (+{1.5 * weights['MACD']:.1f})")
+        elif prev_macd > prev_macd_signal and current_macd < current_macd_signal:
+            score -= 1.5 * weights.get('MACD', 1.0)
+            reasons.append(f"MACD Пересечение↓ (-{1.5 * weights['MACD']:.1f})")
+
+        # --- ЛОГИКА RSI ---
         if current_rsi < 30:
             score += 2 * weights.get('RSI', 1.0)
             reasons.append(f"RSI<30 (+{2 * weights['RSI']:.1f})")
@@ -98,28 +150,25 @@ def get_analysis():
             score -= 2 * weights.get('RSI', 1.0)
             reasons.append(f"RSI>70 (-{2 * weights['RSI']:.1f})")
 
-        trend = "BULL" if df['Close'].iloc[-1] > df['Close'].rolling(50).mean().iloc[-1] else "BEAR"
-        if trend == "BULL":
-            score += 1 * weights.get('TREND', 1.0)
-            reasons.append(f"Тренд↑ (+{1 * weights['TREND']:.1f})")
-        else:
-            score -= 1 * weights.get('TREND', 1.0)
-            reasons.append(f"Тренд↓ (-{1 * weights['TREND']:.1f})")
+        # --- ЛОГИКА ДИВЕРГЕНЦИИ ---
+        if divergence == 1:
+            score += 2.5 * weights.get('DIVERGENCE', 1.0)
+            reasons.append(f"Бычья Дивергенция (+{2.5 * weights['DIVERGENCE']:.1f})")
+        elif divergence == -1:
+            score -= 2.5 * weights.get('DIVERGENCE', 1.0)
+            reasons.append(f"Медвежья Дивергенция (-{2.5 * weights['DIVERGENCE']:.1f})")
 
-        # --- ФИЛЬТР НОВОСТЕЙ ---
+        # --- НОВОСТИ ---
         news = "Новостей нет." 
-        ai_score = 0
         try:
             feed = feedparser.parse("https://finance.yahoo.com/rss/2.0/headline?s=GC=F")
             if feed.entries: 
                 raw_news = feed.entries[0].title
-                # Проверяем, есть ли в новости ключевые слова для золота
                 keywords = ["gold", "xau", "fed", "interest rate", "inflation", "dollar", "fomc", "powell"]
                 if any(kw in raw_news.lower() for kw in keywords):
                     news = raw_news
         except: pass
         
-        # Если новость релевантна, отправляем в ИИ
         if news != "Новостей нет.":
             response = ai_client.chat.completions.create(
                 model="meta-llama/llama-3.1-8b-instruct",
@@ -211,12 +260,10 @@ async def background_worker():
                         if recent_data.empty: continue
                         high_price = recent_data['High'].max()
                         low_price = recent_data['Low'].min()
-                        current_close = recent_data['Close'].iloc[-1]
                         
                         result_text = ""
                         close_price = 0.0
                         
-                        # ДАЕМ СДЕЛКЕ БОЛЬШЕ ВРЕМЕНИ (не закрываем по времени, только по TP/SL)
                         if "ВВЕРХ" in forecast:
                             if high_price >= tp: 
                                 result_text = "WIN ✅"
@@ -236,12 +283,13 @@ async def background_worker():
                             c.execute("UPDATE history SET result = ?, close_price = ? WHERE id = ?", (result_text, close_price, sig_id))
                             conn.commit()
                             
+                            # САМООБУЧЕНИЕ
                             if "LOSS" in result_text:
-                                c.execute("UPDATE weights SET weight = MAX(0.2, weight - 0.1) WHERE factor = 'TREND'")
-                                c.execute("UPDATE weights SET weight = MAX(0.2, weight - 0.1) WHERE factor = 'RSI'")
+                                for factor in ['TREND', 'RSI', 'MACD', 'DIVERGENCE']:
+                                    c.execute("UPDATE weights SET weight = MAX(0.2, weight - 0.1) WHERE factor = ?", (factor,))
                             else:
-                                c.execute("UPDATE weights SET weight = MIN(2.0, weight + 0.1) WHERE factor = 'TREND'")
-                                c.execute("UPDATE weights SET weight = MIN(2.0, weight + 0.1) WHERE factor = 'RSI'")
+                                for factor in ['TREND', 'RSI', 'MACD', 'DIVERGENCE']:
+                                    c.execute("UPDATE weights SET weight = MIN(2.0, weight + 0.1) WHERE factor = ?", (factor,))
                             conn.commit()
 
                             if USER_CHAT_ID:
@@ -325,16 +373,11 @@ async def history_handler(message: types.Message):
         for t in trades:
             entry_price = t[2] if t[2] is not None else 0.0
             exit_price = t[3] if t[3] is not None else entry_price
-            
-            if entry_price == 0.0:
-                continue
-
+            if entry_price == 0.0: continue
             if "WIN" in t[5]:
-                profit_pct = abs(exit_price - entry_price) / entry_price
-                balance_usd += profit_pct
+                balance_usd += abs(exit_price - entry_price) / entry_price
             else:
-                loss_pct = abs(exit_price - entry_price) / entry_price
-                balance_usd -= loss_pct
+                balance_usd -= abs(exit_price - entry_price) / entry_price
 
         text = (
             f"📜 <b>Статистика торговли</b>\n\n"
