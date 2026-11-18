@@ -4,6 +4,7 @@ import sqlite3
 import yfinance as yf
 import pandas as pd
 import feedparser
+import time # <--- ДОБАВИЛИ ЭТОТ ИМПОРТ
 from openai import OpenAI
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
@@ -85,9 +86,7 @@ def find_smc_zones(df):
             nearest_ob = ob_price
     return nearest_ob
 
-# НОВАЯ ФУНКЦИЯ: Пытаемся скачать с Yahoo, если не вышло - с Stooq
 def download_data(ticker, period, interval):
-    # 1. Пробуем Yahoo
     for attempt in range(2):
         try:
             df = yf.download(ticker, period=period, interval=interval, progress=False, multi_level_index=False, timeout=15, threads=False, auto_adjust=True)
@@ -95,23 +94,21 @@ def download_data(ticker, period, interval):
                 return df
         except Exception as e:
             print(f"Yahoo попытка {attempt+1} не удалась: {e}")
-            await asyncio.sleep(2) # Небольшая пауза перед повтором
-    
-    # 2. Если Yahoo не ответил, пробуем Stooq (для золота)
+            time.sleep(2) # <--- ИСПРАВЛЕНО ТУТ
+            
     if ticker == "GC=F":
         try:
             print("Пробуем резервный источник Stooq...")
             import pandas_datareader as pdr
-            # Stooq использует тикер gc.f для золота
             df = pdr.get_data_stooq('gc.f', start=datetime.now() - timedelta(days=30))
             if not df.empty:
-                df.columns = [c.capitalize() for c in df.columns] # Приводим колонки к нужному виду
+                df.columns = [c.capitalize() for c in df.columns]
                 df = df.sort_index()
                 return df
         except Exception as e:
             print(f"Stooq тоже упал: {e}")
 
-    return pd.DataFrame() # Если ничего не вышло, возвращаем пустоту
+    return pd.DataFrame()
 
 def get_analysis():
     try:
