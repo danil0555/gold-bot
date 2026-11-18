@@ -18,17 +18,21 @@ ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_K
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Глобальные настройки
 AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
-CURRENT_TICKER = "GC=F"  # Для ручного запроса
+CURRENT_TICKER = "GC=F"
 CURRENT_NAME = "Золото (XAUUSD)"
+USER_BALANCE = 1000.0  # Депозит по умолчанию
+USER_RISK_PCT = 1.0    # Риск на сделку (1%)
 
 ASSETS = {
-    "GC=F": "Золото (XAUUSD)",
-    "GBPJPY=X": "Фунт/Йена (GBP/JPY)",
-    "AUDJPY=X": "Австрал/Йена (AUD/JPY)"
+    "GC=F": {"name": "Золото (XAUUSD)", "bq": "XAUUSD"},
+    "GBPJPY=X": {"name": "Фунт/Йена (GBP/JPY)", "bq": "GBPJPY"},
+    "AUDJPY=X": {"name": "Австрал/Йена (AUD/JPY)", "bq": "AUDJPY"}
 }
 
+# --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
@@ -36,13 +40,11 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, price REAL, rsi REAL, forecast TEXT, 
                   target_price REAL, stop_loss REAL, close_price REAL, result TEXT,
-                  confidence INTEGER, ticker TEXT)''')
-    try: c.execute("ALTER TABLE history ADD COLUMN close_price REAL")
-    except sqlite3.OperationalError: pass
-    try: c.execute("ALTER TABLE history ADD COLUMN confidence INTEGER")
-    except sqlite3.OperationalError: pass
-    try: c.execute("ALTER TABLE history ADD COLUMN ticker TEXT")
-    except sqlite3.OperationalError: pass
+                  confidence INTEGER, ticker TEXT, lot_size REAL)''')
+    # Добавляем колонки, если их нет (для старых баз)
+    for col in ["close_price REAL", "confidence INTEGER", "ticker TEXT", "lot_size REAL"]:
+        try: c.execute(f"ALTER TABLE history ADD COLUMN {col}")
+        except sqlite3.OperationalError: pass
     
     c.execute('''CREATE TABLE IF NOT EXISTS weights
                  (factor TEXT PRIMARY KEY, weight REAL)''')
@@ -52,29 +54,29 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_live_price_and_data(ticker):
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=5d&interval=1h"
+# --- ПОЛУЧЕНИЕ ДАННЫХ ЧЕРЕЗ BIQUOTE ---
+def get_biquote_data(bq_symbol, interval="1h", limit=200):
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
-        result = data['chart']['result'][0]
-        timestamps = result['timestamp']
-        quotes = result['indicators']['quote'][0]
+        # Получаем OHLC свечи
+        url = f"https://biquote.io/api/{bq_symbol}/ohlc"
+        params = {"interval": interval, "limit": limit}
+        resp = requests.get(url, params=params, timeout=10)
+        env = resp.json()
         
-        df = pd.DataFrame({
-            'Open': quotes['open'],
-            'High': quotes['high'],
-            'Low': quotes['low'],
-            'Close': quotes['close']
-        }, index=pd.to_datetime(timestamps, unit='s'))
-        df = df.dropna()
-        df.index = df.index.tz_localize(None)
+        if "bars" not in env or not env["bars"]:
+            return pd.DataFrame()
+            
+        df = pd.DataFrame(env["bars"])
+        df["openTime"] = pd.to_datetime(df["openTime"])
+        df = df.set_index("openTime").sort_index()
+        # Переименовываем колонки для совместимости
+        df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
         return df
     except Exception as e:
-        print(f"Ошибка получения {ticker}: {e}")
+        print(f"Ошибка biquote {bq_symbol}: {e}")
         return pd.DataFrame()
 
+# --- АНАЛИЗ ---
 def detect_rsi_divergence(df):
     if len(df) < 20: return 0
     recent = df.tail(20)
@@ -114,42 +116,75 @@ def get_ict_session_score():
     elif 8 <= hour < 17: return 1.0, "Нью-Йорк"
     else: return 0, "Закрытие"
 
+def calculate_lot_size(balance, risk_pct, entry, stop, ticker):
+    # Упрощенный расчет лота для XAUUSD и JPY пар
+    risk_amount = balance * (risk_pct / 100)
+    distance = abs(entry - stop)
+    if distance == 0: return 0.01
+    
+    if "XAU" in ticker:
+        pip_value = 1.0 # 1 лот = $1 за 0.01 движения (приблизительно)
+        pip_dist = distance / 0.01
+        lot = risk_amount / (pip_dist * pip_value)
+    else: # JPY пары
+        pip_value = 0.67 # Приблизительно для USDJPY
+        pip_dist = distance / 0.01
+        lot = risk_amount / (pip_dist * pip_value)
+    
+    return round(max(0.01, min(lot, 10.0)), 2) # Ограничиваем лот
+
 def get_analysis(ticker):
     try:
-        df = get_live_price_and_data(ticker)
-        if df.empty: return None
+        asset_info = ASSETS.get(ticker, ASSETS["GC=F"])
+        bq_sym = asset_info["bq"]
+        
+        # 1. Получаем данные 1H и 4H
+        df_1h = get_biquote_data(bq_sym, "1h", 200)
+        df_4h = get_biquote_data(bq_sym, "4h", 100)
+        
+        if df_1h.empty: return None
 
-        delta = df['Close'].diff()
+        # 2. Индикаторы на 1H
+        delta = df_1h['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        df['RSI'] = 100 - (100 / (1 + (gain / loss)))
-        df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
-        df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+        df_1h['RSI'] = 100 - (100 / (1 + (gain / loss)))
+        df_1h['EMA50'] = df_1h['Close'].ewm(span=50, adjust=False).mean()
+        df_1h['EMA200'] = df_1h['Close'].ewm(span=200, adjust=False).mean()
         
-        exp12 = df['Close'].ewm(span=12, adjust=False).mean()
-        exp26 = df['Close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = exp12 - exp26
-        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        exp12 = df_1h['Close'].ewm(span=12, adjust=False).mean()
+        exp26 = df_1h['Close'].ewm(span=26, adjust=False).mean()
+        df_1h['MACD'] = exp12 - exp26
+        df_1h['MACD_Signal'] = df_1h['MACD'].ewm(span=9, adjust=False).mean()
         
-        df['TR'] = pd.concat([df['High'] - df['Low'],
-                              (df['High'] - df['Close'].shift()).abs(),
-                              (df['Low'] - df['Close'].shift()).abs()], axis=1).max(axis=1)
-        df['ATR'] = df['TR'].rolling(window=14).mean()
+        df_1h['TR'] = pd.concat([df_1h['High'] - df_1h['Low'],
+                              (df_1h['High'] - df_1h['Close'].shift()).abs(),
+                              (df_1h['Low'] - df_1h['Close'].shift()).abs()], axis=1).max(axis=1)
+        df_1h['ATR'] = df_1h['TR'].rolling(window=14).mean()
 
-        current_price = float(df.iloc[-1]['Close'])
-        current_rsi = float(df.iloc[-1]['RSI'])
-        current_atr = float(df.iloc[-1]['ATR'])
-        current_ema200 = float(df.iloc[-1]['EMA200'])
-        current_ema50 = float(df.iloc[-1]['EMA50'])
-        current_macd = float(df.iloc[-1]['MACD'])
-        current_macd_signal = float(df.iloc[-1]['MACD_Signal'])
-        prev_macd = float(df.iloc[-2]['MACD'])
-        prev_macd_signal = float(df.iloc[-2]['MACD_Signal'])
+        current_price = float(df_1h.iloc[-1]['Close'])
+        current_rsi = float(df_1h.iloc[-1]['RSI'])
+        current_atr = float(df_1h.iloc[-1]['ATR'])
+        current_ema200 = float(df_1h.iloc[-1]['EMA200'])
+        current_ema50 = float(df_1h.iloc[-1]['EMA50'])
+        current_macd = float(df_1h.iloc[-1]['MACD'])
+        current_macd_signal = float(df_1h.iloc[-1]['MACD_Signal'])
+        prev_macd = float(df_1h.iloc[-2]['MACD'])
+        prev_macd_signal = float(df_1h.iloc[-2]['MACD_Signal'])
         
-        divergence = detect_rsi_divergence(df)
-        sweep_signal = check_liquidity_sweep(df)
-        breaker_signal = check_breaker_block(df)
+        divergence = detect_rsi_divergence(df_1h)
+        sweep_signal = check_liquidity_sweep(df_1h)
+        breaker_signal = check_breaker_block(df_1h)
         ict_score, ict_name = get_ict_session_score()
+
+        # 3. Глобальный тренд на 4H
+        trend_4h = 0
+        if not df_4h.empty:
+            df_4h['EMA50'] = df_4h['Close'].ewm(span=50, adjust=False).mean()
+            if df_4h['Close'].iloc[-1] > df_4h['EMA50'].iloc[-1]:
+                trend_4h = 1
+            else:
+                trend_4h = -1
 
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
@@ -159,8 +194,9 @@ def get_analysis(ticker):
 
         score = 0.0
         max_possible_score = 0.0
-        reasons = [f"Сессия: {ict_name}"]
+        reasons = [f"Сессия: {ict_name}", f"4H Тренд: {'↑' if trend_4h > 0 else '↓' if trend_4h < 0 else 'Нет'}"]
 
+        # EMA 200
         max_possible_score += 1 * weights.get('TREND', 1.0)
         if current_price > current_ema200:
             score += 1 * weights.get('TREND', 1.0)
@@ -169,10 +205,12 @@ def get_analysis(ticker):
             score -= 1 * weights.get('TREND', 1.0)
             reasons.append(f"Тренд↓ (-{1 * weights['TREND']:.1f})")
 
+        # EMA 50
         max_possible_score += 0.5 * weights.get('TREND', 1.0)
         if current_price > current_ema50: score += 0.5 * weights.get('TREND', 1.0)
         else: score -= 0.5 * weights.get('TREND', 1.0)
 
+        # MACD
         max_possible_score += 1.5 * weights.get('MACD', 1.0)
         if prev_macd < prev_macd_signal and current_macd > current_macd_signal:
             score += 1.5 * weights.get('MACD', 1.0)
@@ -181,6 +219,7 @@ def get_analysis(ticker):
             score -= 1.5 * weights.get('MACD', 1.0)
             reasons.append(f"MACD↓ (-{1.5 * weights['MACD']:.1f})")
 
+        # RSI
         max_possible_score += 2 * weights.get('RSI', 1.0)
         if current_rsi < 30:
             score += 2 * weights.get('RSI', 1.0)
@@ -189,6 +228,7 @@ def get_analysis(ticker):
             score -= 2 * weights.get('RSI', 1.0)
             reasons.append(f"RSI>70 (-{2 * weights['RSI']:.1f})")
 
+        # Дивергенция
         max_possible_score += 2.5 * weights.get('DIVERGENCE', 1.0)
         if divergence == 1:
             score += 2.5 * weights.get('DIVERGENCE', 1.0)
@@ -197,6 +237,7 @@ def get_analysis(ticker):
             score -= 2.5 * weights.get('DIVERGENCE', 1.0)
             reasons.append(f"Дивергенция↓ (-{2.5 * weights['DIVERGENCE']:.1f})")
 
+        # SMC Sweep
         max_possible_score += 3.0 * weights.get('SMC_SWEEP', 1.0)
         if sweep_signal == 1:
             score += 3.0 * weights.get('SMC_SWEEP', 1.0)
@@ -205,6 +246,7 @@ def get_analysis(ticker):
             score -= 3.0 * weights.get('SMC_SWEEP', 1.0)
             reasons.append(f"SMC Sweep↓ (-{3.0 * weights['SMC_SWEEP']:.1f})")
 
+        # Breaker Block
         max_possible_score += 2.0 * weights.get('BREAKER_BLOCK', 1.0)
         if breaker_signal == 1:
             score += 2.0 * weights.get('BREAKER_BLOCK', 1.0)
@@ -213,17 +255,19 @@ def get_analysis(ticker):
             score -= 2.0 * weights.get('BREAKER_BLOCK', 1.0)
             reasons.append(f"Breaker Block↓ (-{2.0 * weights['BREAKER_BLOCK']:.1f})")
 
+        # ICT
         max_possible_score += 1.0 * weights.get('ICT_P3', 1.0)
         score += ict_score * weights.get('ICT_P3', 1.0)
 
+        # Новости
         max_possible_score += 5.0 * weights.get('AI_NEWS', 1.0)
-        news_keywords = ["gold", "xau", "fed", "interest rate", "inflation", "dollar", "fomc", "powell", "gbp", "jpy", "yen", "pound", "boj", "boe"]
         news = "Новостей нет." 
         try:
             feed = feedparser.parse("https://finance.yahoo.com/rss/2.0/headline?s=GC=F")
             if feed.entries: 
                 raw_news = feed.entries[0].title
-                if any(kw in raw_news.lower() for kw in news_keywords):
+                keywords = ["gold", "xau", "fed", "interest rate", "inflation", "dollar", "fomc", "powell", "gbp", "jpy", "yen", "pound", "boj", "boe"]
+                if any(kw in raw_news.lower() for kw in keywords):
                     news = raw_news
         except: pass
         
@@ -240,6 +284,15 @@ def get_analysis(ticker):
                 score += ai_score * weights.get('AI_NEWS', 1.0)
                 reasons.append(f"ИИ ({ai_score * weights['AI_NEWS']:+.1f})")
 
+        # --- МУЛЬТИТАЙМФРЕЙМ ФИЛЬТР ---
+        # Если 4H тренд вверх, а мы хотим продавать — штрафуем
+        if trend_4h == 1 and score < 0:
+            score *= 0.5
+            reasons.append("⚠️ 4H против")
+        elif trend_4h == -1 and score > 0:
+            score *= 0.5
+            reasons.append("⚠️ 4H против")
+
         confidence = int((abs(score) / max_possible_score) * 100)
         if confidence > 100: confidence = 100
 
@@ -252,10 +305,13 @@ def get_analysis(ticker):
             target = current_price - (1.5 * current_atr)
             stop_loss = current_price + (1.0 * current_atr)
 
-        support = float(df['Low'].tail(24).min())
-        resistance = float(df['High'].tail(24).max())
+        # Расчет лота
+        lot = calculate_lot_size(USER_BALANCE, USER_RISK_PCT, current_price, stop_loss, ticker)
 
-        return current_price, current_rsi, forecast, target, stop_loss, support, resistance, " | ".join(reasons), news, confidence
+        support = float(df_1h['Low'].tail(24).min())
+        resistance = float(df_1h['High'].tail(24).max())
+
+        return current_price, current_rsi, forecast, target, stop_loss, support, resistance, " | ".join(reasons), news, confidence, lot
     except Exception as e:
         print(f"Ошибка анализа {ticker}: {e}")
         return None
@@ -268,12 +324,11 @@ async def send_signal(chat_id, ticker, is_auto=False):
             if not is_auto: await bot.send_message(chat_id, "⚠️ Ошибка данных. Попробуйте позже.")
             return
 
-        price, rsi, forecast, target, sl, support, resistance, reasons, news, confidence = result
-        asset_name = ASSETS.get(ticker, ticker)
+        price, rsi, forecast, target, sl, support, resistance, reasons, news, confidence, lot = result
+        asset_name = ASSETS.get(ticker, {}).get("name", ticker)
         
         if is_auto:
             if confidence < 70:
-                print(f"Авто: {asset_name} уверенность {confidence}% < 70%")
                 return
             else:
                 status_text = "🎯 <b>СНАЙПЕР (Высокая уверенность)</b>" if confidence >= 85 else "⚡️ <b>Сильный сигнал</b>"
@@ -283,8 +338,8 @@ async def send_signal(chat_id, ticker, is_auto=False):
 
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
-        c.execute("INSERT INTO history (timestamp, price, rsi, forecast, target_price, stop_loss, confidence, ticker) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                  (now_str, price, rsi, forecast, target, sl, confidence, ticker))
+        c.execute("INSERT INTO history (timestamp, price, rsi, forecast, target_price, stop_loss, confidence, ticker, lot_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  (now_str, price, rsi, forecast, target, sl, confidence, ticker, lot))
         signal_id = c.lastrowid
         conn.commit()
         conn.close()
@@ -295,7 +350,8 @@ async def send_signal(chat_id, ticker, is_auto=False):
         text = (f"📊 <b>Анализ {asset_name}</b> {'(АВТО)' if is_auto else ''} #{signal_id}\n"
                 f"🔮 Уверенность: <b>{confidence}%</b> {conf_bar}\n\n"
                 f"Цена входа: <b>{price:.5f}</b> | RSI: {rsi:.1f}\n"
-                f"🎯 TP: <b>{target:.5f}</b> | 🛑 SL: <b>{sl:.5f}</b>\n\n"
+                f"🎯 TP: <b>{target:.5f}</b> | 🛑 SL: <b>{sl:.5f}</b>\n"
+                f"📦 Лот (при риске {USER_RISK_PCT}%): <b>{lot}</b>\n\n"
                 f"🧠 <b>Факторы:</b>\n{reasons}\n\n"
                 f"🛡️ <b>Ликвидность:</b>\nПоддержка: {support:.5f} | Сопротивление: {resistance:.5f}\n\n"
                 f"📰 <b>Новость:</b>\n<i>{safe_news}</i>\n\n"
@@ -311,15 +367,14 @@ async def background_worker():
     while True:
         try:
             if AUTO_SIGNAL_ENABLED and USER_CHAT_ID:
-                # Сканируем ВСЕ активы
                 for ticker in ASSETS.keys():
                     await send_signal(USER_CHAT_ID, ticker, is_auto=True)
-                    await asyncio.sleep(2) # Небольшая пауза между запросами
+                    await asyncio.sleep(2)
                 await asyncio.sleep(5 * 60) 
             else:
                 await asyncio.sleep(10)
 
-            # Проверка закрытых сделок (фоновый процесс)
+            # Проверка закрытых сделок + Trailing Stop
             conn = sqlite3.connect('signals.db')
             c = conn.cursor()
             c.execute("SELECT id, timestamp, price, target_price, stop_loss, forecast, ticker FROM history WHERE result IS NULL")
@@ -327,7 +382,8 @@ async def background_worker():
 
             if pending:
                 for sig_id, sig_time, old_price, tp, sl, forecast, ticker in pending:
-                    current_data = await asyncio.to_thread(get_live_price_and_data, ticker)
+                    bq_sym = ASSETS.get(ticker, {}).get("bq", "XAUUSD")
+                    current_data = await asyncio.to_thread(get_biquote_data, bq_sym, "1m", 60)
                     if current_data.empty: continue
                     
                     sig_dt = pd.to_datetime(sig_time)
@@ -336,16 +392,31 @@ async def background_worker():
                     if recent_data.empty: continue
                     high_price = recent_data['High'].max()
                     low_price = recent_data['Low'].min()
+                    current_close = recent_data['Close'].iloc[-1]
                     
                     result_text = ""
                     close_price = 0.0
                     
+                    # Проверка Trailing Stop (если цена прошла 50% до TP)
                     if "ВВЕРХ" in forecast:
                         if high_price >= tp: result_text, close_price = "WIN ✅", tp
                         elif low_price <= sl: result_text, close_price = "LOSS ❌", sl
+                        elif high_price >= (old_price + (tp - old_price) * 0.5):
+                            # Двигаем SL в безубыток
+                            new_sl = max(sl, old_price)
+                            if new_sl > sl:
+                                c.execute("UPDATE history SET stop_loss = ? WHERE id = ?", (new_sl, sig_id))
+                                conn.commit()
+                                sl = new_sl
                     elif "ВНИЗ" in forecast:
                         if low_price <= tp: result_text, close_price = "WIN ✅", tp
                         elif high_price >= sl: result_text, close_price = "LOSS ❌", sl
+                        elif low_price <= (old_price - (old_price - tp) * 0.5):
+                            new_sl = min(sl, old_price)
+                            if new_sl < sl:
+                                c.execute("UPDATE history SET stop_loss = ? WHERE id = ?", (new_sl, sig_id))
+                                conn.commit()
+                                sl = new_sl
 
                     if result_text:
                         c.execute("UPDATE history SET result = ?, close_price = ? WHERE id = ?", (result_text, close_price, sig_id))
@@ -371,14 +442,14 @@ async def background_worker():
             print(f"Ошибка фона: {e}")
         await asyncio.sleep(30)
 
-# --- Клавиатуры ---
+# --- КЛАВИАТУРЫ ---
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📈 Прогноз")],
             [KeyboardButton(text="🚀 Вкл Авто"), KeyboardButton(text="🛑 Выкл Авто")],
             [KeyboardButton(text="🧠 Веса"), KeyboardButton(text="📜 История")],
-            [KeyboardButton(text="⚙️ Выбрать Актив (для ручного)")]
+            [KeyboardButton(text="⚙️ Актив"), KeyboardButton(text="💰 Настройки риска")]
         ],
         resize_keyboard=True
     )
@@ -386,50 +457,70 @@ def get_main_keyboard():
 def get_asset_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🥇 Золото (XAUUSD)")],
-            [KeyboardButton(text="🇬🇧 Фунт/Йена (GBP/JPY)")],
-            [KeyboardButton(text="🇦🇺 Австрал/Йена (AUD/JPY)")],
+            [KeyboardButton(text="🥇 Золото")],
+            [KeyboardButton(text="🇬🇧 Фунт/Йена")],
+            [KeyboardButton(text="🇦🇺 Австрал/Йена")],
             [KeyboardButton(text="⬅️ Назад")]
         ],
         resize_keyboard=True
     )
 
-# --- Обработчики ---
+# --- ОБРАБОТЧИКИ ---
 @dp.message(CommandStart())
 async def start_command(message: types.Message):
     global USER_CHAT_ID
     USER_CHAT_ID = message.chat.id
     await message.answer(
-        "Привет! Бот готов. В авто-режиме он сканирует ВСЕ активы (Золото, GBP/JPY, AUD/JPY) и присылает лучшие.\n\n"
-        "Для ручного запроса используйте кнопку 'Прогноз' (анализирует выбранный актив).", 
+        f"Привет! Бот (biquote + МультиТФ + Риск) готов.\n"
+        f"Депозит: ${USER_BALANCE:.2f} | Риск: {USER_RISK_PCT}%\n\n"
+        f"В авто-режиме сканирует все активы и присылает сигналы >70%.", 
         reply_markup=get_main_keyboard()
     )
 
-@dp.message(lambda message: "Выбрать Актив" in message.text)
+@dp.message(lambda message: "Актив" in message.text)
 async def asset_menu_handler(message: types.Message):
     await message.answer("Выберите актив для РУЧНОГО анализа:", reply_markup=get_asset_keyboard())
 
 @dp.message(lambda message: "Назад" in message.text)
 async def back_handler(message: types.Message):
-    await message.answer("Возврат в меню.", reply_markup=get_main_keyboard())
+    await message.answer("Возврат.", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "Золото" in message.text)
 async def set_gold(message: types.Message):
     global CURRENT_TICKER
     CURRENT_TICKER = "GC=F"
-    await message.answer("Актив для ручного анализа: <b>Золото</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
+    await message.answer("Актив: <b>Золото</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 @dp.message(lambda message: "Фунт/Йена" in message.text)
 async def set_gbpjpy(message: types.Message):
     global CURRENT_TICKER
     CURRENT_TICKER = "GBPJPY=X"
-    await message.answer("Актив для ручного анализа: <b>Фунт/Йена</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
+    await message.answer("Актив: <b>Фунт/Йена</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 @dp.message(lambda message: "Австрал/Йена" in message.text)
 async def set_audjpy(message: types.Message):
     global CURRENT_TICKER
     CURRENT_TICKER = "AUDJPY=X"
-    await message.answer("Актив для ручного анализа: <b>Австрал/Йена</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
+    await message.answer("Актив: <b>Австрал/Йена</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
+
+@dp.message(lambda message: "Настройки риска" in message.text)
+async def risk_settings(message: types.Message):
+    await message.answer(f"Текущий депозит: <b>${USER_BALANCE:.2f}</b>\nРиск: <b>{USER_RISK_PCT}%</b>\n\n"
+                         f"Отправьте новое значение депозита (например: <code>1500</code>) или риска в процентах (например: <code>2</code>).",
+                         parse_mode="HTML")
+
+@dp.message(lambda message: message.text.replace('.','',1).isdigit())
+async def update_risk_settings(message: types.Message):
+    global USER_BALANCE, USER_RISK_PCT
+    val = float(message.text)
+    if val > 100:
+        USER_BALANCE = val
+        await message.answer(f"✅ Депозит обновлен: <b>${USER_BALANCE:.2f}</b>", parse_mode="HTML", reply_markup=get_main_keyboard())
+    elif 0 < val <= 10:
+        USER_RISK_PCT = val
+        await message.answer(f"✅ Риск обновлен: <b>{USER_RISK_PCT}%</b>", parse_mode="HTML", reply_markup=get_main_keyboard())
+    else:
+        await message.answer("Введите сумму (больше 100) или процент риска (1-10).", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "Прогноз" in message.text or message.text == "/signal")
 async def signal_handler(message: types.Message):
@@ -440,7 +531,7 @@ async def autostart_handler(message: types.Message):
     global AUTO_SIGNAL_ENABLED, USER_CHAT_ID
     AUTO_SIGNAL_ENABLED = True
     USER_CHAT_ID = message.chat.id
-    await message.answer("🚀 Авто-режим ВКЛЮЧЕН. Сканирую Золото, GBP/JPY, AUD/JPY.", reply_markup=get_main_keyboard())
+    await message.answer("🚀 Авто-режим ВКЛЮЧЕН (biquote, 4H фильтр).", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "Выкл Авто" in message.text or message.text == "/autostop")
 async def autostop_handler(message: types.Message):
@@ -455,7 +546,7 @@ async def weights_handler(message: types.Message):
     c.execute("SELECT factor, weight FROM weights")
     weights = c.fetchall()
     conn.close()
-    text = "🧠 <b>Текущие веса факторов:</b>\n\n"
+    text = "🧠 <b>Веса:</b>\n\n"
     for factor, weight in weights:
         text += f"• {factor}: <b>{weight:.1f}</b>\n"
     await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
@@ -465,7 +556,7 @@ async def history_handler(message: types.Message):
     try:
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
-        c.execute("SELECT id, timestamp, price, close_price, forecast, result, confidence, ticker FROM history WHERE result IS NOT NULL ORDER BY id DESC")
+        c.execute("SELECT id, timestamp, price, close_price, forecast, result, confidence, ticker, lot_size FROM history WHERE result IS NOT NULL ORDER BY id DESC")
         trades = c.fetchall()
         conn.close()
 
@@ -486,32 +577,4 @@ async def history_handler(message: types.Message):
             if "WIN" in t[5]:
                 balance_pct += abs(exit_price - entry_price) / entry_price
             else:
-                balance_pct -= abs(exit_price - entry_price) / entry_price
-
-        text = (
-            f"📜 <b>Статистика (все активы)</b>\n\n"
-            f"Всего сделок: <b>{total}</b>\n"
-            f"🟢 WIN: <b>{wins}</b> | 🔴 LOSS: <b>{losses}</b>\n"
-            f"🎯 Винрейт: <b>{winrate:.1f}%</b>\n\n"
-            f"💰 Симуляция ($1): <b>{balance_pct*100:+.2f}%</b>\n\n"
-            f"<i>Последние 5 сделок:</i>\n"
-        )
-
-        for t in trades[:5]:
-            icon = "✅" if "WIN" in t[5] else "❌"
-            cp = t[3] if t[3] is not None else t[2]
-            conf = t[6] if t[6] else 0
-            tick = t[7] if t[7] else "GC=F"
-            text += f"{icon} {tick} #{t[0]} ({conf}%) | {t[2]:.3f}→{cp:.3f}\n"
-
-        await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
-    except Exception as e:
-        await message.answer(f"⚠️ Ошибка: {e}", reply_markup=get_main_keyboard())
-
-async def main():
-    init_db()
-    asyncio.create_task(background_worker())
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+                balance_pct -= abs(exit_price - entry_price) /
