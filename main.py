@@ -20,13 +20,22 @@ dp = Dispatcher()
 AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
 
+# --- БАЗА ДАННЫХ С ЗАЩИТОЙ ОТ СТАРЫХ ТАБЛИЦ ---
 def init_db():
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
+    # Создаем таблицу, если ее нет
     c.execute('''CREATE TABLE IF NOT EXISTS history
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, price REAL, rsi REAL, forecast TEXT, 
                   target_price REAL, stop_loss REAL, close_price REAL, result TEXT)''')
+    
+    # ПРОВЕРКА: Если таблица уже была создана раньше и в ней нет колонки close_price, добавляем её
+    try:
+        c.execute("ALTER TABLE history ADD COLUMN close_price REAL")
+    except sqlite3.OperationalError:
+        pass # Колонка уже есть, ничего не делаем
+
     c.execute('''CREATE TABLE IF NOT EXISTS weights
                  (factor TEXT PRIMARY KEY, weight REAL)''')
     for factor in ['RSI', 'TREND', 'AI_NEWS']:
@@ -201,7 +210,6 @@ async def background_worker():
                         result_text = ""
                         close_price = 0.0
                         
-                        # Логика закрытия
                         if "ВВЕРХ" in forecast:
                             if high_price >= tp: 
                                 result_text = "WIN ✅"
@@ -294,7 +302,6 @@ async def weights_handler(message: types.Message):
         text += f"• {factor}: <b>{weight:.1f}</b>\n"
     await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
-# --- НОВАЯ ФУНКЦИЯ СТАТИСТИКИ ---
 @dp.message(lambda message: message.text == "📜 История сделок" or message.text == "/history")
 async def history_handler(message: types.Message):
     conn = sqlite3.connect('signals.db')
@@ -312,16 +319,11 @@ async def history_handler(message: types.Message):
     losses = total - wins
     winrate = (wins / total) * 100 if total > 0 else 0
 
-    # Симуляция торговли (фиксированный лот)
-    # Если WIN: зарабатываем разницу между TP и входом, но мы берем фиксированную прибыль за сделку +1%
-    # Если LOSS: теряем -0.5% (соотношение 1 к 2)
-    # (Упрощенная математика, чтобы показать относительную доходность)
     balance_usd = 0.0
     for t in trades:
         if "WIN" in t[5]:
-            # Прибыль = (Цена выхода - Цена входа) / Цена входа
             profit_pct = abs(t[3] - t[2]) / t[2]
-            balance_usd += profit_pct # Симуляция в "процентах от 1 доллара"
+            balance_usd += profit_pct
         else:
             loss_pct = abs(t[3] - t[2]) / t[2]
             balance_usd -= loss_pct
@@ -339,7 +341,9 @@ async def history_handler(message: types.Message):
 
     for t in trades[:5]:
         icon = "✅" if "WIN" in t[5] else "❌"
-        text += f"{icon} #{t[0]} | Вход: ${t[2]:.2f} -> Выход: ${t[3]:.2f}\n"
+        # Проверка, если close_price пустой (например, старые сделки), выводим 0
+        cp = t[3] if t[3] else 0.0
+        text += f"{icon} #{t[0]} | Вход: ${t[2]:.2f} -> Выход: ${cp:.2f}\n"
 
     await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
