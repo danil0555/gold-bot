@@ -577,4 +577,32 @@ async def history_handler(message: types.Message):
             if "WIN" in t[5]:
                 balance_pct += abs(exit_price - entry_price) / entry_price
             else:
-                balance_pct -= abs(exit_price - entry_price) /
+                balance_pct -= abs(exit_price - entry_price) / entry_price
+
+        text = (
+            f"📜 <b>Статистика</b>\n\n"
+            f"Всего: <b>{total}</b> | 🟢 {wins} | 🔴 {losses}\n"
+            f"🎯 Винрейт: <b>{winrate:.1f}%</b>\n\n"
+            f"💰 Симуляция: <b>{balance_pct*100:+.2f}%</b>\n\n"
+            f"<i>Последние 5:</i>\n"
+        )
+
+        for t in trades[:5]:
+            icon = "✅" if "WIN" in t[5] else "❌"
+            cp = t[3] if t[3] is not None else t[2]
+            conf = t[6] if t[6] else 0
+            tick = t[7] if t[7] else "GC=F"
+            lot = t[8] if t[8] else 0.01
+            text += f"{icon} {tick} ({conf}%) | {t[2]:.3f}→{cp:.3f} | Лот: {lot}\n"
+
+        await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка: {e}", reply_markup=get_main_keyboard())
+
+async def main():
+    init_db()
+    asyncio.create_task(background_worker())
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
