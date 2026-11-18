@@ -3,3 +3,4 @@ aiohttp
 yfinance
 pandas
 feedparser
+curl_cffi
