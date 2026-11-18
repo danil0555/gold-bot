@@ -4,7 +4,7 @@ import pandas as pd
 import feedparser
 import requests
 from openai import OpenAI
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
 
@@ -27,7 +27,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS history
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, price REAL, rsi REAL, forecast TEXT, 
-                  target_price REAL, stop_loss REAL, result TEXT)''')
+                  target_price REAL, stop_loss REAL, user_confirmed INTEGER, result TEXT)''')
     # Таблица для самообучения (веса факторов)
     c.execute('''CREATE TABLE IF NOT EXISTS weights
                  (factor TEXT PRIMARY KEY, weight REAL)''')
@@ -40,7 +40,6 @@ def init_db():
 # --- ПОЛУЧЕНИЕ ТОЧНОЙ ЦЕНЫ (REAL-TIME) ---
 def get_live_price_and_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
-    # Берем минутные данные, чтобы цена была максимально точной
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=1m"
     
     try:
@@ -50,7 +49,6 @@ def get_live_price_and_data():
         timestamps = result['timestamp']
         quotes = result['indicators']['quote'][0]
         
-        # Собираем в DataFrame
         df = pd.DataFrame({
             'Open': quotes['open'],
             'High': quotes['high'],
@@ -70,7 +68,6 @@ def get_analysis():
         df = get_live_price_and_data()
         if df.empty: return None
 
-        # Расчет индикаторов на минутных данных
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -85,7 +82,6 @@ def get_analysis():
         current_rsi = float(df.iloc[-1]['RSI'])
         current_atr = float(df.iloc[-1]['ATR'])
 
-        # Получаем текущие веса из базы (самообучение)
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
         c.execute("SELECT factor, weight FROM weights")
@@ -95,7 +91,6 @@ def get_analysis():
         score = 0.0
         reasons = []
 
-        # Фактор 1: RSI
         if current_rsi < 30:
             score += 2 * weights.get('RSI', 1.0)
             reasons.append(f"RSI<30 (+{2 * weights['RSI']:.1f})")
@@ -103,7 +98,6 @@ def get_analysis():
             score -= 2 * weights.get('RSI', 1.0)
             reasons.append(f"RSI>70 (-{2 * weights['RSI']:.1f})")
 
-        # Фактор 2: Тренд (по 50-минутной средней)
         trend = "BULL" if df['Close'].iloc[-1] > df['Close'].rolling(50).mean().iloc[-1] else "BEAR"
         if trend == "BULL":
             score += 1 * weights.get('TREND', 1.0)
@@ -112,8 +106,6 @@ def get_analysis():
             score -= 1 * weights.get('TREND', 1.0)
             reasons.append(f"Тренд↓ (-{1 * weights['TREND']:.1f})")
 
-        # Фактор 3: Новости от ИИ
-        # (Для экономии токенов вызываем реже, но для примера оставим)
         news = "Новостей нет." 
         try:
             feed = feedparser.parse("https://finance.yahoo.com/rss/2.0/headline?s=GC=F")
@@ -122,7 +114,8 @@ def get_analysis():
         
         if news != "Новостей нет.":
             response = ai_client.chat.completions.create(
-                model="meta-llama/llama-3-8b-instruct",
+                # ИСПРАВЛЕНА МОДЕЛЬ ЗДЕСЬ
+                model="meta-llama/llama-3.1-8b-instruct",
                 messages=[{"role": "user", "content": f"Оцени новость для золота от -5 до +5. '{news}'. Ответь только цифрой."}],
                 temperature=0.1, max_tokens=5
             )
@@ -133,7 +126,6 @@ def get_analysis():
                 score += ai_score * weights.get('AI_NEWS', 1.0)
                 reasons.append(f"ИИ Новости ({ai_score * weights['AI_NEWS']:+.1f})")
 
-        # Итоговый прогноз
         if score >= 0:
             forecast = "🟢 ВВЕРХ"
             target = current_price + (1.5 * current_atr)
@@ -151,7 +143,6 @@ def get_analysis():
         print(f"Ошибка анализа: {e}")
         return None
 
-# --- ОТПРАВКА СИГНАЛА ---
 async def send_signal(chat_id, is_auto=False):
     try:
         await bot.send_chat_action(chat_id, 'typing')
@@ -188,22 +179,18 @@ async def send_signal(chat_id, is_auto=False):
     except Exception as e:
         print(f"Ошибка отправки: {e}")
 
-# --- ФОНОВАЯ ПРОВЕРКА (САМООБУЧЕНИЕ) ---
 async def background_worker():
     global AUTO_SIGNAL_ENABLED, USER_CHAT_ID
     while True:
         try:
-            # 1. Отправка нового сигнала (если включен авто-режим)
             if AUTO_SIGNAL_ENABLED and USER_CHAT_ID:
                 await send_signal(USER_CHAT_ID, is_auto=True)
-                await asyncio.sleep(5 * 60) # Ждем 5 минут
+                await asyncio.sleep(5 * 60) 
             else:
                 await asyncio.sleep(10)
 
-            # 2. Проверка старых прогнозов (Самообучение)
             conn = sqlite3.connect('signals.db')
             c = conn.cursor()
-            # Ищем прогнозы, которые еще не проверены
             c.execute("SELECT id, timestamp, price, target_price, stop_loss, forecast FROM history WHERE result IS NULL")
             pending = c.fetchall()
 
@@ -223,11 +210,9 @@ async def background_worker():
                         
                         result_text = ""
                         
-                        # Проверка на WIN или LOSS
                         if "ВВЕРХ" in forecast:
                             if high_price >= tp: result_text = f"WIN ✅ (TP ${tp:.2f})"
                             elif low_price <= sl: result_text = f"LOSS ❌ (SL ${sl:.2f})"
-                            # Умная проверка: если прошло 5 минут, а цена пошла против нас
                             elif (datetime.now() - sig_dt).total_seconds() > 300 and current_close < old_price:
                                 result_text = f"LOSS ❌ (Цена пошла против нас)"
                         elif "ВНИЗ" in forecast:
@@ -236,25 +221,16 @@ async def background_worker():
                             elif (datetime.now() - sig_dt).total_seconds() > 300 and current_close > old_price:
                                 result_text = f"LOSS ❌ (Цена пошла против нас)"
 
-                        # Если сигнал закрылся — обновляем базу и учимся
                         if result_text:
                             c.execute("UPDATE history SET result = ? WHERE id = ?", (result_text, sig_id))
                             conn.commit()
                             
-                            # --- ЛОГИКА САМООБУЧЕНИЯ ---
                             if "LOSS" in result_text:
-                                # Если бот ошибся, он снижает вес фактора, который привел к ошибке
-                                # (В упрощенном виде: снижаем вес тренда или RSI, если они совпали с прогнозом)
-                                if "Тренд" in str(reasons): 
-                                    c.execute("UPDATE weights SET weight = MAX(0.2, weight - 0.1) WHERE factor = 'TREND'")
-                                if "RSI" in str(reasons): 
-                                    c.execute("UPDATE weights SET weight = MAX(0.2, weight - 0.1) WHERE factor = 'RSI'")
+                                c.execute("UPDATE weights SET weight = MAX(0.2, weight - 0.1) WHERE factor = 'TREND'")
+                                c.execute("UPDATE weights SET weight = MAX(0.2, weight - 0.1) WHERE factor = 'RSI'")
                             else:
-                                # Если WIN — повышаем уверенность в этих факторах
-                                if "Тренд" in str(reasons): 
-                                    c.execute("UPDATE weights SET weight = MIN(2.0, weight + 0.1) WHERE factor = 'TREND'")
-                                if "RSI" in str(reasons): 
-                                    c.execute("UPDATE weights SET weight = MIN(2.0, weight + 0.1) WHERE factor = 'RSI'")
+                                c.execute("UPDATE weights SET weight = MIN(2.0, weight + 0.1) WHERE factor = 'TREND'")
+                                c.execute("UPDATE weights SET weight = MIN(2.0, weight + 0.1) WHERE factor = 'RSI'")
                             conn.commit()
 
                             if USER_CHAT_ID:
@@ -264,7 +240,6 @@ async def background_worker():
             print(f"Ошибка фона: {e}")
         await asyncio.sleep(30)
 
-# --- КОМАНДЫ БОТА ---
 @dp.message(CommandStart())
 async def start_command(message: types.Message):
     global USER_CHAT_ID
