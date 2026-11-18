@@ -5,3 +5,5 @@ pandas
 feedparser
 curl_cffi
 pandas_datareader
+biquote
+pytz
