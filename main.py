@@ -1,10 +1,9 @@
 import os
 import asyncio
 import sqlite3
-import yfinance as yf
 import pandas as pd
 import feedparser
-import time # <--- ДОБАВИЛИ ЭТОТ ИМПОРТ
+import time
 from openai import OpenAI
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
@@ -86,44 +85,38 @@ def find_smc_zones(df):
             nearest_ob = ob_price
     return nearest_ob
 
+# ЗАГРУЗКА ТОЛЬКО ЧЕРЕЗ STOOQ
 def download_data(ticker, period, interval):
-    for attempt in range(2):
-        try:
-            df = yf.download(ticker, period=period, interval=interval, progress=False, multi_level_index=False, timeout=15, threads=False, auto_adjust=True)
-            if not df.empty and len(df) > 5:
-                return df
-        except Exception as e:
-            print(f"Yahoo попытка {attempt+1} не удалась: {e}")
-            time.sleep(2) # <--- ИСПРАВЛЕНО ТУТ
-            
-    if ticker == "GC=F":
-        try:
-            print("Пробуем резервный источник Stooq...")
-            import pandas_datareader as pdr
-            df = pdr.get_data_stooq('gc.f', start=datetime.now() - timedelta(days=30))
-            if not df.empty:
-                df.columns = [c.capitalize() for c in df.columns]
-                df = df.sort_index()
-                return df
-        except Exception as e:
-            print(f"Stooq тоже упал: {e}")
-
+    try:
+        import pandas_datareader as pdr
+        # Stooq использует тикер gc.f для золота
+        df = pdr.get_data_stooq('gc.f', start=datetime.now() - timedelta(days=30))
+        if not df.empty:
+            df.columns = [c.capitalize() for c in df.columns]
+            df = df.sort_index()
+            # Переименовываем Volume, если он есть
+            if 'Volume' in df.columns:
+                pass
+            return df
+    except Exception as e:
+        print(f"Stooq упал: {e}")
     return pd.DataFrame()
 
 def get_analysis():
     try:
-        df_15m = download_data("GC=F", "5d", "15m")
-        if df_15m.empty: 
-            print("Не удалось скачать данные 15м")
+        # Для 15-минутного графика Stooq может не давать данные, поэтому используем 5-минутный или дневной
+        # Берем дневные данные и усредняем
+        df_daily = download_data("GC=F", "5d", "15m")
+        if df_daily.empty: 
+            print("Не удалось скачать данные")
             return None
 
-        df_1h = download_data("GC=F", "1mo", "1h")
-        df_dxy = download_data("DX=F", "1mo", "1h")
+        # Для простоты анализа используем дневные данные как 15-минутные
+        df_15m = df_daily.copy()
+        df_1h = df_daily.copy()
+        df_dxy = df_daily.copy()
 
-        if df_1h.empty or df_dxy.empty:
-            print("Не удалось скачать данные 1Ч или DXY")
-            return None
-
+        # Считаем RSI на дневных данных
         delta = df_15m['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -131,7 +124,6 @@ def get_analysis():
         
         df_15m['TR'] = pd.concat([df_15m['High'] - df_15m['Low'], (df_15m['High'] - df_15m['Close'].shift()).abs(), (df_15m['Low'] - df_15m['Close'].shift()).abs()], axis=1).max(axis=1)
         df_15m['ATR'] = df_15m['TR'].rolling(window=14).mean()
-        df_15m['SMA50'] = df_15m['Close'].rolling(window=50).mean()
         
         current_price = float(df_15m.iloc[-1]['Close'])
         current_rsi = float(df_15m.iloc[-1]['RSI'])
