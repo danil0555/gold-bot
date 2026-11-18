@@ -1,13 +1,12 @@
-import os
 import asyncio
 import sqlite3
 import pandas as pd
 import feedparser
-import requests
 from openai import OpenAI
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
+from biquote import Biquote
 
 # ВАШИ КЛЮЧИ
 BOT_TOKEN = "8990920545:AAFbVp_UNRg3a-_9xIFEaLdTc5J4Oyru0NM"
@@ -16,6 +15,7 @@ OPENROUTER_KEY = "sk-or-v1-96a169e554f4fc3aeaa51c8eb36ae744ceb96fca42ddf99a4e3da
 ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+bq = Biquote()
 
 AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
@@ -27,10 +27,6 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, price REAL, rsi REAL, forecast TEXT, 
                   target_price REAL, stop_loss REAL, user_confirmed INTEGER, result TEXT)''')
-    try: c.execute("ALTER TABLE history ADD COLUMN result TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE history ADD COLUMN stop_loss REAL")
-    except: pass
     conn.commit()
     conn.close()
 
@@ -59,45 +55,33 @@ def get_news():
         pass
     return "Новостей нет."
 
-# НОВЫЙ ИСТОЧНИК: xaus.com (без ключа, не блокирует хостинги)
-def get_gold_history():
-    try:
-        resp = requests.get("https://xaus.com/api/v1/history", timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            # API возвращает список исторических цен
-            prices = data.get("prices", [])
-            if prices:
-                df = pd.DataFrame(prices)
-                df['date'] = pd.to_datetime(df['date'])
-                df = df.set_index('date').sort_index()
-                df['Close'] = df['price']
-                df['High'] = df['price'] * 1.005
-                df['Low'] = df['price'] * 0.995
-                df['Open'] = df['price']
-                return df
-    except Exception as e:
-        print(f"Xaus API ошибка: {e}")
-    return pd.DataFrame()
-
 def get_analysis():
     try:
-        df = get_gold_history()
-        if df.empty:
-            print("Нет данных от xaus.com")
+        # Получаем свечи XAUUSD через biquote (данные с MetaTrader 5)
+        bars = bq.ohlc("XAUUSD", interval="1h", limit=100)
+        if not bars:
+            print("Нет данных от biquote")
             return None
+        
+        df = pd.DataFrame(bars)
+        df['close'] = df['close'].astype(float)
+        df['high'] = df['high'].astype(float)
+        df['low'] = df['low'].astype(float)
+        df['open'] = df['open'].astype(float)
 
-        # Расчет RSI и ATR на основе полученных данных
-        delta = df['Close'].diff()
+        # RSI
+        delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         df['RSI'] = 100 - (100 / (1 + (gain / loss)))
-        df['TR'] = pd.concat([df['High'] - df['Low'],
-                              (df['High'] - df['Close'].shift()).abs(),
-                              (df['Low'] - df['Close'].shift()).abs()], axis=1).max(axis=1)
+        
+        # ATR
+        df['TR'] = pd.concat([df['high'] - df['low'],
+                              (df['high'] - df['close'].shift()).abs(),
+                              (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1)
         df['ATR'] = df['TR'].rolling(window=14).mean()
 
-        current_price = float(df.iloc[-1]['Close'])
+        current_price = float(df.iloc[-1]['close'])
         current_rsi = float(df.iloc[-1]['RSI'])
         current_atr = float(df.iloc[-1]['ATR'])
 
@@ -111,8 +95,8 @@ def get_analysis():
             score -= 2
             reasons.append("RSI>70 (-2)")
 
-        # Упрощенный тренд (по последним ценам)
-        trend = "BULL" if df['Close'].iloc[-1] > df['Close'].rolling(20).mean().iloc[-1] else "BEAR"
+        # Тренд по 50-периодной средней
+        trend = "BULL" if df['close'].iloc[-1] > df['close'].rolling(50).mean().iloc[-1] else "BEAR"
         if trend == "BULL":
             score += 1
             reasons.append("Тренд↑ (+1)")
@@ -135,8 +119,8 @@ def get_analysis():
             target = current_price - (1.5 * current_atr)
             stop_loss = current_price + (1.0 * current_atr)
 
-        support = float(df.tail(48)['Low'].min())
-        resistance = float(df.tail(48)['High'].max())
+        support = float(df['low'].tail(48).min())
+        resistance = float(df['high'].tail(48).max())
 
         return current_price, current_rsi, forecast, target, stop_loss, support, resistance, " | ".join(reasons), news
     except Exception as e:
@@ -152,8 +136,7 @@ async def send_signal(chat_id, is_auto=False):
             return
 
         price, rsi, forecast, target, sl, support, resistance, reasons, news = result
-        now = datetime.now()
-        now_str = now.strftime("%Y-%m-%d %H:%M")
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
@@ -189,7 +172,6 @@ async def background_worker():
                 await asyncio.sleep(5 * 60)
             else:
                 await asyncio.sleep(10)
-            # Проверка WIN/LOSS упрощена, так как API xaus.com не дает минутные данные
         except Exception as e:
             print(f"Ошибка фона: {e}")
         await asyncio.sleep(30)
