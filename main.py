@@ -40,44 +40,103 @@ def get_news():
         pass
     return "Новостей нет."
 
-# --- АНАЛИЗ ---
+# --- АНАЛИЗ (МУЛЬТИФАКТОРНЫЙ) ---
 def get_analysis():
     try:
-        # Для 5-минутного интервала берем 5m свечи
-        data = yf.download("GC=F", period="5d", interval="5m", progress=False, multi_level_index=False)
-        if data.empty:
+        # 1. Скачиваем данные
+        df_15m = yf.download("GC=F", period="5d", interval="15m", progress=False, multi_level_index=False)
+        df_1h = yf.download("GC=F", period="1mo", interval="1h", progress=False, multi_level_index=False)
+        try:
+            df_dxy = yf.download("DX-Y.NYB", period="1mo", interval="1h", progress=False, multi_level_index=False)
+        except:
+            df_dxy = pd.DataFrame() # Если доллар не скачался, работаем без него
+
+        if df_15m.empty or df_1h.empty:
             return None
         
-        delta = data['Close'].diff()
+        # Считаем RSI (15m)
+        delta = df_15m['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
-        data['RSI'] = 100 - (100 / (1 + rs))
+        df_15m['RSI'] = 100 - (100 / (1 + rs))
         
-        data['SMA50'] = data['Close'].rolling(window=50).mean()
-        data['SMA200'] = data['Close'].rolling(window=200).mean()
+        # Считаем ATR (волатильность) для умных целей
+        df_15m['TR'] = pd.concat([df_15m['High'] - df_15m['Low'], 
+                                  (df_15m['High'] - df_15m['Close'].shift()).abs(), 
+                                  (df_15m['Low'] - df_15m['Close'].shift()).abs()], axis=1).max(axis=1)
+        df_15m['ATR'] = df_15m['TR'].rolling(window=14).mean()
         
-        last_row = data.iloc[-1]
-        price = float(last_row['Close'])
-        rsi = float(last_row['RSI'])
-        sma50 = float(last_row['SMA50'])
-        sma200 = float(last_row['SMA200'])
+        # Считаем тренд на 1H
+        df_1h['SMA50'] = df_1h['Close'].rolling(window=50).mean()
         
-        recent_data = data.tail(24)
+        # Текущие значения
+        current_price = float(df_15m.iloc[-1]['Close'])
+        current_rsi = float(df_15m.iloc[-1]['RSI'])
+        current_atr = float(df_15m.iloc[-1]['ATR'])
+        
+        trend_1h = "BULL" if df_1h.iloc[-1]['Close'] > df_1h.iloc[-1]['SMA50'] else "BEAR"
+        
+        trend_dxy = "NEUTRAL"
+        if not df_dxy.empty:
+            df_dxy['SMA50'] = df_dxy['Close'].rolling(window=50).mean()
+            trend_dxy = "BULL" if df_dxy.iloc[-1]['Close'] > df_dxy.iloc[-1]['SMA50'] else "BEAR"
+
+        # --- СИСТЕМА БАЛЛОВ (SCORING SYSTEM) ---
+        score = 0
+        reasons = []
+
+        # 1. RSI
+        if current_rsi < 30:
+            score += 2
+            reasons.append("RSI<30 (+2)")
+        elif current_rsi > 70:
+            score -= 2
+            reasons.append("RSI>70 (-2)")
+
+        # 2. Тренд 1H
+        if trend_1h == "BULL":
+            score += 1
+            reasons.append("Тренд 1Ч↑ (+1)")
+        else:
+            score -= 1
+            reasons.append("Тренд 1Ч↓ (-1)")
+
+        # 3. Доллар (DXY)
+        if trend_dxy == "BULL":
+            score -= 1
+            reasons.append("Доллар↑ (-1)")
+        elif trend_dxy == "BEAR":
+            score += 1
+            reasons.append("Доллар↓ (+1)")
+
+        # 4. Новости (Простой сентимент-анализ)
+        news = get_news()
+        news_lower = news.lower()
+        if any(w in news_lower for w in ["war", "conflict", "crisis", "inflation", "recession"]):
+            score += 1
+            reasons.append("Новости↑ (+1)")
+        elif any(w in news_lower for w in ["hike", "strong dollar", "growth", "surge"]):
+            score -= 1
+            reasons.append("Новости↓ (-1)")
+
+        # Итоговый прогноз
+        if score > 0:
+            forecast = "🟢 ВВЕРХ"
+            target = current_price + (1.5 * current_atr)
+        elif score < 0:
+            forecast = "🔴 ВНИЗ"
+            target = current_price - (1.5 * current_atr)
+        else:
+            forecast = "⚪️ НЕЙТРАЛЬНО"
+            target = current_price
+
+        # Уровни поддержки/сопротивления (48 часов)
+        recent_data = df_15m.tail(48 * 4) # 48 часов * 4 свечи в час
         support = float(recent_data['Low'].min())
         resistance = float(recent_data['High'].max())
-        
-        # --- ЛОГИКА: ВСЕГДА ДАЕМ ПРОГНОЗ ---
-        if rsi < 35:
-            forecast, target = "🟢 ВВЕРХ (отскок)", price + 3.0
-        elif rsi > 65:
-            forecast, target = "🔴 ВНИЗ (коррекция)", price - 3.0
-        elif price > sma50:
-            forecast, target = "🟢 ВВЕРХ (по тренду)", price + 3.0
-        else:
-            forecast, target = "🔴 ВНИЗ (по тренду)", price - 3.0
-            
-        return price, rsi, sma50, sma200, forecast, target, support, resistance
+
+        return current_price, current_rsi, forecast, target, support, resistance, " | ".join(reasons), news
     except Exception as e:
         print(f"Ошибка анализа: {e}")
         return None
@@ -87,31 +146,30 @@ async def send_signal(chat_id, is_auto=False):
     await bot.send_chat_action(chat_id, 'typing')
     result = get_analysis()
     if not result:
+        if not is_auto:
+            await bot.send_message(chat_id, "Ошибка получения данных. Попробуйте позже.")
         return
         
-    price, rsi, sma50, sma200, forecast, target, support, resistance = result
-    news = get_news()
+    price, rsi, forecast, target, support, resistance, reasons, news = result
     now = datetime.now()
     now_str = now.strftime("%Y-%m-%d %H:%M")
-    # Меняем время проверки на +5 минут
     check_time_str = (now + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
     
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
-    c.execute("INSERT INTO history (timestamp, price, rsi, sma50, sma200, forecast, target_price, check_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-              (now_str, price, rsi, sma50, sma200, forecast, target, check_time_str))
+    c.execute("INSERT INTO history (timestamp, price, rsi, forecast, target_price, check_time) VALUES (?, ?, ?, ?, ?, ?)",
+              (now_str, price, rsi, forecast, target, check_time_str))
     signal_id = c.lastrowid
     conn.commit()
     conn.close()
 
-    text = (f"📊 **Анализ XAUUSD** {'(АВТО)' if is_auto else ''} (Сигнал #{signal_id})\n\n"
-            f"Цена: **${price:.2f}**\n"
-            f"RSI: {rsi:.2f} | Тренд: {'Вверх' if price > sma200 else 'Вниз'}\n\n"
-            f"🛡️ **Уровни (2ч):**\n"
-            f"Поддержка: ${support:.2f} | Сопротивление: ${resistance:.2f}\n\n"
+    text = (f"📊 **Анализ XAUUSD** {'(АВТО)' if is_auto else ''} #{signal_id}\n\n"
+            f"Цена: **${price:.2f}** | RSI: {rsi:.1f}\n"
+            f"🎯 Цель по волатильности: **${target:.2f}**\n\n"
+            f"🧠 **Факторы:**\n{reasons}\n\n"
+            f"🛡️ **Ликвидность (48ч):**\nПоддержка: ${support:.2f}\nСопротивление: ${resistance:.2f}\n\n"
             f"📰 **Новость:**\n_{news}_\n\n"
             f"Прогноз: **{forecast}**\n"
-            f"Цель: **${target:.2f}**\n"
             f"⏳ _Проверка через 5 минут_")
     
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -127,12 +185,10 @@ async def background_worker():
         try:
             if AUTO_SIGNAL_ENABLED and USER_CHAT_ID:
                 await send_signal(USER_CHAT_ID, is_auto=True)
-                # Ждем 5 минут (300 секунд)
                 await asyncio.sleep(5 * 60) 
             else:
                 await asyncio.sleep(10)
 
-            # Проверяем сигналы
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
             conn = sqlite3.connect('signals.db')
             c = conn.cursor()
@@ -150,6 +206,8 @@ async def background_worker():
                             result_text = "WIN ✅" if current_price > old_price else "LOSS ❌"
                         elif "ВНИЗ" in forecast:
                             result_text = "WIN ✅" if current_price < old_price else "LOSS ❌"
+                        else:
+                            result_text = "FLAT ⚪"
                         
                         c.execute("UPDATE history SET result = ? WHERE id = ?", (result_text, sig_id))
                         conn.commit()
@@ -158,7 +216,7 @@ async def background_worker():
                             await bot.send_message(
                                 USER_CHAT_ID, 
                                 f"🔔 **Проверка #{sig_id}**\n"
-                                f"Было: {forecast}\n"
+                                f"Прогноз: {forecast}\n"
                                 f"Вход: ${old_price:.2f} → Сейчас: ${current_price:.2f}\n"
                                 f"Результат: **{result_text}**"
                             )
@@ -172,14 +230,14 @@ async def background_worker():
 async def start_command(message: types.Message):
     global USER_CHAT_ID
     USER_CHAT_ID = message.chat.id
-    await message.answer(f"Привет! Бот готов.\n/signal — ручной прогноз\n/autostart — включить прогнозы каждые 5 минут\n/autostop — выключить\n/history — история")
+    await message.answer(f"Привет! Я — продвинутая версия бота.\n/signal — ручной прогноз\n/autostart — включить авто-прогнозы (каждые 5 мин)\n/autostop — выключить\n/history — история")
 
 @dp.message(Command("autostart"))
 async def autostart_command(message: types.Message):
     global AUTO_SIGNAL_ENABLED, USER_CHAT_ID
     AUTO_SIGNAL_ENABLED = True
     USER_CHAT_ID = message.chat.id
-    await message.answer("🚀 Авто-режим ВКЛЮЧЕН. Прогнозы и проверки каждые 5 минут.")
+    await message.answer("🚀 Авто-режим ВКЛЮЧЕН. Мультифакторный анализ каждые 5 минут.")
 
 @dp.message(Command("autostop"))
 async def autostop_command(message: types.Message):
