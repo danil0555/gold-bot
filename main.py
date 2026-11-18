@@ -56,6 +56,8 @@ def get_live_price_and_data():
             'Close': quotes['close']
         }, index=pd.to_datetime(timestamps, unit='s'))
         df = df.dropna()
+        # Убираем часовой пояс, чтобы избежать ошибок сравнения
+        df.index = df.index.tz_localize(None)
         return df
     except Exception as e:
         print(f"Ошибка получения цены: {e}")
@@ -104,12 +106,20 @@ def get_analysis():
             score -= 1 * weights.get('TREND', 1.0)
             reasons.append(f"Тренд↓ (-{1 * weights['TREND']:.1f})")
 
+        # --- ФИЛЬТР НОВОСТЕЙ ---
         news = "Новостей нет." 
+        ai_score = 0
         try:
             feed = feedparser.parse("https://finance.yahoo.com/rss/2.0/headline?s=GC=F")
-            if feed.entries: news = feed.entries[0].title
+            if feed.entries: 
+                raw_news = feed.entries[0].title
+                # Проверяем, есть ли в новости ключевые слова для золота
+                keywords = ["gold", "xau", "fed", "interest rate", "inflation", "dollar", "fomc", "powell"]
+                if any(kw in raw_news.lower() for kw in keywords):
+                    news = raw_news
         except: pass
         
+        # Если новость релевантна, отправляем в ИИ
         if news != "Новостей нет.":
             response = ai_client.chat.completions.create(
                 model="meta-llama/llama-3.1-8b-instruct",
@@ -122,6 +132,8 @@ def get_analysis():
             if ai_score != 0:
                 score += ai_score * weights.get('AI_NEWS', 1.0)
                 reasons.append(f"ИИ Новости ({ai_score * weights['AI_NEWS']:+.1f})")
+        else:
+            reasons.append("Новости нейтральны (0)")
 
         if score >= 0:
             forecast = "🟢 ВВЕРХ"
@@ -192,8 +204,6 @@ async def background_worker():
             if pending:
                 current_data = await asyncio.to_thread(get_live_price_and_data)
                 if not current_data.empty:
-                    current_data.index = current_data.index.tz_localize(None)
-                    
                     for sig_id, sig_time, old_price, tp, sl, forecast in pending:
                         sig_dt = pd.to_datetime(sig_time)
                         recent_data = current_data[current_data.index >= sig_dt]
@@ -206,6 +216,7 @@ async def background_worker():
                         result_text = ""
                         close_price = 0.0
                         
+                        # ДАЕМ СДЕЛКЕ БОЛЬШЕ ВРЕМЕНИ (не закрываем по времени, только по TP/SL)
                         if "ВВЕРХ" in forecast:
                             if high_price >= tp: 
                                 result_text = "WIN ✅"
@@ -213,9 +224,6 @@ async def background_worker():
                             elif low_price <= sl: 
                                 result_text = "LOSS ❌"
                                 close_price = sl
-                            elif (datetime.now() - sig_dt).total_seconds() > 300 and current_close < old_price:
-                                result_text = "LOSS ❌ (По времени)"
-                                close_price = current_close
                         elif "ВНИЗ" in forecast:
                             if low_price <= tp: 
                                 result_text = "WIN ✅"
@@ -223,9 +231,6 @@ async def background_worker():
                             elif high_price >= sl: 
                                 result_text = "LOSS ❌"
                                 close_price = sl
-                            elif (datetime.now() - sig_dt).total_seconds() > 300 and current_close > old_price:
-                                result_text = "LOSS ❌ (По времени)"
-                                close_price = current_close
 
                         if result_text:
                             c.execute("UPDATE history SET result = ?, close_price = ? WHERE id = ?", (result_text, close_price, sig_id))
@@ -318,12 +323,11 @@ async def history_handler(message: types.Message):
 
         balance_usd = 0.0
         for t in trades:
-            # Проверка на None для старых записей
             entry_price = t[2] if t[2] is not None else 0.0
             exit_price = t[3] if t[3] is not None else entry_price
             
             if entry_price == 0.0:
-                continue # Пропускаем битые сделки
+                continue
 
             if "WIN" in t[5]:
                 profit_pct = abs(exit_price - entry_price) / entry_price
@@ -345,7 +349,7 @@ async def history_handler(message: types.Message):
 
         for t in trades[:5]:
             icon = "✅" if "WIN" in t[5] else "❌"
-            cp = t[3] if t[3] is not None else t[2] # Если нет цены выхода, показываем цену входа
+            cp = t[3] if t[3] is not None else t[2]
             text += f"{icon} #{t[0]} | Вход: ${t[2]:.2f} -> Выход: ${cp:.2f}\n"
 
         await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
