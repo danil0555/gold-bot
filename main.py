@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
 
-# ВСТАВЬТЕ СВОИ КЛЮЧИ СЮДА МЕЖДУ КАВЫЧКАМИ
+# ВАШИ КЛЮЧИ (УЖЕ ВСТАВЛЕНЫ)
 BOT_TOKEN = "8990920545:AAFbVp_UNRg3a-_9xIFEaLdTc5J4Oyru0NM"
 OPENROUTER_KEY = "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"
 
@@ -76,6 +76,33 @@ def get_news():
         pass
     return "Новостей нет."
 
+# НОВАЯ ФУНКЦИЯ ДЛЯ НАДЕЖНОЙ ЗАГРУЗКИ ДАННЫХ (Yahoo + Stooq)
+def download_data(ticker, period, interval):
+    # 1. Пытаемся получить данные с Yahoo (основной источник)
+    try:
+        df = yf.download(ticker, period=period, interval=interval, progress=False, multi_level_index=False, timeout=10, auto_adjust=True)
+        if not df.empty and len(df) > 5:
+            return df
+    except Exception as e:
+        print(f"Yahoo не ответил для {ticker}: {e}")
+
+    # 2. Если Yahoo упал, берем золото со Stooq (резервный источник)
+    if ticker == "GC=F":
+        try:
+            print("Пробуем резервный источник Stooq...")
+            import pandas_datareader as pdr
+            # Stooq использует тикер gc.f для золота
+            df = pdr.get_data_stooq('gc.f', start=datetime.now() - timedelta(days=30))
+            if not df.empty:
+                # Приводим названия колонок к нужному формату (Open, High, Low, Close)
+                df.columns = [c.capitalize() for c in df.columns]
+                df = df.sort_index() # Сортируем по времени
+                return df
+        except Exception as e:
+            print(f"Stooq тоже упал: {e}")
+
+    return pd.DataFrame()
+
 def find_smc_zones(df):
     df['Body'] = abs(df['Close'] - df['Open'])
     df['ATR_Base'] = (df['High'] - df['Low']).rolling(14).mean()
@@ -94,11 +121,19 @@ def find_smc_zones(df):
 
 def get_analysis():
     try:
-        df_15m = yf.download("GC=F", period="5d", interval="15m", progress=False, multi_level_index=False, timeout=10)
-        if df_15m.empty: return None
+        # ИСПОЛЬЗУЕМ НОВУЮ БЕЗОПАСНУЮ ФУНКЦИЮ
+        df_15m = download_data("GC=F", "5d", "15m")
+        if df_15m.empty: 
+            print("Не удалось скачать данные 15м")
+            return None
 
-        df_1h = yf.download("GC=F", period="1mo", interval="1h", progress=False, multi_level_index=False, timeout=10)
-        df_dxy = yf.download("DX=F", period="1mo", interval="1h", progress=False, multi_level_index=False, timeout=10)
+        df_1h = download_data("GC=F", "1mo", "1h")
+        df_dxy = download_data("DX=F", "1mo", "1h")
+
+        # Защита, если 1h или DXY не скачались
+        if df_1h.empty or df_dxy.empty:
+            print("Не удалось скачать данные 1Ч или DXY")
+            return None
 
         delta = df_15m['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -181,7 +216,7 @@ async def send_signal(chat_id, is_auto=False):
         result = await asyncio.wait_for(asyncio.to_thread(get_analysis), timeout=25.0)
         
         if not result:
-            if not is_auto: await bot.send_message(chat_id, "⚠️ Ошибка данных.")
+            if not is_auto: await bot.send_message(chat_id, "⚠️ Ошибка данных. Попробуйте позже.")
             return
             
         price, rsi, forecast, target, sl, support, resistance, reasons, news, ob = result
@@ -229,7 +264,8 @@ async def background_worker():
             pending = c.fetchall()
 
             if pending:
-                current_data = await asyncio.to_thread(yf.download, "GC=F", period="1d", interval="1m", progress=False, multi_level_index=False)
+                # ИСПОЛЬЗУЕМ НОВУЮ ФУНКЦИЮ ДЛЯ ПРОВЕРКИ WIN/LOSS
+                current_data = await asyncio.to_thread(download_data, "GC=F", "1d", "1m")
                 if not current_data.empty:
                     for sig_id, sig_time, old_price, tp, sl, forecast in pending:
                         sig_dt = pd.to_datetime(sig_time)
