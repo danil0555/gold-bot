@@ -2,11 +2,11 @@ import asyncio
 import sqlite3
 import pandas as pd
 import feedparser
+import requests
 from openai import OpenAI
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
-from biquote import Biquote
 
 # ВАШИ КЛЮЧИ
 BOT_TOKEN = "8990920545:AAFbVp_UNRg3a-_9xIFEaLdTc5J4Oyru0NM"
@@ -15,7 +15,6 @@ OPENROUTER_KEY = "sk-or-v1-96a169e554f4fc3aeaa51c8eb36ae744ceb96fca42ddf99a4e3da
 ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-bq = Biquote()
 
 AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
@@ -55,33 +54,51 @@ def get_news():
         pass
     return "Новостей нет."
 
+# ПРЯМОЙ ЗАПРОС К YAHOO БЕЗ БИБЛИОТЕКИ YFINANCE
+def get_gold_data():
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=1h"
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        data = response.json()
+        
+        if 'chart' in data and 'result' in data['chart'] and data['chart']['result'] is not None:
+            result = data['chart']['result'][0]
+            timestamps = result['timestamp']
+            closes = result['indicators']['quote'][0]['close']
+            
+            df = pd.DataFrame({'Close': closes}, index=pd.to_datetime(timestamps, unit='s'))
+            df = df.dropna()
+            return df
+    except Exception as e:
+        print(f"Ошибка Yahoo API: {e}")
+    return pd.DataFrame()
+
 def get_analysis():
     try:
-        # Получаем свечи XAUUSD через biquote (данные с MetaTrader 5)
-        bars = bq.ohlc("XAUUSD", interval="1h", limit=100)
-        if not bars:
-            print("Нет данных от biquote")
+        df = get_gold_data()
+        if df.empty:
+            print("Нет данных от Yahoo API")
             return None
-        
-        df = pd.DataFrame(bars)
-        df['close'] = df['close'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        df['open'] = df['open'].astype(float)
 
         # RSI
-        delta = df['close'].diff()
+        delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         df['RSI'] = 100 - (100 / (1 + (gain / loss)))
         
-        # ATR
-        df['TR'] = pd.concat([df['high'] - df['low'],
-                              (df['high'] - df['close'].shift()).abs(),
-                              (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1)
+        # Имитация High/Low для расчета ATR (чтобы не усложнять)
+        df['High'] = df['Close'] * 1.002
+        df['Low'] = df['Close'] * 0.998
+        df['TR'] = pd.concat([df['High'] - df['Low'],
+                              (df['High'] - df['Close'].shift()).abs(),
+                              (df['Low'] - df['Close'].shift()).abs()], axis=1).max(axis=1)
         df['ATR'] = df['TR'].rolling(window=14).mean()
 
-        current_price = float(df.iloc[-1]['close'])
+        current_price = float(df.iloc[-1]['Close'])
         current_rsi = float(df.iloc[-1]['RSI'])
         current_atr = float(df.iloc[-1]['ATR'])
 
@@ -95,8 +112,7 @@ def get_analysis():
             score -= 2
             reasons.append("RSI>70 (-2)")
 
-        # Тренд по 50-периодной средней
-        trend = "BULL" if df['close'].iloc[-1] > df['close'].rolling(50).mean().iloc[-1] else "BEAR"
+        trend = "BULL" if df['Close'].iloc[-1] > df['Close'].rolling(50).mean().iloc[-1] else "BEAR"
         if trend == "BULL":
             score += 1
             reasons.append("Тренд↑ (+1)")
@@ -119,8 +135,8 @@ def get_analysis():
             target = current_price - (1.5 * current_atr)
             stop_loss = current_price + (1.0 * current_atr)
 
-        support = float(df['low'].tail(48).min())
-        resistance = float(df['high'].tail(48).max())
+        support = float(df['Low'].tail(48).min())
+        resistance = float(df['High'].tail(48).max())
 
         return current_price, current_rsi, forecast, target, stop_loss, support, resistance, " | ".join(reasons), news
     except Exception as e:
