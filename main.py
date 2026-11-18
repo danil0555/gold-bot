@@ -40,62 +40,54 @@ def get_news():
         pass
     return "Новостей нет."
 
-# --- АНАЛИЗ (МУЛЬТИФАКТОРНЫЙ, С ЗАЩИТОЙ ОТ ЗАВИСАНИЙ) ---
+# --- АНАЛИЗ ---
 def get_analysis():
     try:
-        # 1. Основные данные (15 минут) - ОБЯЗАТЕЛЬНЫ
-        df_15m = yf.download("GC=F", period="5d", interval="15m", progress=False, multi_level_index=False)
+        # Скачиваем данные с тайм-аутом
+        df_15m = yf.download("GC=F", period="5d", interval="15m", progress=False, multi_level_index=False, timeout=10)
         if df_15m.empty:
             return None
-        
-        # 2. Данные 1H (необязательно, но полезно)
+
         try:
-            df_1h = yf.download("GC=F", period="1mo", interval="1h", progress=False, multi_level_index=False)
+            df_1h = yf.download("GC=F", period="1mo", interval="1h", progress=False, multi_level_index=False, timeout=10)
         except:
             df_1h = pd.DataFrame()
 
-        # 3. Доллар (необязательно)
         try:
-            # Используем фьючерс на доллар (DX=F) - он стабильнее
-            df_dxy = yf.download("DX=F", period="1mo", interval="1h", progress=False, multi_level_index=False)
+            df_dxy = yf.download("DX=F", period="1mo", interval="1h", progress=False, multi_level_index=False, timeout=10)
         except:
             df_dxy = pd.DataFrame()
 
-        # Считаем RSI (15m)
+        # Считаем RSI
         delta = df_15m['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df_15m['RSI'] = 100 - (100 / (1 + rs))
         
-        # Считаем ATR (волатильность) для умных целей
+        # ATR
         df_15m['TR'] = pd.concat([df_15m['High'] - df_15m['Low'], 
                                   (df_15m['High'] - df_15m['Close'].shift()).abs(), 
                                   (df_15m['Low'] - df_15m['Close'].shift()).abs()], axis=1).max(axis=1)
         df_15m['ATR'] = df_15m['TR'].rolling(window=14).mean()
         
-        # Текущие значения
         current_price = float(df_15m.iloc[-1]['Close'])
         current_rsi = float(df_15m.iloc[-1]['RSI'])
         current_atr = float(df_15m.iloc[-1]['ATR']) if not pd.isna(df_15m.iloc[-1]['ATR']) else 3.0
         
-        # Тренд на 1H
         trend_1h = "NEUTRAL"
         if not df_1h.empty and len(df_1h) > 50:
             df_1h['SMA50'] = df_1h['Close'].rolling(window=50).mean()
             trend_1h = "BULL" if df_1h.iloc[-1]['Close'] > df_1h.iloc[-1]['SMA50'] else "BEAR"
         
-        # Тренд доллара
         trend_dxy = "NEUTRAL"
         if not df_dxy.empty and len(df_dxy) > 50:
             df_dxy['SMA50'] = df_dxy['Close'].rolling(window=50).mean()
             trend_dxy = "BULL" if df_dxy.iloc[-1]['Close'] > df_dxy.iloc[-1]['SMA50'] else "BEAR"
 
-        # --- СИСТЕМА БАЛЛОВ (SCORING SYSTEM) ---
         score = 0
         reasons = []
 
-        # 1. RSI
         if current_rsi < 30:
             score += 2
             reasons.append("RSI<30 (+2)")
@@ -103,7 +95,6 @@ def get_analysis():
             score -= 2
             reasons.append("RSI>70 (-2)")
 
-        # 2. Тренд 1H
         if trend_1h == "BULL":
             score += 1
             reasons.append("Тренд 1Ч↑ (+1)")
@@ -111,7 +102,6 @@ def get_analysis():
             score -= 1
             reasons.append("Тренд 1Ч↓ (-1)")
 
-        # 3. Доллар (DXY)
         if trend_dxy == "BULL":
             score -= 1
             reasons.append("Доллар↑ (-1)")
@@ -119,7 +109,6 @@ def get_analysis():
             score += 1
             reasons.append("Доллар↓ (+1)")
 
-        # 4. Новости
         news = get_news()
         news_lower = news.lower()
         if any(w in news_lower for w in ["war", "conflict", "crisis", "inflation", "recession"]):
@@ -129,7 +118,6 @@ def get_analysis():
             score -= 1
             reasons.append("Новости↓ (-1)")
 
-        # Итоговый прогноз
         if score > 0:
             forecast = "🟢 ВВЕРХ"
             target = current_price + (1.5 * current_atr)
@@ -140,7 +128,6 @@ def get_analysis():
             forecast = "⚪️ НЕЙТРАЛЬНО"
             target = current_price
 
-        # Уровни поддержки/сопротивления (48 часов)
         recent_data = df_15m.tail(48 * 4) 
         support = float(recent_data['Low'].min())
         resistance = float(recent_data['High'].max())
@@ -153,10 +140,13 @@ def get_analysis():
 # --- ОТПРАВКА СИГНАЛА ---
 async def send_signal(chat_id, is_auto=False):
     await bot.send_chat_action(chat_id, 'typing')
-    result = get_analysis()
+    
+    # ВАЖНО: Запускаем тяжелую функцию в отдельном потоке, чтобы бот не зависал
+    result = await asyncio.to_thread(get_analysis)
+    
     if not result:
         if not is_auto:
-            await bot.send_message(chat_id, "⚠️ Ошибка получения данных от Yahoo Finance. Рынок закрыт или идет обновление. Попробуйте через минуту.")
+            await bot.send_message(chat_id, "⚠️ Ошибка получения данных (Yahoo Finance не отвечает). Попробуйте позже.")
         return
         
     price, rsi, forecast, target, support, resistance, reasons, news = result
@@ -205,7 +195,8 @@ async def background_worker():
             pending = c.fetchall()
 
             if pending:
-                current_data = yf.download("GC=F", period="1d", interval="1m", progress=False, multi_level_index=False)
+                # Тоже запускаем в потоке
+                current_data = await asyncio.to_thread(yf.download, "GC=F", period="1d", interval="1m", progress=False, multi_level_index=False)
                 if not current_data.empty:
                     current_price = float(current_data['Close'].iloc[-1])
                     
