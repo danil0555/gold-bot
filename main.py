@@ -40,20 +40,27 @@ def get_news():
         pass
     return "Новостей нет."
 
-# --- АНАЛИЗ (МУЛЬТИФАКТОРНЫЙ) ---
+# --- АНАЛИЗ (МУЛЬТИФАКТОРНЫЙ, С ЗАЩИТОЙ ОТ ЗАВИСАНИЙ) ---
 def get_analysis():
     try:
-        # 1. Скачиваем данные
+        # 1. Основные данные (15 минут) - ОБЯЗАТЕЛЬНЫ
         df_15m = yf.download("GC=F", period="5d", interval="15m", progress=False, multi_level_index=False)
-        df_1h = yf.download("GC=F", period="1mo", interval="1h", progress=False, multi_level_index=False)
-        try:
-            df_dxy = yf.download("DX-Y.NYB", period="1mo", interval="1h", progress=False, multi_level_index=False)
-        except:
-            df_dxy = pd.DataFrame() # Если доллар не скачался, работаем без него
-
-        if df_15m.empty or df_1h.empty:
+        if df_15m.empty:
             return None
         
+        # 2. Данные 1H (необязательно, но полезно)
+        try:
+            df_1h = yf.download("GC=F", period="1mo", interval="1h", progress=False, multi_level_index=False)
+        except:
+            df_1h = pd.DataFrame()
+
+        # 3. Доллар (необязательно)
+        try:
+            # Используем фьючерс на доллар (DX=F) - он стабильнее
+            df_dxy = yf.download("DX=F", period="1mo", interval="1h", progress=False, multi_level_index=False)
+        except:
+            df_dxy = pd.DataFrame()
+
         # Считаем RSI (15m)
         delta = df_15m['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -67,18 +74,20 @@ def get_analysis():
                                   (df_15m['Low'] - df_15m['Close'].shift()).abs()], axis=1).max(axis=1)
         df_15m['ATR'] = df_15m['TR'].rolling(window=14).mean()
         
-        # Считаем тренд на 1H
-        df_1h['SMA50'] = df_1h['Close'].rolling(window=50).mean()
-        
         # Текущие значения
         current_price = float(df_15m.iloc[-1]['Close'])
         current_rsi = float(df_15m.iloc[-1]['RSI'])
-        current_atr = float(df_15m.iloc[-1]['ATR'])
+        current_atr = float(df_15m.iloc[-1]['ATR']) if not pd.isna(df_15m.iloc[-1]['ATR']) else 3.0
         
-        trend_1h = "BULL" if df_1h.iloc[-1]['Close'] > df_1h.iloc[-1]['SMA50'] else "BEAR"
+        # Тренд на 1H
+        trend_1h = "NEUTRAL"
+        if not df_1h.empty and len(df_1h) > 50:
+            df_1h['SMA50'] = df_1h['Close'].rolling(window=50).mean()
+            trend_1h = "BULL" if df_1h.iloc[-1]['Close'] > df_1h.iloc[-1]['SMA50'] else "BEAR"
         
+        # Тренд доллара
         trend_dxy = "NEUTRAL"
-        if not df_dxy.empty:
+        if not df_dxy.empty and len(df_dxy) > 50:
             df_dxy['SMA50'] = df_dxy['Close'].rolling(window=50).mean()
             trend_dxy = "BULL" if df_dxy.iloc[-1]['Close'] > df_dxy.iloc[-1]['SMA50'] else "BEAR"
 
@@ -98,7 +107,7 @@ def get_analysis():
         if trend_1h == "BULL":
             score += 1
             reasons.append("Тренд 1Ч↑ (+1)")
-        else:
+        elif trend_1h == "BEAR":
             score -= 1
             reasons.append("Тренд 1Ч↓ (-1)")
 
@@ -110,7 +119,7 @@ def get_analysis():
             score += 1
             reasons.append("Доллар↓ (+1)")
 
-        # 4. Новости (Простой сентимент-анализ)
+        # 4. Новости
         news = get_news()
         news_lower = news.lower()
         if any(w in news_lower for w in ["war", "conflict", "crisis", "inflation", "recession"]):
@@ -132,7 +141,7 @@ def get_analysis():
             target = current_price
 
         # Уровни поддержки/сопротивления (48 часов)
-        recent_data = df_15m.tail(48 * 4) # 48 часов * 4 свечи в час
+        recent_data = df_15m.tail(48 * 4) 
         support = float(recent_data['Low'].min())
         resistance = float(recent_data['High'].max())
 
@@ -147,7 +156,7 @@ async def send_signal(chat_id, is_auto=False):
     result = get_analysis()
     if not result:
         if not is_auto:
-            await bot.send_message(chat_id, "Ошибка получения данных. Попробуйте позже.")
+            await bot.send_message(chat_id, "⚠️ Ошибка получения данных от Yahoo Finance. Рынок закрыт или идет обновление. Попробуйте через минуту.")
         return
         
     price, rsi, forecast, target, support, resistance, reasons, news = result
@@ -165,9 +174,9 @@ async def send_signal(chat_id, is_auto=False):
 
     text = (f"📊 **Анализ XAUUSD** {'(АВТО)' if is_auto else ''} #{signal_id}\n\n"
             f"Цена: **${price:.2f}** | RSI: {rsi:.1f}\n"
-            f"🎯 Цель по волатильности: **${target:.2f}**\n\n"
-            f"🧠 **Факторы:**\n{reasons}\n\n"
-            f"🛡️ **Ликвидность (48ч):**\nПоддержка: ${support:.2f}\nСопротивление: ${resistance:.2f}\n\n"
+            f"🎯 Цель: **${target:.2f}**\n\n"
+            f"🧠 **Факторы:**\n{reasons if reasons else 'Нет явных сигналов'}\n\n"
+            f"🛡️ **Ликвидность:**\nПоддержка: ${support:.2f}\nСопротивление: ${resistance:.2f}\n\n"
             f"📰 **Новость:**\n_{news}_\n\n"
             f"Прогноз: **{forecast}**\n"
             f"⏳ _Проверка через 5 минут_")
@@ -222,7 +231,7 @@ async def background_worker():
                             )
             conn.close()
         except Exception as e:
-            print(f"Ошибка: {e}")
+            print(f"Ошибка фонового процесса: {e}")
         await asyncio.sleep(60)
 
 # --- КОМАНДЫ ---
@@ -230,7 +239,11 @@ async def background_worker():
 async def start_command(message: types.Message):
     global USER_CHAT_ID
     USER_CHAT_ID = message.chat.id
-    await message.answer(f"Привет! Я — продвинутая версия бота.\n/signal — ручной прогноз\n/autostart — включить авто-прогнозы (каждые 5 мин)\n/autostop — выключить\n/history — история")
+    await message.answer(f"Привет! Я — продвинутая версия бота.\n"
+                         f"/signal — ручной прогноз\n"
+                         f"/autostart — включить авто-прогнозы (каждые 5 мин)\n"
+                         f"/autostop — выключить\n"
+                         f"/history — история")
 
 @dp.message(Command("autostart"))
 async def autostart_command(message: types.Message):
