@@ -1,17 +1,14 @@
 import os
 import asyncio
-import aiohttp
 import sqlite3
 import yfinance as yf
 import pandas as pd
+import feedparser
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
-from aiohttp import web
 
-# Токен берется из настроек Koyeb (Environment Variables)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -25,6 +22,18 @@ def init_db():
                   forecast TEXT, target_price REAL, user_confirmed INTEGER)''')
     conn.commit()
     conn.close()
+
+# --- ФУНКЦИЯ ПОЛУЧЕНИЯ НОВОСТЕЙ ---
+def get_news():
+    try:
+        # Берем новости по фьючерсу на золото (GC=F) с Yahoo Finance
+        feed = feedparser.parse("https://finance.yahoo.com/rss/2.0/headline?s=GC=F&region=US&lang=en-US")
+        if feed.entries:
+            # Берем самый свежий заголовок
+            return feed.entries[0].title
+    except Exception:
+        pass
+    return "Свежих новостей пока нет."
 
 # --- АНАЛИЗ ---
 def get_analysis():
@@ -51,6 +60,11 @@ def get_analysis():
         sma50 = float(last_row['SMA50'].iloc[0]) if isinstance(last_row['SMA50'], pd.Series) else float(last_row['SMA50'])
         sma200 = float(last_row['SMA200'].iloc[0]) if isinstance(last_row['SMA200'], pd.Series) else float(last_row['SMA200'])
         
+        # --- НОВОЕ: Считаем уровни поддержки и сопротивления (за последние 24 часа) ---
+        recent_data = data.tail(24)
+        support = float(recent_data['Low'].min())
+        resistance = float(recent_data['High'].max())
+        
         # Логика сигнала
         trend = "BULL" if sma50 > sma200 else "BEAR"
         
@@ -63,7 +77,7 @@ def get_analysis():
         else:
             forecast, target = "⚪️ НЕЙТРАЛЬНО (ждать)", price
             
-        return price, rsi, sma50, sma200, forecast, target
+        return price, rsi, sma50, sma200, forecast, target, support, resistance
     except Exception as e:
         print(f"Ошибка анализа: {e}")
         return None
@@ -81,7 +95,8 @@ async def signal_command(message: types.Message):
         await message.answer("Ошибка получения данных. Попробуйте позже.")
         return
         
-    price, rsi, sma50, sma200, forecast, target = result
+    price, rsi, sma50, sma200, forecast, target, support, resistance = result
+    news = get_news()
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     
     # Сохраняем в БД
@@ -95,7 +110,11 @@ async def signal_command(message: types.Message):
 
     text = (f"📊 **Анализ XAUUSD** (Сигнал #{signal_id})\n\n"
             f"Цена: **${price:.2f}**\n"
-            f"RSI: {rsi:.2f} | Тренд: {'Вверх' if sma50 > sma200 else 'Вниз'}\n"
+            f"RSI: {rsi:.2f} | Тренд: {'Вверх' if sma50 > sma200 else 'Вниз'}\n\n"
+            f"🛡️ **Уровни (24ч):**\n"
+            f"Поддержка: ${support:.2f}\n"
+            f"Сопротивление: ${resistance:.2f}\n\n"
+            f"📰 **Новость:**\n_{news}_\n\n"
             f"Прогноз: **{forecast}**\n"
             f"Цель: **${target:.2f}**")
     
@@ -140,22 +159,9 @@ async def history_command(message: types.Message):
         text += f"#{sig_id} · {ts}\nЦена: ${price:.2f}\nПрогноз: {forecast}\nРеакция: {reaction}\n\n"
     await message.answer(text, parse_mode="Markdown")
 
-# --- ВЕБ-СЕРВЕР ДЛЯ KOYEB (чтобы сервер не засыпал) ---
-async def handle(request):
-    return web.Response(text="Bot is running!")
-
+# --- ЗАПУСК ---
 async def main():
     init_db()
-    # Запускаем веб-сервер
-    app = web.Application()
-    app.router.add_get('/', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", 8000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    
-    # Запускаем бота
     print("Бот запущен...")
     await dp.start_polling(bot)
 
