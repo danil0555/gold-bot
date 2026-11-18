@@ -4,6 +4,8 @@ import sqlite3
 import pandas as pd
 import feedparser
 import time
+import io
+import requests
 from openai import OpenAI
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
@@ -85,38 +87,35 @@ def find_smc_zones(df):
             nearest_ob = ob_price
     return nearest_ob
 
-# ЗАГРУЗКА ТОЛЬКО ЧЕРЕЗ STOOQ
+# НОВАЯ ФУНКЦИЯ: Скачиваем данные напрямую с сервера Stooq
 def download_data(ticker, period, interval):
     try:
-        import pandas_datareader as pdr
-        # Stooq использует тикер gc.f для золота
-        df = pdr.get_data_stooq('gc.f', start=datetime.now() - timedelta(days=30))
-        if not df.empty:
-            df.columns = [c.capitalize() for c in df.columns]
-            df = df.sort_index()
-            # Переименовываем Volume, если он есть
-            if 'Volume' in df.columns:
-                pass
-            return df
+        # Прямая ссылка на CSV-файл с историей XAUUSD
+        url = "https://stooq.com/q/d/l/?s=xauusd&i=d"
+        response = requests.get(url, timeout=15)
+        if response.status_code == 200 and not response.text.startswith("<"):
+            df = pd.read_csv(io.StringIO(response.text))
+            if not df.empty and 'Close' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'])
+                df = df.sort_values('Date')
+                df = df.set_index('Date')
+                return df
     except Exception as e:
-        print(f"Stooq упал: {e}")
+        print(f"Ошибка Stooq: {e}")
     return pd.DataFrame()
 
 def get_analysis():
     try:
-        # Для 15-минутного графика Stooq может не давать данные, поэтому используем 5-минутный или дневной
-        # Берем дневные данные и усредняем
-        df_daily = download_data("GC=F", "5d", "15m")
+        # Берем дневные данные с Stooq
+        df_daily = download_data("XAUUSD", "5d", "15m")
         if df_daily.empty: 
             print("Не удалось скачать данные")
             return None
 
-        # Для простоты анализа используем дневные данные как 15-минутные
         df_15m = df_daily.copy()
         df_1h = df_daily.copy()
         df_dxy = df_daily.copy()
 
-        # Считаем RSI на дневных данных
         delta = df_15m['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -243,7 +242,7 @@ async def background_worker():
             pending = c.fetchall()
 
             if pending:
-                current_data = await asyncio.to_thread(download_data, "GC=F", "1d", "1m")
+                current_data = await asyncio.to_thread(download_data, "XAUUSD", "1d", "1m")
                 if not current_data.empty:
                     current_data.index = current_data.index.tz_localize(None)
                     for sig_id, sig_time, old_price, tp, sl, forecast in pending:
