@@ -21,12 +21,10 @@ ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_K
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Глобальные настройки
 AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
 CURRENT_TICKER = "GC=F"
-CURRENT_NAME = "Золото (XAUUSD)"
-USER_BALANCE = 1000.0 # Депозит
+USER_BALANCE = 1000.0 
 
 class UserSettings(StatesGroup):
     waiting_for_balance = State()
@@ -67,10 +65,7 @@ def get_biquote_data(bq_symbol, interval="1h", limit=200):
         df = pd.DataFrame(env["bars"])
         df["openTime"] = pd.to_datetime(df["openTime"])
         df = df.set_index("openTime").sort_index()
-        
-        # ИСПРАВЛЕНИЕ: Убираем часовой пояс UTC
-        df.index = df.index.tz_localize(None) 
-        
+        df.index = df.index.tz_localize(None) # Убираем часовой пояс
         df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
         return df
     except Exception as e:
@@ -389,11 +384,12 @@ async def background_worker():
                         
                         all_factors = ['TREND', 'RSI', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3']
                         if "LOSS" in result_text:
+                            # УМНОЕ САМООБУЧЕНИЕ (мягкое падение, но не ниже 0.8)
                             for factor in all_factors:
-                                c.execute("UPDATE weights SET weight = MAX(0.2, weight - 0.1) WHERE factor = ?", (factor,))
+                                c.execute("UPDATE weights SET weight = MAX(0.8, weight - 0.05) WHERE factor = ?", (factor,))
                         else:
                             for factor in all_factors:
-                                c.execute("UPDATE weights SET weight = MIN(2.0, weight + 0.1) WHERE factor = ?", (factor,))
+                                c.execute("UPDATE weights SET weight = MIN(1.5, weight + 0.05) WHERE factor = ?", (factor,))
                         conn.commit()
 
                         if USER_CHAT_ID:
@@ -437,7 +433,7 @@ async def start_command(message: types.Message, state: FSMContext):
     USER_CHAT_ID = message.chat.id
     await state.clear()
     await message.answer(
-        f"Привет! Бот готов.\nВаш депозит: ${USER_BALANCE:.2f}\n(Риск на сделку рассчитывается ботом от 1% до 3%)", 
+        f"Привет! Бот готов.\nВаш депозит: ${USER_BALANCE:.2f}\n(Риск на сделку рассчитывается ботом)", 
         reply_markup=get_main_keyboard()
     )
 
@@ -519,7 +515,19 @@ async def weights_handler(message: types.Message, state: FSMContext):
     text = "🧠 <b>Веса:</b>\n\n"
     for factor, weight in weights:
         text += f"• {factor}: <b>{weight:.1f}</b>\n"
+    text += "\n<i>Чтобы сбросить веса, напишите /reset_weights</i>"
     await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
+
+# НОВАЯ КОМАНДА СБРОСА ВЕСОВ
+@dp.message(lambda message: "reset_weights" in message.text or message.text == "/reset_weights")
+async def reset_weights_handler(message: types.Message, state: FSMContext):
+    await state.clear()
+    conn = sqlite3.connect('signals.db')
+    c = conn.cursor()
+    c.execute("UPDATE weights SET weight = 1.0")
+    conn.commit()
+    conn.close()
+    await message.answer("🔄 <b>Все веса сброшены до 1.0!</b> Бот снова доверяет всем факторам одинаково.", parse_mode="HTML", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "История" in message.text or message.text == "/history")
 async def history_handler(message: types.Message, state: FSMContext):
