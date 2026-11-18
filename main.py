@@ -21,18 +21,15 @@ ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_K
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Глобальные настройки (в реальном проекте лучше хранить в БД, но для одного пользователя сойдет)
+# Глобальные настройки
 AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
 CURRENT_TICKER = "GC=F"
 CURRENT_NAME = "Золото (XAUUSD)"
-USER_BALANCE = 1000.0
-USER_RISK_PCT = 1.0
+USER_BALANCE = 1000.0 # Депозит (его вы задаете сами)
 
-# Машина состояний для настроек
 class UserSettings(StatesGroup):
     waiting_for_balance = State()
-    waiting_for_risk = State()
 
 ASSETS = {
     "GC=F": {"name": "Золото (XAUUSD)", "bq": "XAUUSD"},
@@ -47,8 +44,8 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, price REAL, rsi REAL, forecast TEXT, 
                   target_price REAL, stop_loss REAL, close_price REAL, result TEXT,
-                  confidence INTEGER, ticker TEXT, lot_size REAL)''')
-    for col in ["close_price REAL", "confidence INTEGER", "ticker TEXT", "lot_size REAL"]:
+                  confidence INTEGER, ticker TEXT, lot_size REAL, risk_pct REAL)''')
+    for col in ["close_price REAL", "confidence INTEGER", "ticker TEXT", "lot_size REAL", "risk_pct REAL"]:
         try: c.execute(f"ALTER TABLE history ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     
@@ -115,10 +112,20 @@ def get_ict_session_score():
     elif 8 <= hour < 17: return 1.0, "Нью-Йорк"
     else: return 0, "Закрытие"
 
-def calculate_lot_size(balance, risk_pct, entry, stop, ticker):
+# --- НОВАЯ ЛОГИКА РАСЧЕТА РИСКА И ЛОТА ---
+def calculate_risk_and_lot(balance, entry, stop, ticker, confidence):
+    # Бот сам решает, какой процент риска выделить (от 0.5% до 3%)
+    if confidence >= 85:
+        risk_pct = 3.0  # Снайпер - максимальный риск
+    elif confidence >= 75:
+        risk_pct = 2.0  # Сильный сигнал - средний риск
+    else:
+        risk_pct = 1.0  # Обычный - минимальный риск
+        
     risk_amount = balance * (risk_pct / 100)
     distance = abs(entry - stop)
-    if distance == 0: return 0.01
+    if distance == 0: return risk_pct, 0.01
+    
     if "XAU" in ticker:
         pip_value = 1.0
         pip_dist = distance / 0.01
@@ -127,7 +134,8 @@ def calculate_lot_size(balance, risk_pct, entry, stop, ticker):
         pip_value = 0.67
         pip_dist = distance / 0.01
         lot = risk_amount / (pip_dist * pip_value)
-    return round(max(0.01, min(lot, 10.0)), 2)
+    
+    return risk_pct, round(max(0.01, min(lot, 10.0)), 2)
 
 def get_analysis(ticker):
     try:
@@ -269,11 +277,13 @@ def get_analysis(ticker):
             target = current_price - (1.5 * current_atr)
             stop_loss = current_price + (1.0 * current_atr)
 
-        lot = calculate_lot_size(USER_BALANCE, USER_RISK_PCT, current_price, stop_loss, ticker)
+        # Бот сам предлагает риск и лот
+        risk_pct, lot = calculate_risk_and_lot(USER_BALANCE, current_price, stop_loss, ticker, confidence)
+        
         support = float(df_1h['Low'].tail(24).min())
         resistance = float(df_1h['High'].tail(24).max())
 
-        return current_price, current_rsi, forecast, target, stop_loss, support, resistance, " | ".join(reasons), news, confidence, lot
+        return current_price, current_rsi, forecast, target, stop_loss, support, resistance, " | ".join(reasons), news, confidence, lot, risk_pct
     except Exception as e:
         print(f"Ошибка анализа {ticker}: {e}")
         return None
@@ -286,7 +296,7 @@ async def send_signal(chat_id, ticker, is_auto=False):
             if not is_auto: await bot.send_message(chat_id, "⚠️ Ошибка данных. Попробуйте позже.")
             return
 
-        price, rsi, forecast, target, sl, support, resistance, reasons, news, confidence, lot = result
+        price, rsi, forecast, target, sl, support, resistance, reasons, news, confidence, lot, risk_pct = result
         asset_name = ASSETS.get(ticker, {}).get("name", ticker)
         
         if is_auto:
@@ -299,8 +309,8 @@ async def send_signal(chat_id, ticker, is_auto=False):
 
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
-        c.execute("INSERT INTO history (timestamp, price, rsi, forecast, target_price, stop_loss, confidence, ticker, lot_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                  (now_str, price, rsi, forecast, target, sl, confidence, ticker, lot))
+        c.execute("INSERT INTO history (timestamp, price, rsi, forecast, target_price, stop_loss, confidence, ticker, lot_size, risk_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  (now_str, price, rsi, forecast, target, sl, confidence, ticker, lot, risk_pct))
         signal_id = c.lastrowid
         conn.commit()
         conn.close()
@@ -312,7 +322,7 @@ async def send_signal(chat_id, ticker, is_auto=False):
                 f"🔮 Уверенность: <b>{confidence}%</b> {conf_bar}\n\n"
                 f"Цена входа: <b>{price:.5f}</b> | RSI: {rsi:.1f}\n"
                 f"🎯 TP: <b>{target:.5f}</b> | 🛑 SL: <b>{sl:.5f}</b>\n"
-                f"📦 Лот (при риске {USER_RISK_PCT}%): <b>{lot}</b>\n\n"
+                f"📦 Лот: <b>{lot}</b> (Риск: {risk_pct}% от депозита)\n\n"
                 f"🧠 <b>Факторы:</b>\n{reasons}\n\n"
                 f"🛡️ <b>Ликвидность:</b>\nПоддержка: {support:.5f} | Сопротивление: {resistance:.5f}\n\n"
                 f"📰 <b>Новость:</b>\n<i>{safe_news}</i>\n\n"
@@ -406,7 +416,7 @@ def get_main_keyboard():
             [KeyboardButton(text="📈 Прогноз")],
             [KeyboardButton(text="🚀 Вкл Авто"), KeyboardButton(text="🛑 Выкл Авто")],
             [KeyboardButton(text="🧠 Веса"), KeyboardButton(text="📜 История")],
-            [KeyboardButton(text="⚙️ Актив"), KeyboardButton(text="💰 Настройки риска")]
+            [KeyboardButton(text="⚙️ Актив"), KeyboardButton(text="💰 Депозит")]
         ],
         resize_keyboard=True
     )
@@ -429,7 +439,7 @@ async def start_command(message: types.Message, state: FSMContext):
     USER_CHAT_ID = message.chat.id
     await state.clear()
     await message.answer(
-        f"Привет! Бот готов.\nДепозит: ${USER_BALANCE:.2f} | Риск: {USER_RISK_PCT}%", 
+        f"Привет! Бот готов.\nВаш депозит: ${USER_BALANCE:.2f}\n(Риск на сделку бот рассчитывает сам от 0.5% до 3% в зависимости от уверенности)", 
         reply_markup=get_main_keyboard()
     )
 
@@ -464,26 +474,10 @@ async def set_audjpy(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Актив: <b>Австрал/Йена</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
 
-# --- НАСТРОЙКИ РИСКА (FSM) ---
-@dp.message(lambda message: "Настройки риска" in message.text)
-async def risk_menu(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        f"Текущий депозит: <b>${USER_BALANCE:.2f}</b>\nТекущий риск: <b>{USER_RISK_PCT}%</b>\n\n"
-        f"Что хотите изменить?\n"
-        f"Напишите <code>депозит</code> или <code>риск</code>.",
-        parse_mode="HTML"
-    )
-
-@dp.message(lambda message: message.text.lower() == "депозит")
+@dp.message(lambda message: "Депозит" in message.text)
 async def ask_balance(message: types.Message, state: FSMContext):
     await state.set_state(UserSettings.waiting_for_balance)
-    await message.answer("Введите новый размер депозита в USD (например: 1500):")
-
-@dp.message(lambda message: message.text.lower() == "риск")
-async def ask_risk(message: types.Message, state: FSMContext):
-    await state.set_state(UserSettings.waiting_for_risk)
-    await message.answer("Введите процент риска на сделку (например: 2):")
+    await message.answer("Введите ваш общий депозит в USD (например: 1000).\nБот будет рассчитывать лот и риск автоматически.")
 
 @dp.message(UserSettings.waiting_for_balance)
 async def process_balance(message: types.Message, state: FSMContext):
@@ -496,21 +490,6 @@ async def process_balance(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("Ошибка. Введите число (например: 1000).")
 
-@dp.message(UserSettings.waiting_for_risk)
-async def process_risk(message: types.Message, state: FSMContext):
-    global USER_RISK_PCT
-    try:
-        new_risk = float(message.text)
-        if 0 < new_risk <= 10:
-            USER_RISK_PCT = new_risk
-            await state.clear()
-            await message.answer(f"✅ Риск обновлен: <b>{USER_RISK_PCT}%</b>", parse_mode="HTML", reply_markup=get_main_keyboard())
-        else:
-            await message.answer("Риск должен быть от 0.1 до 10 (процентов). Попробуйте снова.")
-    except ValueError:
-        await message.answer("Ошибка. Введите число (например: 1.5).")
-
-# --- ОСТАЛЬНЫЕ КОМАНДЫ ---
 @dp.message(lambda message: "Прогноз" in message.text or message.text == "/signal")
 async def signal_handler(message: types.Message, state: FSMContext):
     await state.clear()
@@ -550,7 +529,7 @@ async def history_handler(message: types.Message, state: FSMContext):
     try:
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
-        c.execute("SELECT id, timestamp, price, close_price, forecast, result, confidence, ticker, lot_size FROM history WHERE result IS NOT NULL ORDER BY id DESC")
+        c.execute("SELECT id, timestamp, price, close_price, forecast, result, confidence, ticker, lot_size, risk_pct FROM history WHERE result IS NOT NULL ORDER BY id DESC")
         trades = c.fetchall()
         conn.close()
 
@@ -585,7 +564,8 @@ async def history_handler(message: types.Message, state: FSMContext):
             conf = t[6] if t[6] else 0
             tick = t[7] if t[7] else "GC=F"
             lot = t[8] if t[8] else 0.01
-            text += f"{icon} {tick} ({conf}%) | {t[2]:.3f}→{cp:.3f} | Лот: {lot}\n"
+            r_pct = t[9] if t[9] else 1.0
+            text += f"{icon} {tick} ({conf}%) | {t[2]:.3f}→{cp:.3f} | Лот: {lot} (Риск {r_pct}%)\n"
 
         await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
     except Exception as e:
