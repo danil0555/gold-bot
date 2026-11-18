@@ -43,7 +43,7 @@ def get_news():
 # --- АНАЛИЗ ---
 def get_analysis():
     try:
-        # Скачиваем данные с тайм-аутом
+        # Скачиваем данные с тайм-аутом (чтобы не зависало навсегда)
         df_15m = yf.download("GC=F", period="5d", interval="15m", progress=False, multi_level_index=False, timeout=10)
         if df_15m.empty:
             return None
@@ -139,43 +139,52 @@ def get_analysis():
 
 # --- ОТПРАВКА СИГНАЛА ---
 async def send_signal(chat_id, is_auto=False):
-    await bot.send_chat_action(chat_id, 'typing')
-    
-    # ВАЖНО: Запускаем тяжелую функцию в отдельном потоке, чтобы бот не зависал
-    result = await asyncio.to_thread(get_analysis)
-    
-    if not result:
-        if not is_auto:
-            await bot.send_message(chat_id, "⚠️ Ошибка получения данных (Yahoo Finance не отвечает). Попробуйте позже.")
-        return
+    try:
+        await bot.send_chat_action(chat_id, 'typing')
         
-    price, rsi, forecast, target, support, resistance, reasons, news = result
-    now = datetime.now()
-    now_str = now.strftime("%Y-%m-%d %H:%M")
-    check_time_str = (now + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
-    
-    conn = sqlite3.connect('signals.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO history (timestamp, price, rsi, forecast, target_price, check_time) VALUES (?, ?, ?, ?, ?, ?)",
-              (now_str, price, rsi, forecast, target, check_time_str))
-    signal_id = c.lastrowid
-    conn.commit()
-    conn.close()
+        # Запускаем скачивание данных в отдельном потоке, чтобы не блокировать бота
+        result = await asyncio.wait_for(asyncio.to_thread(get_analysis), timeout=20.0)
+        
+        if not result:
+            if not is_auto:
+                await bot.send_message(chat_id, "⚠️ Ошибка получения данных (Yahoo Finance блокирует сервер). Попробуйте позже.")
+            return
+            
+        price, rsi, forecast, target, support, resistance, reasons, news = result
+        now = datetime.now()
+        now_str = now.strftime("%Y-%m-%d %H:%M")
+        check_time_str = (now + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
+        
+        conn = sqlite3.connect('signals.db')
+        c = conn.cursor()
+        c.execute("INSERT INTO history (timestamp, price, rsi, forecast, target_price, check_time) VALUES (?, ?, ?, ?, ?, ?)",
+                  (now_str, price, rsi, forecast, target, check_time_str))
+        signal_id = c.lastrowid
+        conn.commit()
+        conn.close()
 
-    text = (f"📊 **Анализ XAUUSD** {'(АВТО)' if is_auto else ''} #{signal_id}\n\n"
-            f"Цена: **${price:.2f}** | RSI: {rsi:.1f}\n"
-            f"🎯 Цель: **${target:.2f}**\n\n"
-            f"🧠 **Факторы:**\n{reasons if reasons else 'Нет явных сигналов'}\n\n"
-            f"🛡️ **Ликвидность:**\nПоддержка: ${support:.2f}\nСопротивление: ${resistance:.2f}\n\n"
-            f"📰 **Новость:**\n_{news}_\n\n"
-            f"Прогноз: **{forecast}**\n"
-            f"⏳ _Проверка через 5 минут_")
-    
-    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="✅ Подтверждаю", callback_data=f"confirm_{signal_id}"),
-         types.InlineKeyboardButton(text="❌ Отклоняю", callback_data=f"reject_{signal_id}")]
-    ])
-    await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="Markdown")
+        text = (f"📊 **Анализ XAUUSD** {'(АВТО)' if is_auto else ''} #{signal_id}\n\n"
+                f"Цена: **${price:.2f}** | RSI: {rsi:.1f}\n"
+                f"🎯 Цель: **${target:.2f}**\n\n"
+                f"🧠 **Факторы:**\n{reasons if reasons else 'Нет явных сигналов'}\n\n"
+                f"🛡️ **Ликвидность:**\nПоддержка: ${support:.2f}\nСопротивление: ${resistance:.2f}\n\n"
+                f"📰 **Новость:**\n_{news}_\n\n"
+                f"Прогноз: **{forecast}**\n"
+                f"⏳ _Проверка через 5 минут_")
+        
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="✅ Подтверждаю", callback_data=f"confirm_{signal_id}"),
+             types.InlineKeyboardButton(text="❌ Отклоняю", callback_data=f"reject_{signal_id}")]
+        ])
+        await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="Markdown")
+        
+    except asyncio.TimeoutError:
+        if not is_auto:
+            await bot.send_message(chat_id, "⚠️ Тайм-аут: сервер данных не ответил за 20 секунд. Попробуйте еще раз.")
+    except Exception as e:
+        print(f"Ошибка в send_signal: {e}")
+        if not is_auto:
+            await bot.send_message(chat_id, f"⚠️ Произошла ошибка: {e}")
 
 # --- ФОНОВЫЙ ПРОЦЕСС ---
 async def background_worker():
@@ -195,7 +204,6 @@ async def background_worker():
             pending = c.fetchall()
 
             if pending:
-                # Тоже запускаем в потоке
                 current_data = await asyncio.to_thread(yf.download, "GC=F", period="1d", interval="1m", progress=False, multi_level_index=False)
                 if not current_data.empty:
                     current_price = float(current_data['Close'].iloc[-1])
