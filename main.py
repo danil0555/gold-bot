@@ -15,15 +15,29 @@ dp = Dispatcher()
 AUTO_SIGNAL_ENABLED = False
 USER_CHAT_ID = None
 
-# --- БАЗА ДАННЫХ ---
+# --- БАЗА ДАННЫХ (ОБНОВЛЕННАЯ) ---
 def init_db():
     conn = sqlite3.connect('signals.db')
     c = conn.cursor()
+    # Создаем таблицу с новыми колонками
     c.execute('''CREATE TABLE IF NOT EXISTS history
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, price REAL, rsi REAL, sma50 REAL, sma200 REAL, 
                   forecast TEXT, target_price REAL, user_confirmed INTEGER,
                   check_time TEXT, result TEXT)''')
+    
+    # Проверяем, есть ли колонка check_time. Если база старая - добавляем её.
+    try:
+        c.execute("ALTER TABLE history ADD COLUMN check_time TEXT")
+    except sqlite3.OperationalError:
+        pass # Колонка уже существует
+        
+    # Проверяем, есть ли колонка result. Если базы старая - добавляем её.
+    try:
+        c.execute("ALTER TABLE history ADD COLUMN result TEXT")
+    except sqlite3.OperationalError:
+        pass # Колонка уже существует
+        
     conn.commit()
     conn.close()
 
@@ -43,7 +57,6 @@ def get_news():
 # --- АНАЛИЗ ---
 def get_analysis():
     try:
-        # Скачиваем данные с тайм-аутом (чтобы не зависало навсегда)
         df_15m = yf.download("GC=F", period="5d", interval="15m", progress=False, multi_level_index=False, timeout=10)
         if df_15m.empty:
             return None
@@ -58,14 +71,12 @@ def get_analysis():
         except:
             df_dxy = pd.DataFrame()
 
-        # Считаем RSI
         delta = df_15m['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df_15m['RSI'] = 100 - (100 / (1 + rs))
         
-        # ATR
         df_15m['TR'] = pd.concat([df_15m['High'] - df_15m['Low'], 
                                   (df_15m['High'] - df_15m['Close'].shift()).abs(), 
                                   (df_15m['Low'] - df_15m['Close'].shift()).abs()], axis=1).max(axis=1)
@@ -141,13 +152,11 @@ def get_analysis():
 async def send_signal(chat_id, is_auto=False):
     try:
         await bot.send_chat_action(chat_id, 'typing')
-        
-        # Запускаем скачивание данных в отдельном потоке, чтобы не блокировать бота
         result = await asyncio.wait_for(asyncio.to_thread(get_analysis), timeout=20.0)
         
         if not result:
             if not is_auto:
-                await bot.send_message(chat_id, "⚠️ Ошибка получения данных (Yahoo Finance блокирует сервер). Попробуйте позже.")
+                await bot.send_message(chat_id, "⚠️ Ошибка получения данных. Попробуйте позже.")
             return
             
         price, rsi, forecast, target, support, resistance, reasons, news = result
@@ -180,7 +189,7 @@ async def send_signal(chat_id, is_auto=False):
         
     except asyncio.TimeoutError:
         if not is_auto:
-            await bot.send_message(chat_id, "⚠️ Тайм-аут: сервер данных не ответил за 20 секунд. Попробуйте еще раз.")
+            await bot.send_message(chat_id, "⚠️ Тайм-аут: сервер данных не ответил. Попробуйте еще раз.")
     except Exception as e:
         print(f"Ошибка в send_signal: {e}")
         if not is_auto:
@@ -240,7 +249,7 @@ async def start_command(message: types.Message):
     USER_CHAT_ID = message.chat.id
     await message.answer(f"Привет! Я — продвинутая версия бота.\n"
                          f"/signal — ручной прогноз\n"
-                         f"/autostart — включить авто-прогнозы (каждые 5 мин)\n"
+                         f"/autostart — включить авто-прогнозы\n"
                          f"/autostop — выключить\n"
                          f"/history — история")
 
@@ -249,7 +258,7 @@ async def autostart_command(message: types.Message):
     global AUTO_SIGNAL_ENABLED, USER_CHAT_ID
     AUTO_SIGNAL_ENABLED = True
     USER_CHAT_ID = message.chat.id
-    await message.answer("🚀 Авто-режим ВКЛЮЧЕН. Мультифакторный анализ каждые 5 минут.")
+    await message.answer("🚀 Авто-режим ВКЛЮЧЕН. Анализ каждые 5 минут.")
 
 @dp.message(Command("autostop"))
 async def autostop_command(message: types.Message):
