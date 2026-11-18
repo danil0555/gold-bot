@@ -23,23 +23,25 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- ФУНКЦИЯ ПОЛУЧЕНИЯ НОВОСТЕЙ ---
+# --- ФУНКЦИЯ ПОЛУЧЕНИЯ НОВОСТЕЙ (с защитой от ошибок) ---
 def get_news():
     try:
-        # Берем новости по фьючерсу на золото (GC=F) с Yahoo Finance
-        feed = feedparser.parse("https://finance.yahoo.com/rss/2.0/headline?s=GC=F&region=US&lang=en-US")
+        # Добавляем User-Agent, так как Yahoo Finance может блокировать запросы без него
+        feed = feedparser.parse(
+            "https://finance.yahoo.com/rss/2.0/headline?s=GC=F&region=US&lang=en-US",
+            request_headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        )
         if feed.entries:
-            # Берем самый свежий заголовок
             return feed.entries[0].title
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Ошибка новостей: {e}")
     return "Свежих новостей пока нет."
 
 # --- АНАЛИЗ ---
 def get_analysis():
     try:
-        # Скачиваем данные золота за 1 месяц с интервалом 1 час
-        data = yf.download("GC=F", period="1mo", interval="1h", progress=False)
+        # Скачиваем данные с флагом multi_level_index=False
+        data = yf.download("GC=F", period="1mo", interval="1h", progress=False, multi_level_index=False)
         if data.empty:
             return None
         
@@ -55,12 +57,14 @@ def get_analysis():
         data['SMA200'] = data['Close'].rolling(window=200).mean()
         
         last_row = data.iloc[-1]
-        price = float(last_row['Close'].iloc[0]) if isinstance(last_row['Close'], pd.Series) else float(last_row['Close'])
-        rsi = float(last_row['RSI'].iloc[0]) if isinstance(last_row['RSI'], pd.Series) else float(last_row['RSI'])
-        sma50 = float(last_row['SMA50'].iloc[0]) if isinstance(last_row['SMA50'], pd.Series) else float(last_row['SMA50'])
-        sma200 = float(last_row['SMA200'].iloc[0]) if isinstance(last_row['SMA200'], pd.Series) else float(last_row['SMA200'])
         
-        # --- НОВОЕ: Считаем уровни поддержки и сопротивления (за последние 24 часа) ---
+        # Безопасное извлечение значений
+        price = float(last_row['Close'])
+        rsi = float(last_row['RSI'])
+        sma50 = float(last_row['SMA50'])
+        sma200 = float(last_row['SMA200'])
+        
+        # Уровни поддержки и сопротивления (за последние 24 часа)
         recent_data = data.tail(24)
         support = float(recent_data['Low'].min())
         resistance = float(recent_data['High'].max())
