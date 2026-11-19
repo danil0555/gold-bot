@@ -1,9 +1,6 @@
-aiogram
-aiohttp
-yfinance
-pandas
-feedparser
-curl_cffi
-pandas_datareader
-biquote
-pytz
+aiogram>=3.13,<4
+aiohttp>=3.10
+numpy>=2.0
+pandas>=2.2
+python-dotenv>=1.0
+
