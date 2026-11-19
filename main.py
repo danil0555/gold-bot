@@ -24,7 +24,7 @@ load_dotenv()
 
 # ---------------------------- CONFIGURATION ----------------------------
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_BOT_TOKEN = os.getenv("8990920545:AAGocAT0bPvfJJebAqZnCngzpy95Dzgc3F4", "").strip()
 # Optional: comma-separated Telegram user IDs. Leave empty to allow anyone to use the bot.
 ALLOWED_USER_IDS = {
     int(x.strip()) for x in os.getenv("ALLOWED_USER_IDS", "").split(",")
