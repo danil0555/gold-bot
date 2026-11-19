@@ -49,7 +49,8 @@ def init_db():
     
     c.execute('''CREATE TABLE IF NOT EXISTS weights
                  (factor TEXT PRIMARY KEY, weight REAL)''')
-    factors = ['RSI', 'TREND', 'AI_NEWS', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3']
+    # Добавили новые факторы для обучения
+    factors = ['RSI', 'TREND', 'AI_NEWS', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3', 'FIBONACCI', 'CANDLE_PATTERN', 'VOLUME', 'FVG']
     for factor in factors:
         c.execute("INSERT OR IGNORE INTO weights (factor, weight) VALUES (?, ?)", (factor, 1.0))
     conn.commit()
@@ -66,7 +67,7 @@ def get_biquote_data(bq_symbol, interval="1h", limit=200):
         df["openTime"] = pd.to_datetime(df["openTime"])
         df = df.set_index("openTime").sort_index()
         df.index = df.index.tz_localize(None)
-        df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
+        df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"})
         return df
     except Exception as e:
         print(f"Ошибка biquote {bq_symbol}: {e}")
@@ -111,9 +112,84 @@ def get_ict_session_score():
     elif 8 <= hour < 17: return 1.0, "Нью-Йорк"
     else: return 0, "Закрытие"
 
+# --- НОВЫЕ ИНСТРУМЕНТЫ ---
+
+def check_fibonacci(df):
+    """Ищет отскок от уровней Фибоначчи"""
+    if len(df) < 50: return 0
+    recent = df.tail(50)
+    high = recent['High'].max()
+    low = recent['Low'].min()
+    diff = high - low
+    if diff == 0: return 0
+    
+    fib_382 = high - diff * 0.382
+    fib_500 = high - diff * 0.500
+    fib_618 = high - diff * 0.618
+    
+    current_price = df.iloc[-1]['Close']
+    # Если цена отскочила от 61.8% вверх (бычий сигнал)
+    if abs(current_price - fib_618) < (diff * 0.05) and df.iloc[-1]['Close'] > df.iloc[-1]['Open']:
+        return 1
+    # Если цена отскочила от 38.2% вниз (медвежий сигнал)
+    elif abs(current_price - fib_382) < (diff * 0.05) and df.iloc[-1]['Close'] < df.iloc[-1]['Open']:
+        return -1
+    return 0
+
+def check_candle_patterns(df):
+    """Ищет свечные паттерны (Поглощение, Молот, Падающая звезда)"""
+    if len(df) < 3: return 0
+    c1 = df.iloc[-2] # Предыдущая свеча
+    c2 = df.iloc[-1] # Текущая свеча
+    
+    body2 = abs(c2['Close'] - c2['Open'])
+    upper_wick2 = c2['High'] - max(c2['Close'], c2['Open'])
+    lower_wick2 = min(c2['Close'], c2['Open']) - c2['Low']
+    
+    # Бычье поглощение
+    if c1['Close'] < c1['Open'] and c2['Close'] > c2['Open']:
+        if c2['Close'] > c1['Open'] and c2['Open'] < c1['Close']:
+            return 1
+    # Медвежье поглощение
+    if c1['Close'] > c1['Open'] and c2['Close'] < c2['Open']:
+        if c2['Close'] < c1['Open'] and c2['Open'] > c1['Close']:
+            return -1
+    # Молот (бычий)
+    if lower_wick2 > body2 * 2 and upper_wick2 < body2 * 0.5:
+        return 1
+    # Падающая звезда (медвежий)
+    if upper_wick2 > body2 * 2 and lower_wick2 < body2 * 0.5:
+        return -1
+    return 0
+
+def check_volume(df):
+    """Проверяет, подтверждает ли объем движение"""
+    if len(df) < 20: return 0
+    avg_volume = df['Volume'].tail(20).mean()
+    current_volume = df.iloc[-1]['Volume']
+    if current_volume > avg_volume * 1.5:
+        return 1 # Высокий объем
+    elif current_volume < avg_volume * 0.5:
+        return -1 # Низкий объем
+    return 0
+
+def check_fvg(df):
+    """Ищет зоны имбаланса (FVG)"""
+    if len(df) < 3: return 0
+    c1 = df.iloc[-3]
+    c3 = df.iloc[-1]
+    
+    # Бычий FVG (цена ушла вверх, оставив дыру)
+    if c1['High'] < c3['Low']:
+        return 1
+    # Медвежий FVG (цена ушла вниз, оставив дыру)
+    elif c1['Low'] > c3['High']:
+        return -1
+    return 0
+
 def calculate_risk_and_lot(balance, entry, stop, ticker, confidence):
     if confidence >= 85: risk_pct = 3.0
-    elif confidence >= 65: risk_pct = 2.0 # Снизили порог для среднего риска
+    elif confidence >= 65: risk_pct = 2.0 
     else: risk_pct = 1.0
         
     risk_amount = balance * (risk_pct / 100)
@@ -171,6 +247,12 @@ def get_analysis(ticker):
         sweep_signal = check_liquidity_sweep(df_1h)
         breaker_signal = check_breaker_block(df_1h)
         ict_score, ict_name = get_ict_session_score()
+        
+        # Новые инструменты
+        fib_signal = check_fibonacci(df_1h)
+        candle_signal = check_candle_patterns(df_1h)
+        volume_signal = check_volume(df_1h)
+        fvg_signal = check_fvg(df_1h)
 
         trend_4h = 0
         if not df_4h.empty:
@@ -231,6 +313,32 @@ def get_analysis(ticker):
         max_possible_score += 1.0 * weights.get('ICT_P3', 1.0)
         score += ict_score * weights.get('ICT_P3', 1.0)
 
+        # НОВЫЕ ФАКТОРЫ
+        max_possible_score += 2.0 * weights.get('FIBONACCI', 1.0)
+        if fib_signal == 1:
+            score += 2.0 * weights.get('FIBONACCI', 1.0); reasons.append(f"Fib Отскок↑ (+{2.0 * weights['FIBONACCI']:.1f})")
+        elif fib_signal == -1:
+            score -= 2.0 * weights.get('FIBONACCI', 1.0); reasons.append(f"Fib Отскок↓ (-{2.0 * weights['FIBONACCI']:.1f})")
+
+        max_possible_score += 1.5 * weights.get('CANDLE_PATTERN', 1.0)
+        if candle_signal == 1:
+            score += 1.5 * weights.get('CANDLE_PATTERN', 1.0); reasons.append(f"Паттерн↑ (+{1.5 * weights['CANDLE_PATTERN']:.1f})")
+        elif candle_signal == -1:
+            score -= 1.5 * weights.get('CANDLE_PATTERN', 1.0); reasons.append(f"Паттерн↓ (-{1.5 * weights['CANDLE_PATTERN']:.1f})")
+
+        max_possible_score += 1.0 * weights.get('VOLUME', 1.0)
+        if volume_signal == 1:
+            score += 1.0 * weights.get('VOLUME', 1.0); reasons.append(f"Объем↑ (+{1.0 * weights['VOLUME']:.1f})")
+        elif volume_signal == -1:
+            score -= 0.5 * weights.get('VOLUME', 1.0); reasons.append(f"Объем↓ (-{0.5 * weights['VOLUME']:.1f})") # Штраф меньше
+
+        max_possible_score += 2.0 * weights.get('FVG', 1.0)
+        if fvg_signal == 1:
+            score += 2.0 * weights.get('FVG', 1.0); reasons.append(f"FVG↑ (+{2.0 * weights['FVG']:.1f})")
+        elif fvg_signal == -1:
+            score -= 2.0 * weights.get('FVG', 1.0); reasons.append(f"FVG↓ (-{2.0 * weights['FVG']:.1f})")
+
+        # Новости
         max_possible_score += 5.0 * weights.get('AI_NEWS', 1.0)
         news = "Новостей нет." 
         try:
@@ -254,14 +362,11 @@ def get_analysis(ticker):
                 score += ai_score * weights.get('AI_NEWS', 1.0)
                 reasons.append(f"ИИ ({ai_score * weights['AI_NEWS']:+.1f})")
 
-        # СНИЖАЕМ ШТРАФ ЗА ПРОТИВОРЕЧИЕ 4H ТРЕНДУ
         if trend_4h == 1 and score < 0:
-            score *= 0.8; reasons.append("⚠️ 4H против") # Было 0.5
+            score *= 0.8; reasons.append("⚠️ 4H против")
         elif trend_4h == -1 and score > 0:
-            score *= 0.8; reasons.append("⚠️ 4H против") # Было 0.5
+            score *= 0.8; reasons.append("⚠️ 4H против")
 
-        # НОВАЯ ФОРМУЛА УВЕРЕННОСТИ (более чувствительная)
-        # Используем квадратный корень, чтобы низкие баллы давали больший процент
         confidence = int((abs(score) / max_possible_score) ** 0.5 * 100) 
         if confidence > 100: confidence = 100
 
@@ -296,7 +401,6 @@ async def send_signal(chat_id, ticker, is_auto=False):
         asset_name = ASSETS.get(ticker, {}).get("name", ticker)
         
         if is_auto:
-            # СНИЗИЛИ ПОРОГ ДЛЯ АВТО ДО 60%
             if confidence < 60: 
                 print(f"Авто: {asset_name} уверенность {confidence}% < 60%, пропускаем.")
                 return
@@ -388,7 +492,7 @@ async def background_worker():
                         c.execute("UPDATE history SET result = ?, close_price = ? WHERE id = ?", (result_text, close_price, sig_id))
                         conn.commit()
                         
-                        all_factors = ['TREND', 'RSI', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3']
+                        all_factors = ['TREND', 'RSI', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3', 'FIBONACCI', 'CANDLE_PATTERN', 'VOLUME', 'FVG']
                         if "LOSS" in result_text:
                             for factor in all_factors:
                                 c.execute("UPDATE weights SET weight = MAX(0.8, weight - 0.05) WHERE factor = ?", (factor,))
@@ -438,7 +542,7 @@ async def start_command(message: types.Message, state: FSMContext):
     USER_CHAT_ID = message.chat.id
     await state.clear()
     await message.answer(
-        f"Привет! Бот готов.\nВаш депозит: ${USER_BALANCE:.2f}\n(Риск на сделку рассчитывается ботом)", 
+        f"Привет! Бот (v6.0 с Fib, FVG, Свечами) готов.\nВаш депозит: ${USER_BALANCE:.2f}", 
         reply_markup=get_main_keyboard()
     )
 
@@ -500,7 +604,7 @@ async def autostart_handler(message: types.Message, state: FSMContext):
     AUTO_SIGNAL_ENABLED = True
     USER_CHAT_ID = message.chat.id
     await state.clear()
-    await message.answer("🚀 Авто-режим ВКЛЮЧЕН.\nБот будет сканировать все активы каждые 5 минут и присылать сигналы от 60% уверенности.", reply_markup=get_main_keyboard())
+    await message.answer("🚀 Авто-режим ВКЛЮЧЕН.", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "Выкл Авто" in message.text or message.text == "/autostop")
 async def autostop_handler(message: types.Message, state: FSMContext):
@@ -517,10 +621,10 @@ async def weights_handler(message: types.Message, state: FSMContext):
     c.execute("SELECT factor, weight FROM weights")
     weights = c.fetchall()
     conn.close()
-    text = "🧠 <b>Веса:</b>\n\n"
+    text = "🧠 <b>Веса (v6):</b>\n\n"
     for factor, weight in weights:
         text += f"• {factor}: <b>{weight:.1f}</b>\n"
-    text += "\n<i>Чтобы сбросить веса, напишите /reset_weights</i>"
+    text += "\n<i>Сброс: /reset_weights</i>"
     await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "reset_weights" in message.text or message.text == "/reset_weights")
