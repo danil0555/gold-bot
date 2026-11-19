@@ -575,13 +575,6 @@ def init_db() -> None:
 
 
 # ============================================================
-# 9. USER REGISTRATION
-# ============================================================
-# NOTE: единая функция register_user(user) живёт в PART 3.
-# Старая версия удалена, чтобы не было дублирования сигнатур.
-
-
-# ============================================================
 # END OF PART 1 / 4
 # ============================================================
 
@@ -1430,7 +1423,6 @@ def build_signal(
     if min(sl, tp1, tp2) <= 0:
         return None
 
-    # RR по TP2 — более информативен.
     rr = abs(tp2 - price) / abs(price - sl)
 
     if rr < MIN_RR:
@@ -1656,10 +1648,8 @@ user_states = {}
 def row_to_dict(row):
     if row is None:
         return None
-
     if isinstance(row, dict):
         return row
-
     try:
         return dict(row)
     except (TypeError, ValueError):
@@ -1670,8 +1660,8 @@ def ensure_part3_schema():
     """
     Добавляет необходимые поля и таблицы.
     Существующие записи не удаляются.
+    ВАЖНО: вызывать только после init_db().
     """
-
     with db() as conn:
         conn.row_factory = sqlite3.Row
 
@@ -1697,6 +1687,21 @@ def ensure_part3_schema():
             )
         """)
 
+        existing_tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+        if "trades" not in existing_tables:
+            log.warning(
+                "ensure_part3_schema: таблица trades не найдена. "
+                "Схема Part 3 будет применена после init_db()."
+            )
+            conn.commit()
+            return
+
         required_trade_columns = {
             "position_size": "REAL DEFAULT 0",
             "notional": "REAL DEFAULT 0",
@@ -1711,24 +1716,18 @@ def ensure_part3_schema():
             "updated_at": "TEXT",
         }
 
-        existing = {
+        existing_cols = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(trades)").fetchall()
         }
 
-        # Если trades ещё не создана — пропускаем ALTER, чтобы не падать.
-        if existing:
-            for column, definition in required_trade_columns.items():
-                if column not in existing:
-                    conn.execute(
-                        f"ALTER TABLE trades ADD COLUMN {column} {definition}"
-                    )
+        for column, definition in required_trade_columns.items():
+            if column not in existing_cols:
+                conn.execute(
+                    f"ALTER TABLE trades ADD COLUMN {column} {definition}"
+                )
 
         conn.commit()
-
-
-# ВАЖНО: ensure_part3_schema() вызывается только внутри main()
-# после init_db(), чтобы избежать ALTER TABLE до создания trades.
 
 
 def save_trade_event(
@@ -3002,11 +3001,6 @@ async def system_status_handler(message):
 # ============================================================
 
 async def get_live_price(market, symbol):
-    """
-    Запрашивает публичную цену BingX.
-    Возвращает None, если цену получить не удалось.
-    """
-
     if http_session is None or http_session.closed:
         return None
 
@@ -3178,7 +3172,6 @@ async def monitor_one_trade(trade):
             return
 
         if price >= tp2:
-            # Если TP1 ещё не подтверждён — сначала уведомим о TP1.
             if not trade.get("tp1_hit"):
                 await notify_trade_touch(trade, "touch_tp1", tp1)
             await notify_trade_touch(trade, "touch_tp2", price)
@@ -3282,7 +3275,6 @@ async def close_trade_record(trade, exit_price, reason):
 
     pnl_r = realized / risk_amount if risk_amount > 0 else 0
 
-    # База для % — маржа для swap, notional для spot.
     if str(trade["market"]).lower() == "swap":
         base = safe_float(trade.get("margin_required"), 0)
     else:
@@ -3618,7 +3610,6 @@ async def background_market_scan():
         except Exception:
             logging.exception("Ошибка фонового анализа рынка")
 
-        # Полный анализ всех монет требует времени из-за лимитов API.
         await asyncio.sleep(max(MARKET_SCAN_INTERVAL * 60, 1800))
 
 
@@ -3633,7 +3624,10 @@ async def main():
 
     logging.info("Запуск Trading Bot v9.2")
 
+    # 1. Сначала создаём базовые таблицы.
     init_db()
+
+    # 2. Только потом применяем схему Part 3.
     ensure_part3_schema()
 
     if bot is None:
@@ -3647,7 +3641,7 @@ async def main():
             "Dispatcher не создан. Проверь инициализацию части 1."
         )
 
-    # Регистрируем все хендлеры.
+    # 3. Регистрируем все хендлеры.
     dp.include_router(router)
 
     async with aiohttp.ClientSession() as session:
