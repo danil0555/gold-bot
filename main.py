@@ -28,7 +28,7 @@ SYMBOLS = [x.strip().upper() for x in os.getenv("SYMBOLS", "BTC-USDT,ETH-USDT,SO
 MARKETS = [x.strip().lower() for x in os.getenv("MARKETS", "spot,swap").split(",") if x.strip()]
 if not MARKETS: MARKETS = ["spot", "swap"]
 DB_PATH = "trading_bot_v9.db"  # Fresh v9 database; old v8 databases are not reused.
-SCAN_INTERVAL = max(300, int(os.getenv("SCAN_INTERVAL_SECONDS", "900")))
+SCAN_INTERVAL = max(900, int(os.getenv("SCAN_INTERVAL_SECONDS", "900")))
 MONITOR_INTERVAL = max(30, int(os.getenv("MONITOR_INTERVAL_SECONDS", "60")))
 MIN_RR = float(os.getenv("MIN_RR", "1.8"))
 MIN_SCORE = int(os.getenv("MIN_SCORE", "6"))
@@ -37,6 +37,7 @@ ALLOWED_USER_IDS = {int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",")
 BASE = "https://open-api.bingx.com"
 _api_rate_lock = asyncio.Lock()
 _last_api_request = 0.0
+_api_cooldown_until = 0.0
 TF_MS = {"5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000}
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("trading-bot-v9")
@@ -94,31 +95,51 @@ def allowed(user_id: int) -> bool:
 class MarketError(Exception): pass
 
 async def api_get(session: aiohttp.ClientSession, path: str, params: dict[str, Any]) -> Any:
-    global _last_api_request
+    global _last_api_request, _api_cooldown_until
     url = BASE + path
-    try:
-        # BingX public market endpoints are rate-limited; pace requests globally.
-        async with _api_rate_lock:
-            wait = 1.05 - (time.monotonic() - _last_api_request)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=18)) as resp:
-                _last_api_request = time.monotonic()
-                body = await resp.json(content_type=None)
-                if resp.status != 200:
-                    raise MarketError(f"HTTP {resp.status}: {str(body)[:180]}")
-                if isinstance(body, dict) and body.get("code") not in (None, 0, "0"):
-                    raise MarketError(f"BingX {body.get('code')}: {body.get('msg', '')}")
-                return body
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-        raise MarketError(str(exc)) from exc
+    last_error: Exception | None = None
+    # A 100410 response is treated as a rate-limit signal: back off and retry.
+    for attempt in range(4):
+        try:
+            async with _api_rate_lock:
+                now = time.monotonic()
+                wait = max(1.6 - (now - _last_api_request), _api_cooldown_until - now, 0.0)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    _last_api_request = time.monotonic()
+                    body = await resp.json(content_type=None)
+                    if resp.status != 200:
+                        raise MarketError(f"HTTP {resp.status}: {str(body)[:180]}")
+                    if isinstance(body, dict) and body.get("code") not in (None, 0, "0"):
+                        code = str(body.get("code"))
+                        message = f"BingX {code}: {body.get('msg', '')}"
+                        if code == "100410":
+                            _api_cooldown_until = time.monotonic() + min(20, 3 * (2 ** attempt))
+                            last_error = MarketError(message)
+                        else:
+                            raise MarketError(message)
+                    else:
+                        return body
+            if last_error is not None:
+                if attempt < 3:
+                    log.warning("BingX rate limit; retry %s/3 after cooldown", attempt + 1)
+                    continue
+                raise last_error
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_error = MarketError(str(exc))
+            if attempt < 3:
+                await asyncio.sleep(min(2 ** attempt, 8))
+                continue
+            raise last_error from exc
+    raise last_error or MarketError("Неизвестная ошибка BingX API")
 
 def extract_data(payload: Any) -> Any:
     if isinstance(payload, dict):
         return payload.get("data", payload.get("result", payload))
     return payload
 
-def normalize_candles(payload: Any, interval: str) -> pd.DataFrame:
+def normalize_candles(payload: Any, interval: str, min_rows: int = 205) -> pd.DataFrame:
     raw = extract_data(payload)
     if isinstance(raw, dict):
         raw = raw.get("data", raw.get("list", []))
@@ -151,17 +172,17 @@ def normalize_candles(payload: Any, interval: str) -> pd.DataFrame:
     # Do not use the currently-forming candle. Add 2 seconds for publication delay.
     now_ms = int(time.time() * 1000)
     df = df[df.close_time < now_ms - 2_000].reset_index(drop=True)
-    if len(df) < 205:
-        raise MarketError(f"Недостаточно закрытых свечей: {len(df)} (нужно минимум 205)")
+    if len(df) < min_rows:
+        raise MarketError(f"Недостаточно закрытых свечей: {len(df)} (нужно минимум {min_rows})")
     return df
 
-async def get_klines(session: aiohttp.ClientSession, market: str, symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
+async def get_klines(session: aiohttp.ClientSession, market: str, symbol: str, interval: str, limit: int = 300, min_rows: int = 205) -> pd.DataFrame:
     if market == "spot":
         path = "/openApi/spot/v2/market/kline"
     else:
         path = "/openApi/swap/v3/quote/klines"
     payload = await api_get(session, path, {"symbol": symbol, "interval": interval, "limit": limit})
-    return normalize_candles(payload, interval)
+    return normalize_candles(payload, interval, min_rows=min_rows)
 
 # ----------------------------- Indicators --------------------------------
 def indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -264,35 +285,53 @@ async def send_signal(bot: Bot, sig: dict[str,Any], sid: int, chat_id: int | Non
 async def monitor_open_signals(session: aiohttp.ClientSession) -> None:
     with db() as con:
         rows = con.execute("SELECT * FROM signals WHERE status='OPEN' ORDER BY id LIMIT 100").fetchall()
+
+    # Fetch 5m candles once per market/symbol, not once for every signal.
+    grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
     for row in rows:
+        grouped.setdefault((row["market"], row["symbol"]), []).append(row)
+
+    for (market, symbol), group_rows in grouped.items():
         try:
-            df = await get_klines(session,row["market"],row["symbol"],"5m",120)
-            # Only candles newer than the signal's entry candle can resolve it.
-            created_ms = int(datetime.fromisoformat(row["created_at"]).timestamp()*1000)
-            future = df[df.open_time >= (created_ms // TF_MS["5m"]) * TF_MS["5m"]]
-            if future.empty: continue
-            result = None; result_r = None; last_ms = int(row["last_checked_ms"] or 0)
-            for candle in future.itertuples():
-                if candle.open_time <= last_ms: continue
-                if row["side"] == "BUY":
-                    hit_sl = candle.low <= row["sl"]; hit_tp = candle.high >= row["tp"]
-                else:
-                    hit_sl = candle.high >= row["sl"]; hit_tp = candle.low <= row["tp"]
-                if hit_sl and hit_tp:
-                    result, result_r = "LOSS", -1.0  # conservative if both touched in same candle
-                elif hit_sl: result, result_r = "LOSS", -1.0
-                elif hit_tp: result, result_r = "WIN", float(row["rr"])
-                last_ms = int(candle.open_time)
-                if result: break
-            with db() as con:
-                if result:
-                    con.execute("UPDATE signals SET status=?,result_r=?,closed_at=?,last_checked_ms=? WHERE id=? AND status='OPEN'", (result,result_r,datetime.now(timezone.utc).isoformat(timespec="seconds"),last_ms,row["id"]))
-                    log.info("Demo result: signal #%s %s",row["id"],result)
-                else:
-                    con.execute("UPDATE signals SET last_checked_ms=? WHERE id=? AND status='OPEN'", (last_ms,row["id"]))
-            await asyncio.sleep(0.25)
+            # Monitoring needs recent price candles, not 205 bars for EMA200.
+            df = await get_klines(session, market, symbol, "5m", limit=120, min_rows=2)
+            for row in group_rows:
+                created_ms = int(datetime.fromisoformat(row["created_at"]).timestamp() * 1000)
+                first_open = (created_ms // TF_MS["5m"]) * TF_MS["5m"] + TF_MS["5m"]
+                last_ms = int(row["last_checked_ms"] or 0)
+                future = df[df.open_time >= first_open]
+                result = None
+                result_r = None
+                for candle in future.itertuples():
+                    if candle.open_time <= last_ms:
+                        continue
+                    if row["side"] == "BUY":
+                        hit_sl = candle.low <= row["sl"]
+                        hit_tp = candle.high >= row["tp"]
+                    else:
+                        hit_sl = candle.high >= row["sl"]
+                        hit_tp = candle.low <= row["tp"]
+                    if hit_sl and hit_tp:
+                        result, result_r = "LOSS", -1.0
+                    elif hit_sl:
+                        result, result_r = "LOSS", -1.0
+                    elif hit_tp:
+                        result, result_r = "WIN", float(row["rr"])
+                    last_ms = int(candle.open_time)
+                    if result:
+                        break
+                with db() as con:
+                    if result:
+                        con.execute(
+                            "UPDATE signals SET status=?,result_r=?,closed_at=?,last_checked_ms=? WHERE id=? AND status='OPEN'",
+                            (result, result_r, datetime.now(timezone.utc).isoformat(timespec="seconds"), last_ms, row["id"]),
+                        )
+                        log.info("Demo result: signal #%s %s", row["id"], result)
+                    elif last_ms > int(row["last_checked_ms"] or 0):
+                        con.execute("UPDATE signals SET last_checked_ms=? WHERE id=? AND status='OPEN'", (last_ms, row["id"]))
         except Exception as exc:
-            log.warning("Ошибка мониторинга сигнала #%s: %s",row["id"],exc)
+            for row in group_rows:
+                log.warning("Ошибка мониторинга сигнала #%s (%s %s): %s", row["id"], market, symbol, exc)
 
 # ----------------------------- Scanning ----------------------------------
 scan_lock = asyncio.Lock()
