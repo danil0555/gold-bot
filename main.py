@@ -1,6 +1,5 @@
-
 # ============================================================
-# TRADING BOT v9.2
+# TRADING BOT v9.2 (FIXED)
 # PART 1 / 4
 # FOUNDATION, CONFIGURATION, DATABASE
 # ============================================================
@@ -30,7 +29,9 @@ from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
-    InlineKeyboardButton
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -123,8 +124,8 @@ KLINE_LIMIT = 300
 MIN_CANDLE_ROWS = 205
 
 # Intervals.
-MARKET_SCAN_INTERVAL = 60
-TRADE_MONITOR_INTERVAL = 15
+MARKET_SCAN_INTERVAL = 60          # minutes (used in background loop)
+TRADE_MONITOR_INTERVAL = 15        # seconds
 
 # Signal duplicate protection.
 SIGNAL_COOLDOWN_MINUTES = 45
@@ -464,9 +465,6 @@ def init_db() -> None:
         # MIGRATIONS
         # ----------------------------------------------------
 
-        # Existing databases are preserved.
-        # Missing columns are added without deleting records.
-
         migrations = {
             "signals": {
                 "created_at": "TEXT",
@@ -579,44 +577,8 @@ def init_db() -> None:
 # ============================================================
 # 9. USER REGISTRATION
 # ============================================================
-
-def register_user(
-    user_id: int,
-    username: str | None
-) -> None:
-
-    with db() as con:
-
-        con.execute("""
-            INSERT INTO users(
-                user_id,
-                username,
-                created_at,
-                is_active
-            )
-            VALUES(?, ?, ?, 1)
-
-            ON CONFLICT(user_id)
-            DO UPDATE SET
-                username=excluded.username,
-                is_active=1
-        """, (
-            user_id,
-            username,
-            utc_text()
-        ))
-
-        con.execute("""
-            INSERT OR IGNORE INTO user_settings(
-                user_id,
-                risk_percent,
-                leverage,
-                notifications
-            )
-            VALUES(?, 2.0, 5, 1)
-        """, (
-            user_id,
-        ))
+# NOTE: единая функция register_user(user) живёт в PART 3.
+# Старая версия удалена, чтобы не было дублирования сигнатур.
 
 
 # ============================================================
@@ -624,7 +586,7 @@ def register_user(
 # ============================================================
 
 # ============================================================
-# TRADING BOT v9.2
+# TRADING BOT v9.2 (FIXED)
 # PART 2 / 4
 # BINGX API, CANDLES, INDICATORS, SIGNAL STRATEGY
 # ============================================================
@@ -881,7 +843,6 @@ def normalize_candles(
             else:
                 continue
 
-            # Convert seconds to milliseconds.
             if ot < 10_000_000_000:
                 ot *= 1000
 
@@ -900,10 +861,10 @@ def normalize_candles(
             if not np.isfinite(v) or v < 0:
                 continue
 
-            if h < max(o, c, l):
+            if h < max(o, c):
                 continue
 
-            if l > min(o, c, h):
+            if l > min(o, c):
                 continue
 
             rows.append((
@@ -949,7 +910,6 @@ def normalize_candles(
         .reset_index(drop=True)
     )
 
-    # Use only fully closed candles.
     current_ms = now_ms()
 
     df = df[
@@ -1023,7 +983,6 @@ async def get_klines(
         (market, symbol, interval)
     ] = df.copy()
 
-    # Candle close is only a fallback price.
     if not df.empty:
 
         latest_prices[
@@ -1089,7 +1048,6 @@ def save_closed_candles(
                 float(candle.volume)
             ))
 
-        # Keep only the latest 1500 candles.
         con.execute("""
             DELETE FROM market_candles
 
@@ -1132,7 +1090,6 @@ def indicators(
     high = x["high"]
     low = x["low"]
 
-    # EMA.
     x["ema20"] = close.ewm(
         span=20,
         adjust=False
@@ -1148,7 +1105,6 @@ def indicators(
         adjust=False
     ).mean()
 
-    # RSI.
     delta = close.diff()
 
     gain = delta.clip(
@@ -1189,7 +1145,6 @@ def indicators(
 
     x["rsi"] = rsi.fillna(50)
 
-    # ATR.
     tr = pd.concat(
         [
             high - low,
@@ -1204,7 +1159,6 @@ def indicators(
         adjust=False
     ).mean()
 
-    # Directional movement.
     up = high.diff()
     down = -low.diff()
 
@@ -1258,7 +1212,6 @@ def indicators(
     x["plus_di"] = plus_di.fillna(0)
     x["minus_di"] = minus_di.fillna(0)
 
-    # MACD.
     x["macd"] = (
         close.ewm(
             span=12,
@@ -1326,7 +1279,6 @@ def build_signal(
     long_reasons = []
     short_reasons = []
 
-    # Higher-timeframe trend: 1H and 4H.
     for row, label in (
         (c, "1H"),
         (d, "4H")
@@ -1338,7 +1290,6 @@ def build_signal(
         ):
 
             long_score += 2
-
             long_reasons.append(
                 f"Тренд {label}: выше EMA200"
             )
@@ -1349,19 +1300,16 @@ def build_signal(
         ):
 
             short_score += 2
-
             short_reasons.append(
                 f"Тренд {label}: ниже EMA200"
             )
 
-    # 15m trend.
     if (
         b["ema20"] > b["ema50"]
         and b["close"] > b["ema20"]
     ):
 
         long_score += 2
-
         long_reasons.append(
             "15м: EMA20 выше EMA50"
         )
@@ -1372,16 +1320,13 @@ def build_signal(
     ):
 
         short_score += 2
-
         short_reasons.append(
             "15м: EMA20 ниже EMA50"
         )
 
-    # RSI.
     if 48 <= b["rsi"] <= 68:
 
         long_score += 1
-
         long_reasons.append(
             f"RSI 15м {b['rsi']:.1f}"
         )
@@ -1389,16 +1334,13 @@ def build_signal(
     if 32 <= b["rsi"] <= 52:
 
         short_score += 1
-
         short_reasons.append(
             f"RSI 15м {b['rsi']:.1f}"
         )
 
-    # MACD.
     if b["macd"] > b["macd_signal"]:
 
         long_score += 1
-
         long_reasons.append(
             "MACD 15м положительный"
         )
@@ -1406,19 +1348,16 @@ def build_signal(
     if b["macd"] < b["macd_signal"]:
 
         short_score += 1
-
         short_reasons.append(
             "MACD 15м отрицательный"
         )
 
-    # ADX and DI.
     if (
         b["adx"] >= 18
         and b["plus_di"] > b["minus_di"]
     ):
 
         long_score += 1
-
         long_reasons.append(
             f"ADX {b['adx']:.1f}, покупатели сильнее"
         )
@@ -1429,16 +1368,13 @@ def build_signal(
     ):
 
         short_score += 1
-
         short_reasons.append(
             f"ADX {b['adx']:.1f}, продавцы сильнее"
         )
 
-    # 5m momentum.
     if a["close"] > a["ema20"]:
 
         long_score += 1
-
         long_reasons.append(
             "5м: цена выше EMA20"
         )
@@ -1446,12 +1382,10 @@ def build_signal(
     if a["close"] < a["ema20"]:
 
         short_score += 1
-
         short_reasons.append(
             "5м: цена ниже EMA20"
         )
 
-    # Select direction.
     if long_score > short_score:
 
         side = "BUY"
@@ -1470,11 +1404,9 @@ def build_signal(
     if abs(long_score - short_score) < 2:
         return None
 
-    # Spot is BUY-only.
     if market == "spot" and side == "SELL":
         return None
 
-    # Stop-loss distance.
     sl_dist = max(
         1.5 * atr,
         price * 0.002
@@ -1498,7 +1430,8 @@ def build_signal(
     if min(sl, tp1, tp2) <= 0:
         return None
 
-    rr = abs(tp1 - price) / abs(price - sl)
+    # RR по TP2 — более информативен.
+    rr = abs(tp2 - price) / abs(price - sl)
 
     if rr < MIN_RR:
         return None
@@ -1540,7 +1473,6 @@ def save_signal(
             "signals"
         )
 
-        # Prevent duplicate setup.
         if "setup_key" in columns:
 
             exists = con.execute("""
@@ -1555,15 +1487,14 @@ def save_signal(
             if exists:
                 return None
 
-        # Prevent repeated signals for 45 minutes.
-        recent = con.execute("""
+        recent = con.execute(f"""
             SELECT id
             FROM signals
             WHERE market=?
               AND symbol=?
               AND side=?
               AND julianday(created_at)
-                  >= julianday('now', '-45 minutes')
+                  >= julianday('now', '-{SIGNAL_COOLDOWN_MINUTES} minutes')
             ORDER BY id DESC
             LIMIT 1
         """, (
@@ -1590,7 +1521,6 @@ def save_signal(
             "status": "NEW"
         }
 
-        # Insert only columns available in the database.
         available = [
             column
             for column in values
@@ -1631,27 +1561,15 @@ def save_signal(
 # ============================================================
 
 # ============================================================
-# TRADING BOT v9.2
+# TRADING BOT v9.2 (FIXED)
 # PART 3 / 4
 # MARKET SCANNER, TELEGRAM, PERSONAL TRADES
 # ============================================================
 
 
 # ============================================================
-
-# ============================================================
 # 17. TELEGRAM KEYBOARDS
 # ============================================================
-
-from aiogram.types import (
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-)
-from aiogram.filters import Command
-from aiogram import F
-
 
 def main_keyboard():
     return ReplyKeyboardMarkup(
@@ -1798,16 +1716,19 @@ def ensure_part3_schema():
             for row in conn.execute("PRAGMA table_info(trades)").fetchall()
         }
 
-        for column, definition in required_trade_columns.items():
-            if column not in existing:
-                conn.execute(
-                    f"ALTER TABLE trades ADD COLUMN {column} {definition}"
-                )
+        # Если trades ещё не создана — пропускаем ALTER, чтобы не падать.
+        if existing:
+            for column, definition in required_trade_columns.items():
+                if column not in existing:
+                    conn.execute(
+                        f"ALTER TABLE trades ADD COLUMN {column} {definition}"
+                    )
 
         conn.commit()
 
 
-ensure_part3_schema()
+# ВАЖНО: ensure_part3_schema() вызывается только внутри main()
+# после init_db(), чтобы избежать ALTER TABLE до создания trades.
 
 
 def save_trade_event(
@@ -1969,11 +1890,8 @@ def calculate_position_size(
     notional = quantity * entry
 
     if market == "spot":
-        # На Spot нельзя использовать больше доступного баланса.
         max_notional = balance
-
     else:
-        # Для USDT-M Futures учитываем фиксированное плечо 5x.
         max_notional = balance * FUTURES_LEVERAGE
 
     if notional > max_notional:
@@ -2066,7 +1984,6 @@ def create_personal_trade(user_id, signal_id, actual_entry):
         if signal_entry <= 0 or signal_sl <= 0:
             return None, "В сигнале отсутствуют корректные цены."
 
-        # Сохраняем исходную дистанцию стопа относительно сигнала.
         stop_distance = abs(signal_entry - signal_sl)
 
         if stop_distance <= 0:
@@ -2453,6 +2370,9 @@ def signal_text(signal):
     market = market_name(signal["market"])
     side = side_name(signal["side"])
 
+    tp1 = safe_float(signal.get("tp1"), 0)
+    tp2 = safe_float(signal.get("tp2"), signal.get("tp", 0))
+
     return (
         f"🚨 <b>НОВЫЙ ТОРГОВЫЙ СИГНАЛ</b>\n\n"
         f"Монета: <b>{signal['symbol']}</b>\n"
@@ -2460,10 +2380,12 @@ def signal_text(signal):
         f"Направление: {side}\n\n"
         f"Вход: <code>{format_price(signal['entry'])}</code>\n"
         f"Стоп-лосс: <code>{format_price(signal['sl'])}</code>\n"
-        f"TP1: 1.8R — закрытие 70%\n"
-        f"TP2: 3R — закрытие оставшихся 30%\n\n"
+        f"TP1: <code>{format_price(tp1)}</code> ({TP1_R}R) — "
+        f"закрытие {TP1_CLOSE_PERCENT:.0f}%\n"
+        f"TP2: <code>{format_price(tp2)}</code> ({TP2_R}R) — "
+        f"закрытие {TP2_CLOSE_PERCENT:.0f}%\n\n"
         f"Оценка сигнала: {signal.get('score', 0)}\n"
-        f"Соотношение риск/прибыль: {signal.get('rr', 0)}\n\n"
+        f"Соотношение риск/прибыль (TP2): {signal.get('rr', 0):.2f}\n\n"
         f"Причины:\n{signal.get('reasons', '')}\n\n"
         f"⚠️ Это аналитический сигнал, а не исполненная сделка. "
         f"Сопровождение начнётся только после подтверждения входа "
@@ -2628,7 +2550,13 @@ async def enter_trade_callback(callback):
 # 26. USER TEXT INPUT
 # ============================================================
 
-@router.message(lambda message: message.from_user and message.from_user.id in user_states)
+@router.message(
+    F.text,
+    lambda message: (
+        message.from_user
+        and message.from_user.id in user_states
+    )
+)
 async def handle_user_text(message):
     user_id = message.from_user.id
     state = user_states.get(user_id)
@@ -2744,12 +2672,15 @@ async def handle_user_text(message):
 # ============================================================
 
 # ============================================================
-# 27. MY TRADES
+# TRADING BOT v9.2 (FIXED)
+# PART 4 / 4
+# MONITORING, CONFIRMATION, STARTUP
 # ============================================================
 
-from aiogram import Bot, Dispatcher, Router
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+# ============================================================
+# 27. MY TRADES
+# ============================================================
 
 def trades_list_keyboard(trades):
     rows = []
@@ -2981,8 +2912,8 @@ async def settings_handler(message):
         "⚙️ <b>Настройки торгового бота</b>\n\n"
         f"Риск на сделку: {RISK_PERCENT}%\n"
         f"Плечо Futures: {FUTURES_LEVERAGE}x\n"
-        f"TP1: {TP1_R}R — закрытие {TP1_CLOSE_PERCENT}%\n"
-        f"TP2: {TP2_R}R — закрытие {TP2_CLOSE_PERCENT}%\n\n"
+        f"TP1: {TP1_R}R — закрытие {TP1_CLOSE_PERCENT:.0f}%\n"
+        f"TP2: {TP2_R}R — закрытие {TP2_CLOSE_PERCENT:.0f}%\n\n"
         f"Баланс Spot: {spot_balance:.2f} USDT\n"
         f"Баланс Futures: {swap_balance:.2f} USDT\n\n"
         "Для изменения баланса отправь одну из команд:\n"
@@ -3062,7 +2993,7 @@ async def system_status_handler(message):
         f"Лимит активных сделок: {MAX_ACTIVE_TRADES}\n"
         f"Твои активные сделки: {active}\n\n"
         "Цены и сигналы зависят от доступности публичного API BingX.\n"
-        "Состояние соединения будет уточняться фоновым мониторингом."
+        "Состояние соединения уточняется фоновым мониторингом."
     )
 
 
@@ -3073,8 +3004,11 @@ async def system_status_handler(message):
 async def get_live_price(market, symbol):
     """
     Запрашивает публичную цену BingX.
-    Если ответ API не распознан, возвращает None.
+    Возвращает None, если цену получить не удалось.
     """
+
+    if http_session is None or http_session.closed:
+        return None
 
     if market == "spot":
         endpoint = "/openApi/spot/v1/ticker/price"
@@ -3083,6 +3017,7 @@ async def get_live_price(market, symbol):
 
     try:
         response = await api_get(
+            http_session,
             endpoint,
             {"symbol": symbol}
         )
@@ -3098,16 +3033,6 @@ async def get_live_price(market, symbol):
 
                 if price > 0:
                     return price
-
-        if isinstance(response, dict):
-            data = response.get("data")
-
-            if isinstance(data, dict):
-                for key in ("price", "lastPrice", "last", "close"):
-                    price = safe_float(data.get(key), 0)
-
-                    if price > 0:
-                        return price
 
     except Exception:
         logging.exception(
@@ -3253,6 +3178,9 @@ async def monitor_one_trade(trade):
             return
 
         if price >= tp2:
+            # Если TP1 ещё не подтверждён — сначала уведомим о TP1.
+            if not trade.get("tp1_hit"):
+                await notify_trade_touch(trade, "touch_tp1", tp1)
             await notify_trade_touch(trade, "touch_tp2", price)
             return
 
@@ -3265,6 +3193,8 @@ async def monitor_one_trade(trade):
             return
 
         if price <= tp2:
+            if not trade.get("tp1_hit"):
+                await notify_trade_touch(trade, "touch_tp1", tp1)
             await notify_trade_touch(trade, "touch_tp2", price)
             return
 
@@ -3319,6 +3249,11 @@ async def close_trade_record(trade, exit_price, reason):
     if entry <= 0 or initial_sl <= 0 or quantity <= 0:
         return False, "Недостаточно данных для расчёта результата."
 
+    if exit_price is None or safe_float(exit_price, 0) <= 0:
+        return False, "Нет корректной цены выхода."
+
+    exit_price = safe_float(exit_price, 0)
+
     if trade["side"] in ("buy", "long"):
         direction = 1
     else:
@@ -3332,7 +3267,6 @@ async def close_trade_record(trade, exit_price, reason):
     tp1_hit = bool(trade.get("tp1_hit"))
 
     if tp1_hit:
-        # 70% закрыты на TP1, оставшиеся 30% — по exit_price.
         tp1 = safe_float(trade["tp1"], 0)
         realized = (
             quantity * 0.70 * (tp1 - entry) * direction
@@ -3348,11 +3282,16 @@ async def close_trade_record(trade, exit_price, reason):
 
     pnl_r = realized / risk_amount if risk_amount > 0 else 0
 
-    notional = quantity * entry
-    pnl_percent = (
-        realized / notional * 100
-        if notional > 0 else 0
-    )
+    # База для % — маржа для swap, notional для spot.
+    if str(trade["market"]).lower() == "swap":
+        base = safe_float(trade.get("margin_required"), 0)
+    else:
+        base = quantity * entry
+
+    if base <= 0:
+        base = quantity * entry
+
+    pnl_percent = realized / base * 100 if base > 0 else 0
 
     result = "win" if realized > 0 else (
         "loss" if realized < 0 else "breakeven"
@@ -3582,6 +3521,13 @@ async def tp2_confirm_callback(callback):
 
     exit_price = safe_float(trade.get("current_price"), 0)
 
+    if exit_price <= 0:
+        await callback.answer(
+            "Нет актуальной цены. Подтверждение не записано.",
+            show_alert=True
+        )
+        return
+
     success, result = await close_trade_record(
         trade,
         exit_price,
@@ -3634,6 +3580,13 @@ async def sl_confirm_callback(callback):
 
     exit_price = safe_float(trade.get("current_price"), 0)
 
+    if exit_price <= 0:
+        await callback.answer(
+            "Нет актуальной цены. Закрытие не записано.",
+            show_alert=True
+        )
+        return
+
     success, result = await close_trade_record(
         trade,
         exit_price,
@@ -3666,7 +3619,7 @@ async def background_market_scan():
             logging.exception("Ошибка фонового анализа рынка")
 
         # Полный анализ всех монет требует времени из-за лимитов API.
-        await asyncio.sleep(max(SCAN_INTERVAL_SECONDS, 1800))
+        await asyncio.sleep(max(MARKET_SCAN_INTERVAL * 60, 1800))
 
 
 # ============================================================
@@ -3684,12 +3637,18 @@ async def main():
     ensure_part3_schema()
 
     if bot is None:
-        bot = Bot(token=BOT_TOKEN)
+        bot = Bot(
+            token=BOT_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+        )
 
     if dp is None:
         raise RuntimeError(
             "Dispatcher не создан. Проверь инициализацию части 1."
         )
+
+    # Регистрируем все хендлеры.
+    dp.include_router(router)
 
     async with aiohttp.ClientSession() as session:
         http_session = session
