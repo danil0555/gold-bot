@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# Trading Bot v8.1 — BingX Spot + USDT-M Perpetual Futures
+# Trading Bot v8.2 — BingX Spot + USDT-M Perpetual Futures
 # Telegram alerts only. No orders are placed. No BingX API keys are needed.
 
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -13,9 +14,9 @@ from typing import Any
 import aiohttp
 import numpy as np
 import pandas as pd
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -42,7 +43,8 @@ MARKETS = [
     if value.strip().lower() in {"spot", "swap"}
 ]
 
-SCAN_INTERVAL_SECONDS = max(30, int(os.getenv("SCAN_INTERVAL_SECONDS", "120")))
+SCAN_INTERVAL_SECONDS = max(300, int(os.getenv("SCAN_INTERVAL_SECONDS", "300")))
+REQUEST_SPACING_SECONDS = 1.1
 MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "5.0"))
 ATR_SL_MULTIPLIER = float(os.getenv("ATR_SL_MULTIPLIER", "1.5"))
 ATR_TP_MULTIPLIER = float(os.getenv("ATR_TP_MULTIPLIER", "2.7"))
@@ -156,6 +158,16 @@ def get_stats() -> dict[str, Any]:
     }
 
 
+def get_history(limit: int = 10) -> list[dict[str, Any]]:
+    with db_connect() as connection:
+        rows = connection.execute("""
+            SELECT id, created_at, market, symbol, side, entry,
+                   stop_loss, take_profit, status, result
+            FROM signals ORDER BY id DESC LIMIT ?
+        """, (limit,)).fetchall()
+    return [dict(row) for row in rows]
+
+
 # ---------------- BINGX MARKET DATA ----------------
 
 class BingXClient:
@@ -164,25 +176,70 @@ class BingXClient:
 
     async def get_json(self, path: str, params: dict[str, Any]) -> Any:
         url = BINGX_BASE_URL + path
-        async with self.session.get(url, params=params) as response:
-            body = await response.text()
-            if response.status != 200:
-                raise RuntimeError(
-                    f"BingX HTTP {response.status}: {body[:200]}"
-                )
-            try:
-                payload = await response.json(content_type=None)
-            except Exception as exc:
-                raise RuntimeError(f"BingX вернул не JSON: {body[:200]}") from exc
 
-        if isinstance(payload, dict):
-            code = payload.get("code")
-            if code not in (None, 0, "0"):
-                raise RuntimeError(
-                    f"BingX API {code}: {payload.get('msg', 'без описания')}"
-                )
-            return payload.get("data", payload)
-        return payload
+        # Public BingX endpoints may throttle requests from shared hosting IPs.
+        # Pace every request and use exponential backoff for error 100410.
+        for attempt in range(4):
+            now = time.monotonic()
+            wait_for = REQUEST_SPACING_SECONDS - (now - getattr(self, "_last_request", 0.0))
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+            self._last_request = time.monotonic()
+
+            try:
+                async with self.session.get(url, params=params) as response:
+                    body = await response.text()
+                    if response.status == 429 or "100410" in body:
+                        if attempt < 3:
+                            delay = 5 * (2 ** attempt)
+                            log.warning(
+                                "BingX rate limit (100410/429). Retry in %s sec: %s",
+                                delay, path
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        raise RuntimeError(
+                            "BingX ограничил частоту запросов (100410). "
+                            "Это лимит API/общего IP хостинга; повтори позже."
+                        )
+
+                    if response.status != 200:
+                        raise RuntimeError(
+                            f"BingX HTTP {response.status}: {body[:200]}"
+                        )
+                    try:
+                        payload = await response.json(content_type=None)
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"BingX вернул не JSON: {body[:200]}"
+                        ) from exc
+
+                if isinstance(payload, dict):
+                    api_code = payload.get("code")
+                    if api_code not in (None, 0, "0"):
+                        if str(api_code) == "100410" and attempt < 3:
+                            delay = 5 * (2 ** attempt)
+                            log.warning(
+                                "BingX 100410. Повтор через %s сек.", delay
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        if str(api_code) == "100410":
+                            raise RuntimeError(
+                                "BingX ограничил частоту запросов (100410). "
+                                "Подожди несколько минут и попробуй снова."
+                            )
+                        raise RuntimeError(
+                            f"BingX API {api_code}: {payload.get('msg', 'без описания')}"
+                        )
+                    return payload.get("data", payload)
+                return payload
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                if attempt >= 3:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+
+        raise RuntimeError("Не удалось получить ответ от BingX после повторных попыток")
 
     async def klines(self, market: str, symbol: str, interval: str) -> pd.DataFrame:
         # BingX public market-data endpoints.
@@ -460,23 +517,48 @@ def fmt_price(value: float) -> str:
 
 
 def render_signal(signal: dict[str, Any], signal_id: int) -> str:
-    market_name = "SPOT" if signal["market"] == "spot" else "PERPETUAL FUTURES"
-    emoji = "🟢" if signal["side"] == "BUY" else "🔴"
-    reasons = "\n".join(f"• {reason}" for reason in signal["reasons"])
+    """Compact, visually segmented Telegram signal card."""
+    is_buy = signal["side"] == "BUY"
+    direction = "ПОКУПКА" if is_buy else "ПРОДАЖА"
+    direction_mark = "🟢" if is_buy else "🔴"
+    market_name = "SPOT" if signal["market"] == "spot" else "USDT-M PERPETUAL"
+    entry = fmt_price(signal["entry"])
+    stop = fmt_price(signal["stop_loss"])
+    target = fmt_price(signal["take_profit"])
+
+    reasons = "\n".join(f"▫️ {reason}" for reason in signal["reasons"][:6])
+    if not reasons:
+        reasons = "▫️ Подтверждение несколькими таймфреймами"
+
+    # Telegram Bot API does not support arbitrary background/text colors.
+    # Colored emoji markers, bold headings and monospace prices create clear visual blocks.
     return (
-        f"{emoji} <b>BingX v8.1 — {signal['side']}</b>\n"
-        f"<b>{signal['symbol']} | {market_name}</b>\n\n"
-        f"Вход (ориентир): <code>{fmt_price(signal['entry'])}</code>\n"
-        f"Stop Loss: <code>{fmt_price(signal['stop_loss'])}</code>\n"
-        f"Take Profit: <code>{fmt_price(signal['take_profit'])}</code>\n"
-        f"Risk/Reward: <b>1:{signal['rr']:.2f}</b>\n"
-        f"Сила модели (не вероятность): <b>{signal['score']:.2f}</b>\n"
-        f"RSI M15: {signal['rsi']:.1f} | ADX M15: {signal['adx']:.1f}\n\n"
-        f"<b>Обоснование:</b>\n{reasons or 'Мультитаймфреймовое подтверждение'}\n\n"
-        f"ID сигнала: <code>{signal_id}</code>\n"
-        f"Время: {signal['time']}\n\n"
-        "⚠️ Сигнал не гарантирует прибыль. Проверь цену исполнения, спред, "
-        "комиссии и ликвидность. Для фьючерсов отдельно оцени плечо и риск."
+        f"📊 <b>BINGX  |  TRADING SIGNAL v8.2</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💠 <b>{signal['symbol']}</b>   <code>{market_name}</code>\n"
+        f"{direction_mark} <b>{direction}  •  {signal['side']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>ТОРГОВЫЙ ПЛАН</b>\n"
+        f"🟦 <b>ЦЕНА ВХОДА</b>\n"
+        f"<code>   {entry}   </code>\n\n"
+        f"🟥 <b>STOP LOSS</b>\n"
+        f"<code>   {stop}   </code>\n\n"
+        f"🟩 <b>TAKE PROFIT</b>\n"
+        f"<code>   {target}   </code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚖️ Соотношение риск/прибыль: <b>1 : {signal['rr']:.2f}</b>\n"
+        f"🧠 Сила модели: <b>{signal['score']:.2f}</b>  <i>(не вероятность)</i>\n"
+        f"📈 RSI M15: <b>{signal['rsi']:.1f}</b>   |   ADX M15: <b>{signal['adx']:.1f}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔍 <b>ОБОСНОВАНИЕ СИГНАЛА</b>\n"
+        f"{reasons}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 ID сигнала: <code>#{signal_id}</code>\n"
+        f"🕒 Время: <code>{signal['time']}</code>\n\n"
+        f"⚠️ <b>ВАЖНО</b>\n"
+        f"<i>Сигнал не гарантирует прибыль. Перед входом проверь актуальную цену, "
+        f"спред, комиссии и ликвидность. Для фьючерсов отдельно оцени плечо "
+        f"и размер риска. Бот не открывает сделки.</i>"
     )
 
 
@@ -487,6 +569,19 @@ dp = Dispatcher()
 http_session: aiohttp.ClientSession | None = None
 scan_lock = asyncio.Lock()
 auto_chats: set[int] = set()
+waiting_for_symbol: set[int] = set()
+
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📈 Прогноз")],
+        [KeyboardButton(text="🚀 Вкл Авто"), KeyboardButton(text="🛑 Выкл Авто")],
+        [KeyboardButton(text="🧠 Веса"), KeyboardButton(text="📜 История")],
+        [KeyboardButton(text="⚙️ Актив"), KeyboardButton(text="💰 Депозит")],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+    input_field_placeholder="Выбери действие…",
+)
 
 
 def authorized(message: Message) -> bool:
@@ -500,24 +595,145 @@ async def cmd_start(message: Message):
     if not authorized(message):
         return
     await message.answer(
-        "🤖 <b>Trading Bot v8.1 — BingX</b>\n\n"
-        "Рынки: Spot и USDT-M Perpetual Futures.\n"
-        "Бот только присылает сигналы и не открывает сделки.\n\n"
-        "<b>Команды:</b>\n"
-        "/scan — анализ сейчас\n"
-        "/auto_on — включить периодические сигналы\n"
-        "/auto_off — выключить периодические сигналы\n"
-        "/stats — статистика\n"
-        "/result ID WIN — отметить WIN\n"
-        "/result ID LOSS — отметить LOSS\n"
-        "/help — справка\n\n"
-        "Автоматические уведомления после перезапуска выключены."
+        "🤖 <b>TRADING BOT v8.2</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Биржа: <b>BingX</b>\n"
+        "Рынки: <b>Spot + Perpetual Futures</b>\n"
+        "Режим: только сигналы, без открытия ордеров.\n\n"
+        "Выбери действие на клавиатуре ниже 👇",
+        parse_mode="HTML",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     await cmd_start(message)
+
+
+@dp.message(F.text == "📈 Прогноз")
+async def button_forecast(message: Message):
+    if not authorized(message):
+        return
+    await message.answer("🔎 Запускаю анализ рынка BingX…")
+    await run_scan(message.chat.id)
+
+
+@dp.message(F.text == "🚀 Вкл Авто")
+async def button_auto_on(message: Message):
+    if not authorized(message):
+        return
+    auto_chats.add(message.chat.id)
+    await message.answer(
+        f"✅ Автоотправка включена. Интервал: {SCAN_INTERVAL_SECONDS // 60} мин.",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
+@dp.message(F.text == "🛑 Выкл Авто")
+async def button_auto_off(message: Message):
+    if not authorized(message):
+        return
+    auto_chats.discard(message.chat.id)
+    await message.answer("⏸ Автоотправка выключена.", reply_markup=MAIN_KEYBOARD)
+
+
+@dp.message(F.text == "🧠 Веса")
+async def button_weights(message: Message):
+    if not authorized(message):
+        return
+    await message.answer(
+        "🧠 <b>Факторы анализа v8.2</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "EMA-тренд: <b>2.00</b>\n"
+        "MACD-импульс: <b>1.25</b>\n"
+        "RSI: <b>0.75</b>\n"
+        "ADX / DI: <b>0.75</b>\n"
+        "Пробой диапазона 20 свечей: <b>1.00</b>\n\n"
+        "Таймфреймы: M15 — сетап, H1/H4 — подтверждение, M5 — фильтр.\n"
+        "⚠️ Это веса правил, а не доказанная вероятность выигрыша.",
+        parse_mode="HTML",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
+@dp.message(F.text == "📜 История")
+async def button_history(message: Message):
+    if not authorized(message):
+        return
+    rows = get_history(10)
+    if not rows:
+        await message.answer("📜 История пока пустая.", reply_markup=MAIN_KEYBOARD)
+        return
+    lines = ["📜 <b>Последние сигналы</b>", "━━━━━━━━━━━━━━━━━━"]
+    for row in rows:
+        status = row["result"] if row["result"] else row["status"]
+        lines.append(
+            f"#{row['id']} | {row['symbol']} | {row['market'].upper()}\n"
+            f"{row['side']} @ {fmt_price(row['entry'])} | {status}"
+        )
+    await message.answer(
+        "\n\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
+@dp.message(F.text == "⚙️ Актив")
+async def button_asset(message: Message):
+    if not authorized(message):
+        return
+    waiting_for_symbol.add(message.chat.id)
+    await message.answer(
+        "⚙️ <b>Настройка активов</b>\n"
+        f"Сейчас: <code>{', '.join(SYMBOLS)}</code>\n\n"
+        "Отправь список пар через запятую, например:\n"
+        "<code>BTC-USDT,ETH-USDT</code>\n"
+        "Это изменит список для текущего запуска бота.",
+        parse_mode="HTML",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
+@dp.message(F.text == "💰 Депозит")
+async def button_deposit(message: Message):
+    if not authorized(message):
+        return
+    await message.answer(
+        "💰 <b>Депозит</b>\n"
+        "Эта версия только присылает сигналы и не подключается к балансу BingX.\n"
+        "Размер позиции и риск рассчитывай в приложении биржи. "
+        "Не отправляй боту API-ключи или данные входа.",
+        parse_mode="HTML",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
+@dp.message(F.text)
+async def receive_symbol_list(message: Message):
+    if not authorized(message) or message.chat.id not in waiting_for_symbol:
+        return
+    candidate = [
+        item.strip().upper()
+        for item in (message.text or "").replace(" ", "").split(",")
+        if item.strip()
+    ]
+    if not candidate or any(
+        not re.fullmatch(r"[A-Z0-9]{2,15}-USDT", item) for item in candidate
+    ):
+        await message.answer(
+            "Не понял список. Отправь пары в формате BTC-USDT,ETH-USDT.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    global SYMBOLS
+    SYMBOLS = candidate[:20]
+    waiting_for_symbol.discard(message.chat.id)
+    await message.answer(
+        "✅ Список активов для текущего запуска обновлён:\n"
+        + ", ".join(SYMBOLS),
+        reply_markup=MAIN_KEYBOARD,
+    )
 
 
 async def run_scan(chat_id: int, notify_no_trade: bool = True):
@@ -565,7 +781,7 @@ async def run_scan(chat_id: int, notify_no_trade: bool = True):
 async def cmd_scan(message: Message):
     if not authorized(message):
         return
-    await message.answer("Начинаю анализ BingX…")
+    await message.answer("🔎 Начинаю анализ BingX…", reply_markup=MAIN_KEYBOARD)
     try:
         await run_scan(message.chat.id)
     except Exception as exc:
@@ -588,7 +804,7 @@ async def cmd_auto_off(message: Message):
     if not authorized(message):
         return
     auto_chats.discard(message.chat.id)
-    await message.answer("⏸ Автоотправка выключена.")
+    await message.answer("⏸ Автоотправка выключена.", reply_markup=MAIN_KEYBOARD)
 
 
 @dp.message(Command("stats"))
@@ -598,7 +814,7 @@ async def cmd_stats(message: Message):
     stats = get_stats()
     winrate = "нет данных" if stats["winrate"] is None else f"{stats['winrate']:.1f}%"
     await message.answer(
-        "📊 <b>Статистика v8.1</b>\n\n"
+        "📊 <b>Статистика v8.2</b>\n\n"
         f"Закрытых сигналов: {stats['total']}\n"
         f"WIN: {stats['wins']}\n"
         f"LOSS: {stats['losses']}\n"
@@ -664,7 +880,7 @@ async def main():
 
     scanner_task = asyncio.create_task(background_scanner())
     log.info(
-        "BingX v8.1 запущен. Markets=%s Symbols=%s",
+        "BingX v8.2 запущен. Markets=%s Symbols=%s",
         MARKETS, SYMBOLS
     )
 
