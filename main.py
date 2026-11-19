@@ -2036,17 +2036,39 @@ def trade_text(trade):
 
 
 # ============================================================
-# 23. MARKET ANALYSIS
+# 23. MARKET ANALYSIS  (with 100204 handling)
 # ============================================================
 
+# Кэш недоступных пар (market, symbol) — чтобы не спамить API
+_unavailable_symbols: set[tuple[str, str]] = set()
+
+
 async def analyze_market_symbol(market, symbol):
+    key = (market, symbol)
+
+    if key in _unavailable_symbols:
+        return None
+
     intervals = ("5m", "15m", "1h", "4h")
     candles = {}
 
     for interval in intervals:
-        data = await get_klines(
-            market, symbol, interval, KLINE_LIMIT
-        )
+        try:
+            data = await get_klines(
+                market, symbol, interval, KLINE_LIMIT
+            )
+        except MarketError as exc:
+            text = str(exc).lower()
+
+            if "100204" in str(exc) or "symbol is not found" in text:
+                _unavailable_symbols.add(key)
+                log.warning(
+                    "Символ %s %s недоступен на BingX — исключён из сканирования",
+                    market, symbol
+                )
+                return None
+
+            raise
 
         if data is None or len(data) < MIN_CANDLE_ROWS:
             return None
@@ -2077,6 +2099,11 @@ async def scan_market():
 
     for market in MARKETS:
         for symbol in SYMBOLS:
+            key = (market, symbol)
+
+            if key in _unavailable_symbols:
+                continue
+
             try:
                 signal = await analyze_market_symbol(market, symbol)
 
@@ -2089,6 +2116,12 @@ async def scan_market():
                     signal["id"] = signal_id
                     found_signals.append(signal)
 
+            except MarketError as exc:
+                # Штатная рыночная ошибка — WARNING без трейсбека
+                log.warning(
+                    "Ошибка рынка %s %s: %s",
+                    market, symbol, exc
+                )
             except Exception:
                 logging.exception(
                     "Ошибка сканирования %s %s",
