@@ -49,7 +49,8 @@ def init_db():
     
     c.execute('''CREATE TABLE IF NOT EXISTS weights
                  (factor TEXT PRIMARY KEY, weight REAL)''')
-    factors = ['RSI', 'TREND', 'AI_NEWS', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3', 'FIBONACCI', 'CANDLE_PATTERN', 'VOLUME', 'FVG']
+    # Добавили новые факторы
+    factors = ['RSI', 'TREND', 'AI_NEWS', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3', 'FIBONACCI', 'CANDLE_PATTERN', 'VOLUME', 'FVG', 'HIDDEN_DIV', 'DUAL_CONFIRM']
     for factor in factors:
         c.execute("INSERT OR IGNORE INTO weights (factor, weight) VALUES (?, ?)", (factor, 1.0))
     conn.commit()
@@ -77,6 +78,42 @@ def detect_rsi_divergence(df):
     recent = df.tail(20)
     if recent['Low'].iloc[-1] < recent['Low'].iloc[-5] and recent['RSI'].iloc[-1] > recent['RSI'].iloc[-5]: return 1
     elif recent['High'].iloc[-1] > recent['High'].iloc[-5] and recent['RSI'].iloc[-1] < recent['RSI'].iloc[-5]: return -1
+    return 0
+
+def check_hidden_divergence(df):
+    """Скрытая дивергенция (продолжение тренда)"""
+    if len(df) < 20: return 0
+    recent = df.tail(20)
+    # Бычья скрытая: цена делает выше минимум, RSI ниже
+    if recent['Low'].iloc[-1] > recent['Low'].iloc[-5] and recent['RSI'].iloc[-1] < recent['RSI'].iloc[-5]:
+        return 1
+    # Медвежья скрытая: цена делает ниже максимум, RSI выше
+    elif recent['High'].iloc[-1] < recent['High'].iloc[-5] and recent['RSI'].iloc[-1] > recent['RSI'].iloc[-5]:
+        return -1
+    return 0
+
+def check_dual_confirmation(df):
+    """Двойное подтверждение (MACD + RSI)"""
+    if len(df) < 20: return 0
+    # Проверяем дивергенцию на RSI
+    rsi_div = detect_rsi_divergence(df)
+    # Проверяем дивергенцию на MACD
+    exp12 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp26 = df['Close'].ewm(span=26, adjust=False).mean()
+    macd = exp12 - exp26
+    
+    macd_div = 0
+    if len(macd) >= 20:
+        recent_macd = macd.tail(20)
+        recent_close = df['Close'].tail(20)
+        if recent_close.iloc[-1] < recent_close.iloc[-5] and recent_macd.iloc[-1] > recent_macd.iloc[-5]:
+            macd_div = 1
+        elif recent_close.iloc[-1] > recent_close.iloc[-5] and recent_macd.iloc[-1] < recent_macd.iloc[-5]:
+            macd_div = -1
+    
+    # Если обе дивергенции совпадают
+    if rsi_div == 1 and macd_div == 1: return 1
+    elif rsi_div == -1 and macd_div == -1: return -1
     return 0
 
 def check_liquidity_sweep(df):
@@ -181,12 +218,12 @@ def calculate_risk_and_lot(balance, entry, stop, ticker, confidence):
     
     return risk_pct, round(max(0.01, min(lot, 10.0)), 2)
 
-def get_analysis(ticker):
+def get_analysis(ticker, interval="1h"):
     try:
         asset_info = ASSETS.get(ticker, ASSETS["GC=F"])
         bq_sym = asset_info["bq"]
         
-        df_1h = get_biquote_data(bq_sym, "1h", 200)
+        df_1h = get_biquote_data(bq_sym, interval, 200)
         df_4h = get_biquote_data(bq_sym, "4h", 100)
         if df_1h.empty: return None
 
@@ -218,6 +255,8 @@ def get_analysis(ticker):
         prev_macd_signal = float(df_1h.iloc[-2]['MACD_Signal'])
         
         divergence = detect_rsi_divergence(df_1h)
+        hidden_div = check_hidden_divergence(df_1h)
+        dual_conf = check_dual_confirmation(df_1h)
         sweep_signal = check_liquidity_sweep(df_1h)
         breaker_signal = check_breaker_block(df_1h)
         ict_score, ict_name = get_ict_session_score()
@@ -240,7 +279,7 @@ def get_analysis(ticker):
 
         score = 0.0
         max_possible_score = 0.0
-        reasons = [f"Сессия: {ict_name}", f"4H Тренд: {'↑' if trend_4h > 0 else '↓' if trend_4h < 0 else 'Нет'}"]
+        reasons = [f"ТФ: {interval}", f"Сессия: {ict_name}", f"4H Тренд: {'↑' if trend_4h > 0 else '↓' if trend_4h < 0 else 'Нет'}"]
 
         max_possible_score += 1 * weights.get('TREND', 1.0)
         if current_price > current_ema200:
@@ -269,6 +308,18 @@ def get_analysis(ticker):
             score += 2.5 * weights.get('DIVERGENCE', 1.0); reasons.append(f"Дивергенция↑ (+{2.5 * weights['DIVERGENCE']:.1f})")
         elif divergence == -1:
             score -= 2.5 * weights.get('DIVERGENCE', 1.0); reasons.append(f"Дивергенция↓ (-{2.5 * weights['DIVERGENCE']:.1f})")
+
+        max_possible_score += 2.0 * weights.get('HIDDEN_DIV', 1.0)
+        if hidden_div == 1:
+            score += 2.0 * weights.get('HIDDEN_DIV', 1.0); reasons.append(f"Скрытая Диверг↑ (+{2.0 * weights['HIDDEN_DIV']:.1f})")
+        elif hidden_div == -1:
+            score -= 2.0 * weights.get('HIDDEN_DIV', 1.0); reasons.append(f"Скрытая Диверг↓ (-{2.0 * weights['HIDDEN_DIV']:.1f})")
+
+        max_possible_score += 3.0 * weights.get('DUAL_CONFIRM', 1.0)
+        if dual_conf == 1:
+            score += 3.0 * weights.get('DUAL_CONFIRM', 1.0); reasons.append(f"Двойное Подтв↑ (+{3.0 * weights['DUAL_CONFIRM']:.1f})")
+        elif dual_conf == -1:
+            score -= 3.0 * weights.get('DUAL_CONFIRM', 1.0); reasons.append(f"Двойное Подтв↓ (-{3.0 * weights['DUAL_CONFIRM']:.1f})")
 
         max_possible_score += 3.0 * weights.get('SMC_SWEEP', 1.0)
         if sweep_signal == 1:
@@ -362,7 +413,7 @@ def get_analysis(ticker):
 async def send_signal(chat_id, ticker, is_auto=False):
     try:
         await bot.send_chat_action(chat_id, 'typing')
-        result = await asyncio.wait_for(asyncio.to_thread(get_analysis, ticker), timeout=30.0)
+        result = await asyncio.wait_for(asyncio.to_thread(get_analysis, ticker, "1h"), timeout=30.0)
         if not result:
             if not is_auto: await bot.send_message(chat_id, "⚠️ Ошибка данных. Попробуйте позже.")
             return
@@ -370,7 +421,15 @@ async def send_signal(chat_id, ticker, is_auto=False):
         price, rsi, forecast, target, sl, support, resistance, reasons, news, confidence, lot, risk_pct = result
         asset_name = ASSETS.get(ticker, {}).get("name", ticker)
         
-        # ВСЕГДА ЗАПИСЫВАЕМ В БАЗУ (для обучения)
+        # ТЕНЕВОЙ РЕЖИМ (Если уверенность < 60% на 1H, проверяем 15M)
+        if is_auto and confidence < 60:
+            # Пробуем 15M таймфрейм для теневой сделки
+            result_15m = await asyncio.to_thread(get_analysis, ticker, "15m")
+            if result_15m:
+                price, rsi, forecast, target, sl, support, resistance, reasons, news, confidence, lot, risk_pct = result_15m
+                reasons = f"ТФ: 15m | " + reasons
+
+        # ВСЕГДА ЗАПИСЫВАЕМ В БАЗУ
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
@@ -380,12 +439,11 @@ async def send_signal(chat_id, ticker, is_auto=False):
         conn.commit()
         conn.close()
 
-        # ЕСЛИ АВТО-РЕЖИМ И НИЗКАЯ УВЕРЕННОСТЬ - НЕ ОТПРАВЛЯЕМ ВАМ, НО В БАЗЕ ОНА УЖЕ ЕСТЬ
+        # ОТПРАВЛЯЕМ ТОЛЬКО ЕСЛИ УВЕРЕННОСТЬ >= 60%
         if is_auto and confidence < 60:
-            print(f"Авто (Теневая): {asset_name} уверенность {confidence}% < 60%, записано в базу для обучения.")
+            print(f"Авто (Теневая): {asset_name} уверенность {confidence}% < 60%, записано в базу.")
             return
 
-        # ОТПРАВЛЯЕМ ТОЛЬКО ЕСЛИ УВЕРЕННОСТЬ >= 60% ИЛИ ЕСЛИ ЭТО РУЧНОЙ ЗАПРОС
         if is_auto:
             status_text = "🎯 <b>СНАЙПЕР (Высокая уверенность)</b>" if confidence >= 85 else "⚡️ <b>Сильный сигнал</b>"
             await bot.send_message(chat_id, status_text)
@@ -464,7 +522,7 @@ async def background_worker():
                         c.execute("UPDATE history SET result = ?, close_price = ? WHERE id = ?", (result_text, close_price, sig_id))
                         conn.commit()
                         
-                        all_factors = ['TREND', 'RSI', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3', 'FIBONACCI', 'CANDLE_PATTERN', 'VOLUME', 'FVG']
+                        all_factors = ['TREND', 'RSI', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3', 'FIBONACCI', 'CANDLE_PATTERN', 'VOLUME', 'FVG', 'HIDDEN_DIV', 'DUAL_CONFIRM']
                         if "LOSS" in result_text:
                             for factor in all_factors:
                                 c.execute("UPDATE weights SET weight = MAX(0.8, weight - 0.05) WHERE factor = ?", (factor,))
@@ -473,13 +531,6 @@ async def background_worker():
                                 c.execute("UPDATE weights SET weight = MIN(1.5, weight + 0.05) WHERE factor = ?", (factor,))
                         conn.commit()
 
-                        # Отправляем уведомление о закрытии только если это была реальная сделка (уверенность >= 60)
-                        # Но для обучения это не важно, веса уже обновились
-                        if USER_CHAT_ID:
-                            # Проверяем, была ли эта сделка отправлена (уверенность >= 60)
-                            # (Для простоты мы просто присылаем уведомление о закрытии, если это не теневая сделка)
-                            # В реальном проекте здесь нужна проверка поля "is_shadow".
-                            pass 
             conn.close()
         except Exception as e:
             print(f"Ошибка фона: {e}")
@@ -514,7 +565,7 @@ async def start_command(message: types.Message, state: FSMContext):
     USER_CHAT_ID = message.chat.id
     await state.clear()
     await message.answer(
-        f"Привет! Бот (Теневое обучение) готов.\nВаш депозит: ${USER_BALANCE:.2f}", 
+        f"Привет! Бот (v7.0 с Скрытой Дивергенцией) готов.\nВаш депозит: ${USER_BALANCE:.2f}", 
         reply_markup=get_main_keyboard()
     )
 
@@ -576,7 +627,7 @@ async def autostart_handler(message: types.Message, state: FSMContext):
     AUTO_SIGNAL_ENABLED = True
     USER_CHAT_ID = message.chat.id
     await state.clear()
-    await message.answer("🚀 Авто-режим ВКЛЮЧЕН (Теневое обучение).", reply_markup=get_main_keyboard())
+    await message.answer("🚀 Авто-режим ВКЛЮЧЕН.", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "Выкл Авто" in message.text or message.text == "/autostop")
 async def autostop_handler(message: types.Message, state: FSMContext):
@@ -593,7 +644,7 @@ async def weights_handler(message: types.Message, state: FSMContext):
     c.execute("SELECT factor, weight FROM weights")
     weights = c.fetchall()
     conn.close()
-    text = "🧠 <b>Веса (Теневое обучение):</b>\n\n"
+    text = "🧠 <b>Веса (v7):</b>\n\n"
     for factor, weight in weights:
         text += f"• {factor}: <b>{weight:.1f}</b>\n"
     text += "\n<i>Сброс: /reset_weights</i>"
@@ -615,7 +666,6 @@ async def history_handler(message: types.Message, state: FSMContext):
     try:
         conn = sqlite3.connect('signals.db')
         c = conn.cursor()
-        # Показываем ВСЮ историю (включая теневые сделки)
         c.execute("SELECT id, timestamp, price, close_price, forecast, result, confidence, ticker, lot_size, risk_pct FROM history WHERE result IS NOT NULL ORDER BY id DESC")
         trades = c.fetchall()
         conn.close()
