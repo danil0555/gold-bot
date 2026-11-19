@@ -1,717 +1,688 @@
+#!/usr/bin/env python3
+# Trading Bot v8.0 — BingX Spot + USDT-M Perpetual Futures
+# Telegram alerts only. This bot does NOT place orders and needs no BingX API keys.
+
 import asyncio
+import json
+import logging
+import os
 import sqlite3
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
+
+import aiohttp
+import numpy as np
 import pandas as pd
-import feedparser
-import requests
-from openai import OpenAI
-from datetime import datetime
-import pytz
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram import Bot, Dispatcher
+from aiogram.filters import Command
+from aiogram.types import Message
+from dotenv import load_dotenv
 
-# ВАШИ КЛЮЧИ
-BOT_TOKEN = "8990920545:AAFbVp_UNRg3a-_9xIFEaLdTc5J4Oyru0NM"
-OPENROUTER_KEY = "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"
+load_dotenv()
 
-ai_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+# ---------------------------- CONFIGURATION ----------------------------
 
-AUTO_SIGNAL_ENABLED = False
-USER_CHAT_ID = None
-CURRENT_TICKER = "GC=F"
-USER_BALANCE = 1000.0 
-
-class UserSettings(StatesGroup):
-    waiting_for_balance = State()
-
-ASSETS = {
-    "GC=F": {"name": "Золото (XAUUSD)", "bq": "XAUUSD"},
-    "GBPJPY=X": {"name": "Фунт/Йена (GBP/JPY)", "bq": "GBPJPY"},
-    "AUDJPY=X": {"name": "Австрал/Йена (AUD/JPY)", "bq": "AUDJPY"}
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+# Optional: comma-separated Telegram user IDs. Leave empty to allow anyone to use the bot.
+ALLOWED_USER_IDS = {
+    int(x.strip()) for x in os.getenv("ALLOWED_USER_IDS", "").split(",")
+    if x.strip().isdigit()
 }
 
+# Symbols must be listed on BingX in BASE-USDT format.
+SYMBOLS = [
+    x.strip().upper() for x in
+    os.getenv("SYMBOLS", "BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT").split(",")
+    if x.strip()
+]
+MARKETS = [
+    x.strip().lower() for x in
+    os.getenv("MARKETS", "spot,swap").split(",")
+    if x.strip().lower() in {"spot", "swap"}
+]
+
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
+MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "5.0"))
+MIN_RR = float(os.getenv("MIN_RR", "1.8"))
+ATR_SL_MULTIPLIER = float(os.getenv("ATR_SL_MULTIPLIER", "1.5"))
+ATR_TP_MULTIPLIER = float(os.getenv("ATR_TP_MULTIPLIER", "2.7"))
+DATABASE_PATH = os.getenv("DATABASE_PATH", "trading_bot_v8.db")
+HTTP_TIMEOUT_SECONDS = 15
+CANDLE_LIMIT = 250
+
+BINGX_BASE_URL = "https://open-api.bingx.com"
+INTERVALS = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h"}
+TIMEFRAME_WEIGHT = {"5m": 1.0, "15m": 1.5, "1h": 2.0, "4h": 2.0}
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+log = logging.getLogger("bingx-v8")
+
+# ---------------------------- DATABASE ----------------------------
+
+def db_connect():
+    conn = sqlite3.connect(DATABASE_PATH, timeout=20)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def init_db():
-    conn = sqlite3.connect('signals.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS history
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  timestamp TEXT, price REAL, rsi REAL, forecast TEXT, 
-                  target_price REAL, stop_loss REAL, close_price REAL, result TEXT,
-                  confidence INTEGER, ticker TEXT, lot_size REAL, risk_pct REAL)''')
-    for col in ["close_price REAL", "confidence INTEGER", "ticker TEXT", "lot_size REAL", "risk_pct REAL"]:
-        try: c.execute(f"ALTER TABLE history ADD COLUMN {col}")
-        except sqlite3.OperationalError: pass
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS weights
-                 (factor TEXT PRIMARY KEY, weight REAL)''')
-    # Добавили новые факторы
-    factors = ['RSI', 'TREND', 'AI_NEWS', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3', 'FIBONACCI', 'CANDLE_PATTERN', 'VOLUME', 'FVG', 'HIDDEN_DIV', 'DUAL_CONFIRM']
-    for factor in factors:
-        c.execute("INSERT OR IGNORE INTO weights (factor, weight) VALUES (?, ?)", (factor, 1.0))
-    conn.commit()
-    conn.close()
-
-def get_biquote_data(bq_symbol, interval="1h", limit=200):
-    try:
-        url = f"https://biquote.io/api/{bq_symbol}/ohlc"
-        params = {"interval": interval, "limit": limit}
-        resp = requests.get(url, params=params, timeout=10)
-        env = resp.json()
-        if "bars" not in env or not env["bars"]: return pd.DataFrame()
-        df = pd.DataFrame(env["bars"])
-        df["openTime"] = pd.to_datetime(df["openTime"])
-        df = df.set_index("openTime").sort_index()
-        df.index = df.index.tz_localize(None)
-        df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"})
-        return df
-    except Exception as e:
-        print(f"Ошибка biquote {bq_symbol}: {e}")
-        return pd.DataFrame()
-
-def detect_rsi_divergence(df):
-    if len(df) < 20: return 0
-    recent = df.tail(20)
-    if recent['Low'].iloc[-1] < recent['Low'].iloc[-5] and recent['RSI'].iloc[-1] > recent['RSI'].iloc[-5]: return 1
-    elif recent['High'].iloc[-1] > recent['High'].iloc[-5] and recent['RSI'].iloc[-1] < recent['RSI'].iloc[-5]: return -1
-    return 0
-
-def check_hidden_divergence(df):
-    """Скрытая дивергенция (продолжение тренда)"""
-    if len(df) < 20: return 0
-    recent = df.tail(20)
-    # Бычья скрытая: цена делает выше минимум, RSI ниже
-    if recent['Low'].iloc[-1] > recent['Low'].iloc[-5] and recent['RSI'].iloc[-1] < recent['RSI'].iloc[-5]:
-        return 1
-    # Медвежья скрытая: цена делает ниже максимум, RSI выше
-    elif recent['High'].iloc[-1] < recent['High'].iloc[-5] and recent['RSI'].iloc[-1] > recent['RSI'].iloc[-5]:
-        return -1
-    return 0
-
-def check_dual_confirmation(df):
-    """Двойное подтверждение (MACD + RSI)"""
-    if len(df) < 20: return 0
-    # Проверяем дивергенцию на RSI
-    rsi_div = detect_rsi_divergence(df)
-    # Проверяем дивергенцию на MACD
-    exp12 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp26 = df['Close'].ewm(span=26, adjust=False).mean()
-    macd = exp12 - exp26
-    
-    macd_div = 0
-    if len(macd) >= 20:
-        recent_macd = macd.tail(20)
-        recent_close = df['Close'].tail(20)
-        if recent_close.iloc[-1] < recent_close.iloc[-5] and recent_macd.iloc[-1] > recent_macd.iloc[-5]:
-            macd_div = 1
-        elif recent_close.iloc[-1] > recent_close.iloc[-5] and recent_macd.iloc[-1] < recent_macd.iloc[-5]:
-            macd_div = -1
-    
-    # Если обе дивергенции совпадают
-    if rsi_div == 1 and macd_div == 1: return 1
-    elif rsi_div == -1 and macd_div == -1: return -1
-    return 0
-
-def check_liquidity_sweep(df):
-    if len(df) < 10: return 0
-    last_candle = df.iloc[-1]
-    prev_candles = df.iloc[-10:-1]
-    local_low = prev_candles['Low'].min()
-    local_high = prev_candles['High'].max()
-    if last_candle['Low'] < local_low and last_candle['Close'] > local_low: return 1
-    elif last_candle['High'] > local_high and last_candle['Close'] < local_high: return -1
-    return 0
-
-def check_breaker_block(df):
-    if len(df) < 5: return 0
-    last_candle = df.iloc[-1]
-    for i in range(2, 6):
-        candle = df.iloc[-i]
-        body = abs(candle['Close'] - candle['Open'])
-        atr = df['ATR'].iloc[-i] if 'ATR' in df else 1.0
-        if candle['Close'] > candle['Open'] and body > atr * 1.5:
-            if last_candle['Low'] <= candle['Close'] and last_candle['Close'] > candle['Open']: return 1
-        elif candle['Close'] < candle['Open'] and body > atr * 1.5:
-            if last_candle['High'] >= candle['Close'] and last_candle['Close'] < candle['Open']: return -1
-    return 0
-
-def get_ict_session_score():
-    ny_tz = pytz.timezone('America/New_York')
-    now_ny = datetime.now(ny_tz)
-    hour = now_ny.hour
-    if 20 <= hour or hour < 2: return 0, "Азия"
-    elif 2 <= hour < 8: return -0.5, "Лондон"
-    elif 8 <= hour < 17: return 1.0, "Нью-Йорк"
-    else: return 0, "Закрытие"
-
-def check_fibonacci(df):
-    if len(df) < 50: return 0
-    recent = df.tail(50)
-    high = recent['High'].max()
-    low = recent['Low'].min()
-    diff = high - low
-    if diff == 0: return 0
-    
-    fib_382 = high - diff * 0.382
-    fib_500 = high - diff * 0.500
-    fib_618 = high - diff * 0.618
-    
-    current_price = df.iloc[-1]['Close']
-    if abs(current_price - fib_618) < (diff * 0.05) and df.iloc[-1]['Close'] > df.iloc[-1]['Open']: return 1
-    elif abs(current_price - fib_382) < (diff * 0.05) and df.iloc[-1]['Close'] < df.iloc[-1]['Open']: return -1
-    return 0
-
-def check_candle_patterns(df):
-    if len(df) < 3: return 0
-    c1 = df.iloc[-2]
-    c2 = df.iloc[-1]
-    
-    body2 = abs(c2['Close'] - c2['Open'])
-    upper_wick2 = c2['High'] - max(c2['Close'], c2['Open'])
-    lower_wick2 = min(c2['Close'], c2['Open']) - c2['Low']
-    
-    if c1['Close'] < c1['Open'] and c2['Close'] > c2['Open']:
-        if c2['Close'] > c1['Open'] and c2['Open'] < c1['Close']: return 1
-    if c1['Close'] > c1['Open'] and c2['Close'] < c2['Open']:
-        if c2['Close'] < c1['Open'] and c2['Open'] > c1['Close']: return -1
-    if lower_wick2 > body2 * 2 and upper_wick2 < body2 * 0.5: return 1
-    if upper_wick2 > body2 * 2 and lower_wick2 < body2 * 0.5: return -1
-    return 0
-
-def check_volume(df):
-    if len(df) < 20: return 0
-    avg_volume = df['Volume'].tail(20).mean()
-    current_volume = df.iloc[-1]['Volume']
-    if current_volume > avg_volume * 1.5: return 1
-    elif current_volume < avg_volume * 0.5: return -1
-    return 0
-
-def check_fvg(df):
-    if len(df) < 3: return 0
-    c1 = df.iloc[-3]
-    c3 = df.iloc[-1]
-    if c1['High'] < c3['Low']: return 1
-    elif c1['Low'] > c3['High']: return -1
-    return 0
-
-def calculate_risk_and_lot(balance, entry, stop, ticker, confidence):
-    if confidence >= 85: risk_pct = 3.0
-    elif confidence >= 65: risk_pct = 2.0 
-    else: risk_pct = 1.0
-        
-    risk_amount = balance * (risk_pct / 100)
-    distance = abs(entry - stop)
-    if distance == 0: return risk_pct, 0.01
-    
-    if "XAU" in ticker:
-        pip_value = 1.0
-        pip_dist = distance / 0.01
-        lot = risk_amount / (pip_dist * pip_value)
-    else:
-        pip_value = 0.67
-        pip_dist = distance / 0.01
-        lot = risk_amount / (pip_dist * pip_value)
-    
-    return risk_pct, round(max(0.01, min(lot, 10.0)), 2)
-
-def get_analysis(ticker, interval="1h"):
-    try:
-        asset_info = ASSETS.get(ticker, ASSETS["GC=F"])
-        bq_sym = asset_info["bq"]
-        
-        df_1h = get_biquote_data(bq_sym, interval, 200)
-        df_4h = get_biquote_data(bq_sym, "4h", 100)
-        if df_1h.empty: return None
-
-        delta = df_1h['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        df_1h['RSI'] = 100 - (100 / (1 + (gain / loss)))
-        df_1h['EMA50'] = df_1h['Close'].ewm(span=50, adjust=False).mean()
-        df_1h['EMA200'] = df_1h['Close'].ewm(span=200, adjust=False).mean()
-        
-        exp12 = df_1h['Close'].ewm(span=12, adjust=False).mean()
-        exp26 = df_1h['Close'].ewm(span=26, adjust=False).mean()
-        df_1h['MACD'] = exp12 - exp26
-        df_1h['MACD_Signal'] = df_1h['MACD'].ewm(span=9, adjust=False).mean()
-        
-        df_1h['TR'] = pd.concat([df_1h['High'] - df_1h['Low'],
-                              (df_1h['High'] - df_1h['Close'].shift()).abs(),
-                              (df_1h['Low'] - df_1h['Close'].shift()).abs()], axis=1).max(axis=1)
-        df_1h['ATR'] = df_1h['TR'].rolling(window=14).mean()
-
-        current_price = float(df_1h.iloc[-1]['Close'])
-        current_rsi = float(df_1h.iloc[-1]['RSI'])
-        current_atr = float(df_1h.iloc[-1]['ATR'])
-        current_ema200 = float(df_1h.iloc[-1]['EMA200'])
-        current_ema50 = float(df_1h.iloc[-1]['EMA50'])
-        current_macd = float(df_1h.iloc[-1]['MACD'])
-        current_macd_signal = float(df_1h.iloc[-1]['MACD_Signal'])
-        prev_macd = float(df_1h.iloc[-2]['MACD'])
-        prev_macd_signal = float(df_1h.iloc[-2]['MACD_Signal'])
-        
-        divergence = detect_rsi_divergence(df_1h)
-        hidden_div = check_hidden_divergence(df_1h)
-        dual_conf = check_dual_confirmation(df_1h)
-        sweep_signal = check_liquidity_sweep(df_1h)
-        breaker_signal = check_breaker_block(df_1h)
-        ict_score, ict_name = get_ict_session_score()
-        fib_signal = check_fibonacci(df_1h)
-        candle_signal = check_candle_patterns(df_1h)
-        volume_signal = check_volume(df_1h)
-        fvg_signal = check_fvg(df_1h)
-
-        trend_4h = 0
-        if not df_4h.empty:
-            df_4h['EMA50'] = df_4h['Close'].ewm(span=50, adjust=False).mean()
-            if df_4h['Close'].iloc[-1] > df_4h['EMA50'].iloc[-1]: trend_4h = 1
-            else: trend_4h = -1
-
-        conn = sqlite3.connect('signals.db')
-        c = conn.cursor()
-        c.execute("SELECT factor, weight FROM weights")
-        weights = dict(c.fetchall())
-        conn.close()
-
-        score = 0.0
-        max_possible_score = 0.0
-        reasons = [f"ТФ: {interval}", f"Сессия: {ict_name}", f"4H Тренд: {'↑' if trend_4h > 0 else '↓' if trend_4h < 0 else 'Нет'}"]
-
-        max_possible_score += 1 * weights.get('TREND', 1.0)
-        if current_price > current_ema200:
-            score += 1 * weights.get('TREND', 1.0); reasons.append(f"Тренд↑ (+{1 * weights['TREND']:.1f})")
-        else:
-            score -= 1 * weights.get('TREND', 1.0); reasons.append(f"Тренд↓ (-{1 * weights['TREND']:.1f})")
-
-        max_possible_score += 0.5 * weights.get('TREND', 1.0)
-        if current_price > current_ema50: score += 0.5 * weights.get('TREND', 1.0)
-        else: score -= 0.5 * weights.get('TREND', 1.0)
-
-        max_possible_score += 1.5 * weights.get('MACD', 1.0)
-        if prev_macd < prev_macd_signal and current_macd > current_macd_signal:
-            score += 1.5 * weights.get('MACD', 1.0); reasons.append(f"MACD↑ (+{1.5 * weights['MACD']:.1f})")
-        elif prev_macd > prev_macd_signal and current_macd < current_macd_signal:
-            score -= 1.5 * weights.get('MACD', 1.0); reasons.append(f"MACD↓ (-{1.5 * weights['MACD']:.1f})")
-
-        max_possible_score += 2 * weights.get('RSI', 1.0)
-        if current_rsi < 30:
-            score += 2 * weights.get('RSI', 1.0); reasons.append(f"RSI<30 (+{2 * weights['RSI']:.1f})")
-        elif current_rsi > 70:
-            score -= 2 * weights.get('RSI', 1.0); reasons.append(f"RSI>70 (-{2 * weights['RSI']:.1f})")
-
-        max_possible_score += 2.5 * weights.get('DIVERGENCE', 1.0)
-        if divergence == 1:
-            score += 2.5 * weights.get('DIVERGENCE', 1.0); reasons.append(f"Дивергенция↑ (+{2.5 * weights['DIVERGENCE']:.1f})")
-        elif divergence == -1:
-            score -= 2.5 * weights.get('DIVERGENCE', 1.0); reasons.append(f"Дивергенция↓ (-{2.5 * weights['DIVERGENCE']:.1f})")
-
-        max_possible_score += 2.0 * weights.get('HIDDEN_DIV', 1.0)
-        if hidden_div == 1:
-            score += 2.0 * weights.get('HIDDEN_DIV', 1.0); reasons.append(f"Скрытая Диверг↑ (+{2.0 * weights['HIDDEN_DIV']:.1f})")
-        elif hidden_div == -1:
-            score -= 2.0 * weights.get('HIDDEN_DIV', 1.0); reasons.append(f"Скрытая Диверг↓ (-{2.0 * weights['HIDDEN_DIV']:.1f})")
-
-        max_possible_score += 3.0 * weights.get('DUAL_CONFIRM', 1.0)
-        if dual_conf == 1:
-            score += 3.0 * weights.get('DUAL_CONFIRM', 1.0); reasons.append(f"Двойное Подтв↑ (+{3.0 * weights['DUAL_CONFIRM']:.1f})")
-        elif dual_conf == -1:
-            score -= 3.0 * weights.get('DUAL_CONFIRM', 1.0); reasons.append(f"Двойное Подтв↓ (-{3.0 * weights['DUAL_CONFIRM']:.1f})")
-
-        max_possible_score += 3.0 * weights.get('SMC_SWEEP', 1.0)
-        if sweep_signal == 1:
-            score += 3.0 * weights.get('SMC_SWEEP', 1.0); reasons.append(f"SMC Sweep↑ (+{3.0 * weights['SMC_SWEEP']:.1f})")
-        elif sweep_signal == -1:
-            score -= 3.0 * weights.get('SMC_SWEEP', 1.0); reasons.append(f"SMC Sweep↓ (-{3.0 * weights['SMC_SWEEP']:.1f})")
-
-        max_possible_score += 2.0 * weights.get('BREAKER_BLOCK', 1.0)
-        if breaker_signal == 1:
-            score += 2.0 * weights.get('BREAKER_BLOCK', 1.0); reasons.append(f"Breaker Block↑ (+{2.0 * weights['BREAKER_BLOCK']:.1f})")
-        elif breaker_signal == -1:
-            score -= 2.0 * weights.get('BREAKER_BLOCK', 1.0); reasons.append(f"Breaker Block↓ (-{2.0 * weights['BREAKER_BLOCK']:.1f})")
-
-        max_possible_score += 1.0 * weights.get('ICT_P3', 1.0)
-        score += ict_score * weights.get('ICT_P3', 1.0)
-
-        max_possible_score += 2.0 * weights.get('FIBONACCI', 1.0)
-        if fib_signal == 1:
-            score += 2.0 * weights.get('FIBONACCI', 1.0); reasons.append(f"Fib Отскок↑ (+{2.0 * weights['FIBONACCI']:.1f})")
-        elif fib_signal == -1:
-            score -= 2.0 * weights.get('FIBONACCI', 1.0); reasons.append(f"Fib Отскок↓ (-{2.0 * weights['FIBONACCI']:.1f})")
-
-        max_possible_score += 1.5 * weights.get('CANDLE_PATTERN', 1.0)
-        if candle_signal == 1:
-            score += 1.5 * weights.get('CANDLE_PATTERN', 1.0); reasons.append(f"Паттерн↑ (+{1.5 * weights['CANDLE_PATTERN']:.1f})")
-        elif candle_signal == -1:
-            score -= 1.5 * weights.get('CANDLE_PATTERN', 1.0); reasons.append(f"Паттерн↓ (-{1.5 * weights['CANDLE_PATTERN']:.1f})")
-
-        max_possible_score += 1.0 * weights.get('VOLUME', 1.0)
-        if volume_signal == 1:
-            score += 1.0 * weights.get('VOLUME', 1.0); reasons.append(f"Объем↑ (+{1.0 * weights['VOLUME']:.1f})")
-        elif volume_signal == -1:
-            score -= 0.5 * weights.get('VOLUME', 1.0); reasons.append(f"Объем↓ (-{0.5 * weights['VOLUME']:.1f})")
-
-        max_possible_score += 2.0 * weights.get('FVG', 1.0)
-        if fvg_signal == 1:
-            score += 2.0 * weights.get('FVG', 1.0); reasons.append(f"FVG↑ (+{2.0 * weights['FVG']:.1f})")
-        elif fvg_signal == -1:
-            score -= 2.0 * weights.get('FVG', 1.0); reasons.append(f"FVG↓ (-{2.0 * weights['FVG']:.1f})")
-
-        max_possible_score += 5.0 * weights.get('AI_NEWS', 1.0)
-        news = "Новостей нет." 
-        try:
-            feed = feedparser.parse("https://finance.yahoo.com/rss/2.0/headline?s=GC=F")
-            if feed.entries: 
-                raw_news = feed.entries[0].title
-                keywords = ["gold", "xau", "fed", "interest rate", "inflation", "dollar", "fomc", "powell", "gbp", "jpy", "yen", "pound", "boj", "boe"]
-                if any(kw in raw_news.lower() for kw in keywords): news = raw_news
-        except: pass
-        
-        if news != "Новостей нет.":
-            response = ai_client.chat.completions.create(
-                model="meta-llama/llama-3.1-8b-instruct",
-                messages=[{"role": "user", "content": f"Оцени новость для {ticker} от -5 до +5. '{news}'. Ответь только цифрой."}],
-                temperature=0.1, max_tokens=5
+    with db_connect() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                market TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                entry REAL NOT NULL,
+                stop_loss REAL NOT NULL,
+                take_profit REAL NOT NULL,
+                score REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'OPEN',
+                result TEXT,
+                closed_at TEXT,
+                UNIQUE(market, symbol, side, created_at)
             )
-            import re
-            match = re.search(r'[-+]?\d+', response.choices[0].message.content)
-            ai_score = int(match.group()) if match else 0
-            if ai_score != 0:
-                score += ai_score * weights.get('AI_NEWS', 1.0)
-                reasons.append(f"ИИ ({ai_score * weights['AI_NEWS']:+.1f})")
-
-        if trend_4h == 1 and score < 0:
-            score *= 0.8; reasons.append("⚠️ 4H против")
-        elif trend_4h == -1 and score > 0:
-            score *= 0.8; reasons.append("⚠️ 4H против")
-
-        confidence = int((abs(score) / max_possible_score) ** 0.5 * 100) 
-        if confidence > 100: confidence = 100
-
-        if score >= 0:
-            forecast = "🟢 ВВЕРХ"
-            target = current_price + (1.5 * current_atr)
-            stop_loss = current_price - (1.0 * current_atr)
-        else:
-            forecast = "🔴 ВНИЗ"
-            target = current_price - (1.5 * current_atr)
-            stop_loss = current_price + (1.0 * current_atr)
-
-        risk_pct, lot = calculate_risk_and_lot(USER_BALANCE, current_price, stop_loss, ticker, confidence)
-        
-        support = float(df_1h['Low'].tail(24).min())
-        resistance = float(df_1h['High'].tail(24).max())
-
-        return current_price, current_rsi, forecast, target, stop_loss, support, resistance, " | ".join(reasons), news, confidence, lot, risk_pct
-    except Exception as e:
-        print(f"Ошибка анализа {ticker}: {e}")
-        return None
-
-async def send_signal(chat_id, ticker, is_auto=False):
-    try:
-        await bot.send_chat_action(chat_id, 'typing')
-        result = await asyncio.wait_for(asyncio.to_thread(get_analysis, ticker, "1h"), timeout=30.0)
-        if not result:
-            if not is_auto: await bot.send_message(chat_id, "⚠️ Ошибка данных. Попробуйте позже.")
-            return
-
-        price, rsi, forecast, target, sl, support, resistance, reasons, news, confidence, lot, risk_pct = result
-        asset_name = ASSETS.get(ticker, {}).get("name", ticker)
-        
-        # ТЕНЕВОЙ РЕЖИМ (Если уверенность < 60% на 1H, проверяем 15M)
-        if is_auto and confidence < 60:
-            # Пробуем 15M таймфрейм для теневой сделки
-            result_15m = await asyncio.to_thread(get_analysis, ticker, "15m")
-            if result_15m:
-                price, rsi, forecast, target, sl, support, resistance, reasons, news, confidence, lot, risk_pct = result_15m
-                reasons = f"ТФ: 15m | " + reasons
-
-        # ВСЕГДА ЗАПИСЫВАЕМ В БАЗУ
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-        conn = sqlite3.connect('signals.db')
-        c = conn.cursor()
-        c.execute("INSERT INTO history (timestamp, price, rsi, forecast, target_price, stop_loss, confidence, ticker, lot_size, risk_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                  (now_str, price, rsi, forecast, target, sl, confidence, ticker, lot, risk_pct))
-        signal_id = c.lastrowid
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
         conn.commit()
-        conn.close()
 
-        # ОТПРАВЛЯЕМ ТОЛЬКО ЕСЛИ УВЕРЕННОСТЬ >= 60%
-        if is_auto and confidence < 60:
-            print(f"Авто (Теневая): {asset_name} уверенность {confidence}% < 60%, записано в базу.")
-            return
 
-        if is_auto:
-            status_text = "🎯 <b>СНАЙПЕР (Высокая уверенность)</b>" if confidence >= 85 else "⚡️ <b>Сильный сигнал</b>"
-            await bot.send_message(chat_id, status_text)
+def save_signal(signal: dict[str, Any]) -> int | None:
+    with db_connect() as conn:
+        # Avoid repeated alerts for the same market/symbol/direction within 45 minutes.
+        recent = conn.execute("""
+            SELECT id FROM signals
+            WHERE market=? AND symbol=? AND side=? AND status='OPEN'
+              AND created_at >= ?
+            ORDER BY id DESC LIMIT 1
+        """, (
+            signal["market"], signal["symbol"], signal["side"],
+            datetime.fromtimestamp(
+                datetime.now(timezone.utc).timestamp() - 2700,
+                tz=timezone.utc
+            ).isoformat()
+        )).fetchone()
+        if recent:
+            return None
 
-        safe_news = news.replace("_", " ").replace("*", " ").replace("[", " ").replace("`", " ")
-        conf_bar = "🟩" * (confidence // 20) + "⬜️" * (5 - (confidence // 20))
+        cur = conn.execute("""
+            INSERT INTO signals
+            (created_at, market, symbol, side, entry, stop_loss, take_profit, score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.now(timezone.utc).isoformat(),
+            signal["market"], signal["symbol"], signal["side"],
+            signal["entry"], signal["stop_loss"], signal["take_profit"],
+            signal["score"]
+        ))
+        conn.commit()
+        return int(cur.lastrowid)
 
-        text = (f"📊 <b>Анализ {asset_name}</b> {'(АВТО)' if is_auto else ''} #{signal_id}\n"
-                f"🔮 Уверенность: <b>{confidence}%</b> {conf_bar}\n\n"
-                f"Цена входа: <b>{price:.5f}</b> | RSI: {rsi:.1f}\n"
-                f"🎯 TP: <b>{target:.5f}</b> | 🛑 SL: <b>{sl:.5f}</b>\n"
-                f"📦 Лот: <b>{lot}</b> (Риск: {risk_pct}% от депо)\n\n"
-                f"🧠 <b>Факторы:</b>\n{reasons}\n\n"
-                f"🛡️ <b>Ликвидность:</b>\nПоддержка: {support:.5f} | Сопротивление: {resistance:.5f}\n\n"
-                f"📰 <b>Новость:</b>\n<i>{safe_news}</i>\n\n"
-                f"Прогноз: <b>{forecast}</b>\n"
-                f"⏳ <i>Сделка активна (следим за TP/SL)</i>")
 
-        await bot.send_message(chat_id, text, parse_mode="HTML")
-    except Exception as e:
-        print(f"Ошибка отправки: {e}")
+def close_signal(signal_id: int, result: str) -> bool:
+    with db_connect() as conn:
+        cur = conn.execute("""
+            UPDATE signals SET status='CLOSED', result=?, closed_at=?
+            WHERE id=? AND status='OPEN'
+        """, (result.upper(), datetime.now(timezone.utc).isoformat(), signal_id))
+        conn.commit()
+        return cur.rowcount > 0
 
-async def background_worker():
-    global AUTO_SIGNAL_ENABLED, USER_CHAT_ID
+
+def get_stats() -> dict[str, Any]:
+    with db_connect() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) n FROM signals WHERE status='CLOSED'"
+        ).fetchone()["n"]
+        wins = conn.execute(
+            "SELECT COUNT(*) n FROM signals WHERE result='WIN'"
+        ).fetchone()["n"]
+        losses = conn.execute(
+            "SELECT COUNT(*) n FROM signals WHERE result='LOSS'"
+        ).fetchone()["n"]
+        opened = conn.execute(
+            "SELECT COUNT(*) n FROM signals WHERE status='OPEN'"
+        ).fetchone()["n"]
+        rows = conn.execute("""
+            SELECT market, COUNT(*) total,
+                   SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) wins,
+                   SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END) losses
+            FROM signals WHERE status='CLOSED' GROUP BY market
+        """).fetchall()
+    return {
+        "total": total, "wins": wins, "losses": losses, "open": opened,
+        "winrate": (wins / total * 100) if total else None,
+        "by_market": [dict(r) for r in rows]
+    }
+
+
+# ---------------------------- BINGX DATA ----------------------------
+
+class BingXClient:
+    def __init__(self, session: aiohttp.ClientSession):
+        self.session = session
+
+    async def get_json(self, path: str, params: dict[str, Any]) -> Any:
+        url = BINGX_BASE_URL + path
+        async with self.session.get(url, params=params) as response:
+            body = await response.text()
+            if response.status != 200:
+                raise RuntimeError(f"BingX HTTP {response.status}: {body[:250]}")
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Invalid JSON from BingX: {body[:200]}") from exc
+
+            if isinstance(payload, dict) and payload.get("code") not in (None, 0, "0"):
+                raise RuntimeError(
+                    f"BingX API error {payload.get('code')}: {payload.get('msg', '')}"
+                )
+            return payload.get("data", payload) if isinstance(payload, dict) else payload
+
+    async def klines(self, market: str, symbol: str, interval: str) -> pd.DataFrame:
+        if market == "spot":
+            path = "/openApi/spot/v2/market/kline"
+        else:
+            path = "/openApi/swap/v3/quote/klines"
+
+        data = await self.get_json(path, {
+            "symbol": symbol,
+            "interval": INTERVALS[interval],
+            "limit": CANDLE_LIMIT
+        })
+
+        # BingX commonly returns list rows:
+        # [openTime, open, high, low, close, volume, closeTime, quoteVolume]
+        if isinstance(data, dict):
+            for key in ("data", "list", "klines", "rows"):
+                if isinstance(data.get(key), list):
+                    data = data[key]
+                    break
+
+        if not isinstance(data, list) or len(data) < 60:
+            raise RuntimeError(f"Not enough {market} {symbol} {interval} candles")
+
+        records = []
+        for row in data:
+            if isinstance(row, (list, tuple)) and len(row) >= 6:
+                records.append({
+                    "open_time": row[0], "open": row[1], "high": row[2],
+                    "low": row[3], "close": row[4], "volume": row[5],
+                    "close_time": row[6] if len(row) > 6 else row[0]
+                })
+            elif isinstance(row, dict):
+                records.append({
+                    "open_time": row.get("time", row.get("openTime", row.get("open_time"))),
+                    "open": row.get("open"), "high": row.get("high"),
+                    "low": row.get("low"), "close": row.get("close"),
+                    "volume": row.get("volume", row.get("vol")),
+                    "close_time": row.get("closeTime", row.get("close_time", row.get("time")))
+                })
+
+        df = pd.DataFrame(records)
+        required = ["open_time", "open", "high", "low", "close", "volume", "close_time"]
+        if df.empty or any(c not in df.columns for c in required):
+            raise RuntimeError("Unexpected BingX kline schema")
+
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["open_time"] = pd.to_numeric(df["open_time"], errors="coerce")
+        df["close_time"] = pd.to_numeric(df["close_time"], errors="coerce")
+        df = df.dropna(subset=required).sort_values("open_time")
+        df = df.drop_duplicates(subset=["open_time"]).reset_index(drop=True)
+
+        # Use only fully closed candles. If the API returns seconds, convert to ms.
+        now_ms = int(time.time() * 1000)
+        if df["close_time"].median() < 10_000_000_000:
+            df["close_time"] *= 1000
+        df = df[df["close_time"] < now_ms - 1000].copy()
+
+        if len(df) < 60:
+            raise RuntimeError("Not enough fully closed candles after validation")
+        if (df["high"] < df["low"]).any() or (df["volume"] < 0).any():
+            raise RuntimeError("Invalid OHLCV data")
+        return df.tail(CANDLE_LIMIT).reset_index(drop=True)
+
+
+# ---------------------------- INDICATORS ----------------------------
+
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    x = df.copy()
+    close, high, low = x["close"], x["high"], x["low"]
+
+    # Wilder RSI
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    x["rsi"] = 100 - (100 / (1 + rs))
+    x.loc[(avg_loss == 0) & (avg_gain > 0), "rsi"] = 100
+    x.loc[(avg_loss == 0) & (avg_gain == 0), "rsi"] = 50
+
+    x["ema20"] = close.ewm(span=20, adjust=False).mean()
+    x["ema50"] = close.ewm(span=50, adjust=False).mean()
+    x["ema200"] = close.ewm(span=200, adjust=False).mean()
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    x["macd"] = ema12 - ema26
+    x["macd_signal"] = x["macd"].ewm(span=9, adjust=False).mean()
+    x["macd_hist"] = x["macd"] - x["macd_signal"]
+
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low, (high - prev_close).abs(), (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+    x["atr"] = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+
+    up = high.diff()
+    down = -low.diff()
+    plus_dm = up.where((up > down) & (up > 0), 0.0)
+    minus_dm = down.where((down > up) & (down > 0), 0.0)
+    atr_safe = x["atr"].replace(0, np.nan)
+    plus_di = 100 * plus_dm.ewm(alpha=1/14, adjust=False).mean() / atr_safe
+    minus_di = 100 * minus_dm.ewm(alpha=1/14, adjust=False).mean() / atr_safe
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    x["adx"] = dx.ewm(alpha=1/14, adjust=False).mean()
+    x["plus_di"] = plus_di
+    x["minus_di"] = minus_di
+
+    x["vol_sma20"] = x["volume"].rolling(20).mean()
+    return x
+
+
+@dataclass
+class TFAnalysis:
+    direction: int  # +1 bullish, -1 bearish, 0 neutral
+    score: float
+    close: float
+    atr: float
+    rsi: float
+    adx: float
+    reasons: list[str]
+
+
+def analyze_timeframe(raw: pd.DataFrame) -> TFAnalysis:
+    df = add_indicators(raw)
+    row = df.iloc[-1]
+    prev = df.iloc[-2]
+    close = float(row["close"])
+    atr = float(row["atr"])
+    rsi = float(row["rsi"])
+    adx = float(row["adx"]) if pd.notna(row["adx"]) else 0.0
+
+    if not all(np.isfinite(v) for v in [close, atr, rsi]) or atr <= 0:
+        raise RuntimeError("Indicators are not ready")
+
+    score = 0.0
+    reasons = []
+
+    if row["ema20"] > row["ema50"] > row["ema200"]:
+        score += 2.0
+        reasons.append("EMA20 > EMA50 > EMA200")
+    elif row["ema20"] < row["ema50"] < row["ema200"]:
+        score -= 2.0
+        reasons.append("EMA20 < EMA50 < EMA200")
+
+    if row["macd"] > row["macd_signal"] and row["macd_hist"] > prev["macd_hist"]:
+        score += 1.25
+        reasons.append("MACD bullish momentum")
+    elif row["macd"] < row["macd_signal"] and row["macd_hist"] < prev["macd_hist"]:
+        score -= 1.25
+        reasons.append("MACD bearish momentum")
+
+    if 50 < rsi < 70:
+        score += 0.75
+        reasons.append(f"RSI bullish zone ({rsi:.1f})")
+    elif 30 < rsi < 50:
+        score -= 0.75
+        reasons.append(f"RSI bearish zone ({rsi:.1f})")
+    elif rsi >= 75:
+        score -= 0.5
+        reasons.append(f"RSI overbought caution ({rsi:.1f})")
+    elif rsi <= 25:
+        score += 0.5
+        reasons.append(f"RSI oversold caution ({rsi:.1f})")
+
+    if adx >= 20:
+        if row["plus_di"] > row["minus_di"]:
+            score += 0.75
+            reasons.append(f"ADX trend bullish ({adx:.1f})")
+        elif row["minus_di"] > row["plus_di"]:
+            score -= 0.75
+            reasons.append(f"ADX trend bearish ({adx:.1f})")
+
+    # A close beyond the previous 20-candle range is a simple breakout confirmation.
+    prior_high = df["high"].iloc[-21:-1].max()
+    prior_low = df["low"].iloc[-21:-1].min()
+    if close > prior_high:
+        score += 1.0
+        reasons.append("20-candle high breakout")
+    elif close < prior_low:
+        score -= 1.0
+        reasons.append("20-candle low breakdown")
+
+    direction = 1 if score >= 1.5 else (-1 if score <= -1.5 else 0)
+    return TFAnalysis(direction, score, close, atr, rsi, adx, reasons)
+
+
+# ---------------------------- SIGNAL ENGINE ----------------------------
+
+async def build_signal(client: BingXClient, market: str, symbol: str):
+    analyses: dict[str, TFAnalysis] = {}
+    for tf in ("5m", "15m", "1h", "4h"):
+        raw = await client.klines(market, symbol, tf)
+        analyses[tf] = analyze_timeframe(raw)
+        await asyncio.sleep(0.08)
+
+    # The 15m timeframe is the setup; H1/H4 provide trend context.
+    setup = analyses["15m"]
+    h1, h4, m5 = analyses["1h"], analyses["4h"], analyses["5m"]
+    direction = setup.direction
+
+    if direction == 0:
+        return None, "15m setup is neutral"
+
+    # Avoid entering against both higher timeframes.
+    if h1.direction == -direction and h4.direction == -direction:
+        return None, "H1 and H4 oppose the setup"
+
+    # Require at least one higher timeframe to agree and M5 not to strongly oppose.
+    if h1.direction != direction and h4.direction != direction:
+        return None, "No H1/H4 confirmation"
+    if m5.direction == -direction and abs(m5.score) >= 3:
+        return None, "M5 momentum strongly opposes the setup"
+
+    weighted = (
+        setup.score * 1.5 +
+        h1.score * 1.5 +
+        h4.score * 1.25 +
+        m5.score * 0.75
+    )
+    signed_score = weighted if direction > 0 else -weighted
+    if signed_score < MIN_SIGNAL_SCORE:
+        return None, f"Score too low ({signed_score:.2f})"
+
+    # Spot has no native short selling in this signal-only strategy.
+    if market == "spot" and direction < 0:
+        return None, "Spot mode: bearish setup is NO TRADE (no short)"
+
+    entry = setup.close
+    atr = setup.atr
+    stop_distance = atr * ATR_SL_MULTIPLIER
+    target_distance = atr * ATR_TP_MULTIPLIER
+    rr = target_distance / stop_distance if stop_distance else 0
+    if rr < MIN_RR:
+        return None, f"Risk/reward too low ({rr:.2f})"
+
+    side = "BUY" if direction > 0 else "SELL"
+    if direction > 0:
+        sl = entry - stop_distance
+        tp = entry + target_distance
+    else:
+        sl = entry + stop_distance
+        tp = entry - target_distance
+
+    reasons = []
+    for tf in ("15m", "1h", "4h", "5m"):
+        reasons.extend([f"{tf}: {r}" for r in analyses[tf].reasons[:3]])
+
+    return {
+        "market": market,
+        "symbol": symbol,
+        "side": side,
+        "entry": entry,
+        "stop_loss": sl,
+        "take_profit": tp,
+        "score": signed_score,
+        "rr": rr,
+        "rsi": setup.rsi,
+        "adx": setup.adx,
+        "reasons": reasons[:9],
+        "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    }, None
+
+
+def fmt_price(value: float) -> str:
+    if value >= 1000:
+        return f"{value:,.2f}"
+    if value >= 1:
+        return f"{value:.4f}"
+    return f"{value:.8f}".rstrip("0").rstrip(".")
+
+
+def render_signal(signal: dict[str, Any], signal_id: int) -> str:
+    market_name = "SPOT" if signal["market"] == "spot" else "PERPETUAL FUTURES"
+    emoji = "🟢" if signal["side"] == "BUY" else "🔴"
+    reasons = "\n".join(f"• {x}" for x in signal["reasons"]) or "• Multi-timeframe confirmation"
+    return (
+        f"{emoji} <b>BingX v8.0 — {signal['side']}</b>\n"
+        f"<b>{signal['symbol']} | {market_name}</b>\n\n"
+        f"Вход (ориентир): <code>{fmt_price(signal['entry'])}</code>\n"
+        f"Stop Loss: <code>{fmt_price(signal['stop_loss'])}</code>\n"
+        f"Take Profit: <code>{fmt_price(signal['take_profit'])}</code>\n"
+        f"Risk/Reward: <b>1:{signal['rr']:.2f}</b>\n"
+        f"Сила модели: <b>{signal['score']:.2f}</b>\n"
+        f"RSI M15: {signal['rsi']:.1f} | ADX M15: {signal['adx']:.1f}\n\n"
+        f"<b>Обоснование:</b>\n{reasons}\n\n"
+        f"ID сигнала: <code>{signal_id}</code>\n"
+        f"Время: {signal['time']}\n\n"
+        f"⚠️ Это аналитический сигнал, не гарантия результата. "
+        f"Проверь спред, ликвидность, комиссии и цену исполнения. "
+        f"Плечо и размер позиции рассчитывай отдельно."
+    )
+
+
+# ---------------------------- TELEGRAM ----------------------------
+
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
+dp = Dispatcher()
+scan_lock = asyncio.Lock()
+background_task: asyncio.Task | None = None
+http_session: aiohttp.ClientSession | None = None
+auto_chats: set[int] = set()
+
+
+def authorized(message: Message) -> bool:
+    if not ALLOWED_USER_IDS:
+        return True
+    return bool(message.from_user and message.from_user.id in ALLOWED_USER_IDS)
+
+
+async def reply_error(message: Message, exc: Exception):
+    log.exception("Command failed")
+    await message.answer(f"Ошибка: {str(exc)[:350]}")
+
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    if not authorized(message):
+        return
+    await message.answer(
+        "🤖 <b>Trading Bot v8.0 для BingX</b>\n\n"
+        "Поддержка: Spot и USDT-M Perpetual Futures.\n"
+        "Бот отправляет сигналы, но не открывает сделки.\n\n"
+        "<b>Команды:</b>\n"
+        "/scan — запустить анализ сейчас\n"
+        "/auto_on — включить автоматическую отправку сигналов\n"
+        "/auto_off — выключить автоматическую отправку\n"
+        "/stats — статистика отмеченных результатов\n"
+        "/result ID WIN — отметить прибыльный сигнал\n"
+        "/result ID LOSS — отметить убыточный сигнал\n"
+        "/help — справка\n\n"
+        "По умолчанию автоматическая отправка выключена."
+    )
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    if not authorized(message):
+        return
+    await cmd_start(message)
+
+
+async def run_scan(chat_id: int, notify_no_trade: bool = True):
+    global http_session
+    if scan_lock.locked():
+        await bot.send_message(chat_id, "Анализ уже выполняется. Подожди завершения.")
+        return
+
+    async with scan_lock:
+        messages = []
+        failures = []
+        client = BingXClient(http_session)
+        for market in MARKETS:
+            for symbol in SYMBOLS:
+                try:
+                    signal, reason = await build_signal(client, market, symbol)
+                    if signal:
+                        signal_id = save_signal(signal)
+                        if signal_id:
+                            messages.append(render_signal(signal, signal_id))
+                    else:
+                        log.info("NO TRADE %s %s: %s", market, symbol, reason)
+                except Exception as exc:
+                    log.warning("Analysis failed %s %s: %s", market, symbol, exc)
+                    failures.append(f"{market} {symbol}: {str(exc)[:120]}")
+
+        if messages:
+            for text in messages:
+                await bot.send_message(chat_id, text, parse_mode="HTML")
+        elif notify_no_trade:
+            await bot.send_message(
+                chat_id,
+                "🔎 Анализ завершён: подходящих сигналов нет (NO TRADE)."
+            )
+
+        if failures:
+            await bot.send_message(
+                chat_id,
+                "⚠️ Не удалось проверить часть инструментов:\n" + "\n".join(failures[:8])
+            )
+
+
+@dp.message(Command("scan"))
+async def cmd_scan(message: Message):
+    if not authorized(message):
+        return
+    await message.answer("Начинаю анализ BingX Spot и Perpetual Futures…")
+    try:
+        await run_scan(message.chat.id)
+    except Exception as exc:
+        await reply_error(message, exc)
+
+
+@dp.message(Command("auto_on"))
+async def cmd_auto_on(message: Message):
+    if not authorized(message):
+        return
+    auto_chats.add(message.chat.id)
+    await message.answer(
+        f"✅ Автоматическая отправка включена. Проверка каждые "
+        f"{SCAN_INTERVAL_SECONDS} секунд."
+    )
+
+
+@dp.message(Command("auto_off"))
+async def cmd_auto_off(message: Message):
+    if not authorized(message):
+        return
+    auto_chats.discard(message.chat.id)
+    await message.answer("⏸ Автоматическая отправка выключена.")
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if not authorized(message):
+        return
+    s = get_stats()
+    wr = "нет данных" if s["winrate"] is None else f"{s['winrate']:.1f}%"
+    text = (
+        "📊 <b>Статистика v8.0</b>\n\n"
+        f"Закрытых сигналов: {s['total']}\n"
+        f"WIN: {s['wins']}\nLOSS: {s['losses']}\n"
+        f"Win rate: {wr}\n"
+        f"Открытых/неразмеченных: {s['open']}\n\n"
+        "Результаты учитываются только после ручной отметки командой /result. "
+        "Это не фактический PnL и не учитывает комиссии/проскальзывание."
+    )
+    await message.answer(text)
+
+
+@dp.message(Command("result"))
+async def cmd_result(message: Message):
+    if not authorized(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 3 or not parts[1].isdigit() or parts[2].upper() not in {"WIN", "LOSS"}:
+        await message.answer("Формат: /result ID WIN или /result ID LOSS")
+        return
+    ok = close_signal(int(parts[1]), parts[2])
+    await message.answer(
+        "Результат сохранён." if ok else
+        "Не найден открытый сигнал с таким ID."
+    )
+
+
+async def background_scanner():
     while True:
         try:
-            if AUTO_SIGNAL_ENABLED and USER_CHAT_ID:
-                for ticker in ASSETS.keys():
-                    await send_signal(USER_CHAT_ID, ticker, is_auto=True)
-                    await asyncio.sleep(3)
-                await asyncio.sleep(5 * 60) 
-            else:
-                await asyncio.sleep(10)
+            for chat_id in list(auto_chats):
+                await run_scan(chat_id, notify_no_trade=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Background scanner error")
+        await asyncio.sleep(max(30, SCAN_INTERVAL_SECONDS))
 
-            conn = sqlite3.connect('signals.db')
-            c = conn.cursor()
-            c.execute("SELECT id, timestamp, price, target_price, stop_loss, forecast, ticker FROM history WHERE result IS NULL")
-            pending = c.fetchall()
-
-            if pending:
-                for sig_id, sig_time, old_price, tp, sl, forecast, ticker in pending:
-                    bq_sym = ASSETS.get(ticker, {}).get("bq", "XAUUSD")
-                    current_data = await asyncio.to_thread(get_biquote_data, bq_sym, "1m", 60)
-                    if current_data.empty: continue
-                    
-                    sig_dt = pd.to_datetime(sig_time)
-                    recent_data = current_data[current_data.index >= sig_dt]
-                    if recent_data.empty: continue
-                    
-                    high_price = recent_data['High'].max()
-                    low_price = recent_data['Low'].min()
-                    
-                    result_text = ""
-                    close_price = 0.0
-                    
-                    if "ВВЕРХ" in forecast:
-                        if high_price >= tp: result_text, close_price = "WIN ✅", tp
-                        elif low_price <= sl: result_text, close_price = "LOSS ❌", sl
-                        elif high_price >= (old_price + (tp - old_price) * 0.5):
-                            new_sl = max(sl, old_price)
-                            if new_sl > sl:
-                                c.execute("UPDATE history SET stop_loss = ? WHERE id = ?", (new_sl, sig_id))
-                                conn.commit()
-                                sl = new_sl
-                    elif "ВНИЗ" in forecast:
-                        if low_price <= tp: result_text, close_price = "WIN ✅", tp
-                        elif high_price >= sl: result_text, close_price = "LOSS ❌", sl
-                        elif low_price <= (old_price - (old_price - tp) * 0.5):
-                            new_sl = min(sl, old_price)
-                            if new_sl < sl:
-                                c.execute("UPDATE history SET stop_loss = ? WHERE id = ?", (new_sl, sig_id))
-                                conn.commit()
-                                sl = new_sl
-
-                    if result_text:
-                        c.execute("UPDATE history SET result = ?, close_price = ? WHERE id = ?", (result_text, close_price, sig_id))
-                        conn.commit()
-                        
-                        all_factors = ['TREND', 'RSI', 'MACD', 'DIVERGENCE', 'SMC_SWEEP', 'BREAKER_BLOCK', 'ICT_P3', 'FIBONACCI', 'CANDLE_PATTERN', 'VOLUME', 'FVG', 'HIDDEN_DIV', 'DUAL_CONFIRM']
-                        if "LOSS" in result_text:
-                            for factor in all_factors:
-                                c.execute("UPDATE weights SET weight = MAX(0.8, weight - 0.05) WHERE factor = ?", (factor,))
-                        else:
-                            for factor in all_factors:
-                                c.execute("UPDATE weights SET weight = MIN(1.5, weight + 0.05) WHERE factor = ?", (factor,))
-                        conn.commit()
-
-            conn.close()
-        except Exception as e:
-            print(f"Ошибка фона: {e}")
-        await asyncio.sleep(30)
-
-# --- КЛАВИАТУРЫ И ОБРАБОТЧИКИ (без изменений) ---
-def get_main_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📈 Прогноз")],
-            [KeyboardButton(text="🚀 Вкл Авто"), KeyboardButton(text="🛑 Выкл Авто")],
-            [KeyboardButton(text="🧠 Веса"), KeyboardButton(text="📜 История")],
-            [KeyboardButton(text="⚙️ Актив"), KeyboardButton(text="💰 Депозит")]
-        ],
-        resize_keyboard=True
-    )
-
-def get_asset_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🥇 Золото")],
-            [KeyboardButton(text="🇬🇧 Фунт/Йена")],
-            [KeyboardButton(text="🇦🇺 Австрал/Йена")],
-            [KeyboardButton(text="⬅️ Назад")]
-        ],
-        resize_keyboard=True
-    )
-
-@dp.message(CommandStart())
-async def start_command(message: types.Message, state: FSMContext):
-    global USER_CHAT_ID
-    USER_CHAT_ID = message.chat.id
-    await state.clear()
-    await message.answer(
-        f"Привет! Бот (v7.0 с Скрытой Дивергенцией) готов.\nВаш депозит: ${USER_BALANCE:.2f}", 
-        reply_markup=get_main_keyboard()
-    )
-
-@dp.message(lambda message: "Актив" in message.text)
-async def asset_menu_handler(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Выберите актив:", reply_markup=get_asset_keyboard())
-
-@dp.message(lambda message: "Назад" in message.text)
-async def back_handler(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Возврат.", reply_markup=get_main_keyboard())
-
-@dp.message(lambda message: "Золото" in message.text)
-async def set_gold(message: types.Message, state: FSMContext):
-    global CURRENT_TICKER
-    CURRENT_TICKER = "GC=F"
-    await state.clear()
-    await message.answer("Актив: <b>Золото</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
-
-@dp.message(lambda message: "Фунт/Йена" in message.text)
-async def set_gbpjpy(message: types.Message, state: FSMContext):
-    global CURRENT_TICKER
-    CURRENT_TICKER = "GBPJPY=X"
-    await state.clear()
-    await message.answer("Актив: <b>Фунт/Йена</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
-
-@dp.message(lambda message: "Австрал/Йена" in message.text)
-async def set_audjpy(message: types.Message, state: FSMContext):
-    global CURRENT_TICKER
-    CURRENT_TICKER = "AUDJPY=X"
-    await state.clear()
-    await message.answer("Актив: <b>Австрал/Йена</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
-
-@dp.message(lambda message: "Депозит" in message.text)
-async def ask_balance(message: types.Message, state: FSMContext):
-    await state.set_state(UserSettings.waiting_for_balance)
-    await message.answer("Введите ваш общий депозит в USD (например: 1000).")
-
-@dp.message(UserSettings.waiting_for_balance)
-async def process_balance(message: types.Message, state: FSMContext):
-    global USER_BALANCE
-    try:
-        new_bal = float(message.text)
-        USER_BALANCE = new_bal
-        await state.clear()
-        await message.answer(f"✅ Депозит обновлен: <b>${USER_BALANCE:.2f}</b>", parse_mode="HTML", reply_markup=get_main_keyboard())
-    except ValueError:
-        await message.answer("Ошибка. Введите число (например: 1000).")
-
-@dp.message(lambda message: "Прогноз" in message.text or message.text == "/signal")
-async def signal_handler(message: types.Message, state: FSMContext):
-    await state.clear()
-    await send_signal(message.chat.id, CURRENT_TICKER, is_auto=False)
-
-@dp.message(lambda message: "Вкл Авто" in message.text or message.text == "/autostart")
-async def autostart_handler(message: types.Message, state: FSMContext):
-    global AUTO_SIGNAL_ENABLED, USER_CHAT_ID
-    AUTO_SIGNAL_ENABLED = True
-    USER_CHAT_ID = message.chat.id
-    await state.clear()
-    await message.answer("🚀 Авто-режим ВКЛЮЧЕН.", reply_markup=get_main_keyboard())
-
-@dp.message(lambda message: "Выкл Авто" in message.text or message.text == "/autostop")
-async def autostop_handler(message: types.Message, state: FSMContext):
-    global AUTO_SIGNAL_ENABLED
-    AUTO_SIGNAL_ENABLED = False
-    await state.clear()
-    await message.answer("🛑 Авто-режим ВЫКЛЮЧЕН.", reply_markup=get_main_keyboard())
-
-@dp.message(lambda message: "Веса" in message.text or message.text == "/weights")
-async def weights_handler(message: types.Message, state: FSMContext):
-    await state.clear()
-    conn = sqlite3.connect('signals.db')
-    c = conn.cursor()
-    c.execute("SELECT factor, weight FROM weights")
-    weights = c.fetchall()
-    conn.close()
-    text = "🧠 <b>Веса (v7):</b>\n\n"
-    for factor, weight in weights:
-        text += f"• {factor}: <b>{weight:.1f}</b>\n"
-    text += "\n<i>Сброс: /reset_weights</i>"
-    await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
-
-@dp.message(lambda message: "reset_weights" in message.text or message.text == "/reset_weights")
-async def reset_weights_handler(message: types.Message, state: FSMContext):
-    await state.clear()
-    conn = sqlite3.connect('signals.db')
-    c = conn.cursor()
-    c.execute("UPDATE weights SET weight = 1.0")
-    conn.commit()
-    conn.close()
-    await message.answer("🔄 <b>Все веса сброшены до 1.0!</b>", parse_mode="HTML", reply_markup=get_main_keyboard())
-
-@dp.message(lambda message: "История" in message.text or message.text == "/history")
-async def history_handler(message: types.Message, state: FSMContext):
-    await state.clear()
-    try:
-        conn = sqlite3.connect('signals.db')
-        c = conn.cursor()
-        c.execute("SELECT id, timestamp, price, close_price, forecast, result, confidence, ticker, lot_size, risk_pct FROM history WHERE result IS NOT NULL ORDER BY id DESC")
-        trades = c.fetchall()
-        conn.close()
-
-        if not trades:
-            await message.answer("📭 История пуста.", reply_markup=get_main_keyboard())
-            return
-
-        total = len(trades)
-        wins = sum(1 for t in trades if "WIN" in t[5])
-        losses = total - wins
-        winrate = (wins / total) * 100 if total > 0 else 0
-
-        balance_pct = 0.0
-        for t in trades:
-            entry_price = t[2] if t[2] is not None else 0.0
-            exit_price = t[3] if t[3] is not None else entry_price
-            if entry_price == 0.0: continue
-            if "WIN" in t[5]: balance_pct += abs(exit_price - entry_price) / entry_price
-            else: balance_pct -= abs(exit_price - entry_price) / entry_price
-
-        text = (
-            f"📜 <b>Статистика (включая теневые)</b>\n\n"
-            f"Всего: <b>{total}</b> | 🟢 {wins} | 🔴 {losses}\n"
-            f"🎯 Винрейт: <b>{winrate:.1f}%</b>\n\n"
-            f"💰 Симуляция: <b>{balance_pct*100:+.2f}%</b>\n\n"
-            f"<i>Последние 5:</i>\n"
-        )
-
-        for t in trades[:5]:
-            icon = "✅" if "WIN" in t[5] else "❌"
-            cp = t[3] if t[3] is not None else t[2]
-            conf = t[6] if t[6] else 0
-            tick = t[7] if t[7] else "GC=F"
-            lot = t[8] if t[8] else 0.01
-            r_pct = t[9] if t[9] else 1.0
-            text += f"{icon} {tick} ({conf}%) | {t[2]:.3f}→{cp:.3f} | Лот: {lot} (Риск {r_pct}%)\n"
-
-        await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
-    except Exception as e:
-        await message.answer(f"⚠️ Ошибка: {e}", reply_markup=get_main_keyboard())
 
 async def main():
+    global http_session, background_task
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError(
+            "Не задан TELEGRAM_BOT_TOKEN. Создай файл .env по примеру .env.example"
+        )
+    if not SYMBOLS:
+        raise RuntimeError("Список SYMBOLS пуст")
+    if not MARKETS:
+        raise RuntimeError("MARKETS должен содержать spot и/или swap")
+
     init_db()
-    asyncio.create_task(background_worker())
-    await dp.start_polling(bot)
+    timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
+    connector = aiohttp.TCPConnector(limit=10, ttl_dns_cache=300)
+    http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+
+    background_task = asyncio.create_task(background_scanner())
+    log.info("BingX Trading Bot v8.0 started. Markets=%s Symbols=%s", MARKETS, SYMBOLS)
+
+    try:
+        await dp.start_polling(bot)
+    finally:
+        if background_task:
+            background_task.cancel()
+            try:
+                await background_task
+            except asyncio.CancelledError:
+                pass
+        await http_session.close()
+        await bot.session.close()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
