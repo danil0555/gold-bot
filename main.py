@@ -113,7 +113,7 @@ def get_ict_session_score():
 
 def calculate_risk_and_lot(balance, entry, stop, ticker, confidence):
     if confidence >= 85: risk_pct = 3.0
-    elif confidence >= 75: risk_pct = 2.0
+    elif confidence >= 65: risk_pct = 2.0 # Снизили порог для среднего риска
     else: risk_pct = 1.0
         
     risk_amount = balance * (risk_pct / 100)
@@ -254,12 +254,15 @@ def get_analysis(ticker):
                 score += ai_score * weights.get('AI_NEWS', 1.0)
                 reasons.append(f"ИИ ({ai_score * weights['AI_NEWS']:+.1f})")
 
+        # СНИЖАЕМ ШТРАФ ЗА ПРОТИВОРЕЧИЕ 4H ТРЕНДУ
         if trend_4h == 1 and score < 0:
-            score *= 0.5; reasons.append("⚠️ 4H против")
+            score *= 0.8; reasons.append("⚠️ 4H против") # Было 0.5
         elif trend_4h == -1 and score > 0:
-            score *= 0.5; reasons.append("⚠️ 4H против")
+            score *= 0.8; reasons.append("⚠️ 4H против") # Было 0.5
 
-        confidence = int((abs(score) / max_possible_score) * 100)
+        # НОВАЯ ФОРМУЛА УВЕРЕННОСТИ (более чувствительная)
+        # Используем квадратный корень, чтобы низкие баллы давали больший процент
+        confidence = int((abs(score) / max_possible_score) ** 0.5 * 100) 
         if confidence > 100: confidence = 100
 
         if score >= 0:
@@ -293,9 +296,9 @@ async def send_signal(chat_id, ticker, is_auto=False):
         asset_name = ASSETS.get(ticker, {}).get("name", ticker)
         
         if is_auto:
-            # ДЛЯ АВТО-РЕЖИМА: Отправляем только если уверенность >= 75%
-            if confidence < 75: 
-                print(f"Авто: {asset_name} уверенность {confidence}% < 75%, пропускаем.")
+            # СНИЗИЛИ ПОРОГ ДЛЯ АВТО ДО 60%
+            if confidence < 60: 
+                print(f"Авто: {asset_name} уверенность {confidence}% < 60%, пропускаем.")
                 return
             else:
                 status_text = "🎯 <b>СНАЙПЕР (Высокая уверенность)</b>" if confidence >= 85 else "⚡️ <b>Сильный сигнал</b>"
@@ -336,7 +339,7 @@ async def background_worker():
             if AUTO_SIGNAL_ENABLED and USER_CHAT_ID:
                 for ticker in ASSETS.keys():
                     await send_signal(USER_CHAT_ID, ticker, is_auto=True)
-                    await asyncio.sleep(3) # Пауза, чтобы не спамить API
+                    await asyncio.sleep(3)
                 await asyncio.sleep(5 * 60) 
             else:
                 await asyncio.sleep(10)
@@ -497,7 +500,7 @@ async def autostart_handler(message: types.Message, state: FSMContext):
     AUTO_SIGNAL_ENABLED = True
     USER_CHAT_ID = message.chat.id
     await state.clear()
-    await message.answer("🚀 Авто-режим ВКЛЮЧЕН.\nБот будет сканировать 3 актива каждые 5 минут и присылать сигналы только если уверенность от 75%.", reply_markup=get_main_keyboard())
+    await message.answer("🚀 Авто-режим ВКЛЮЧЕН.\nБот будет сканировать все активы каждые 5 минут и присылать сигналы от 60% уверенности.", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "Выкл Авто" in message.text or message.text == "/autostop")
 async def autostop_handler(message: types.Message, state: FSMContext):
@@ -528,7 +531,7 @@ async def reset_weights_handler(message: types.Message, state: FSMContext):
     c.execute("UPDATE weights SET weight = 1.0")
     conn.commit()
     conn.close()
-    await message.answer("🔄 <b>Все веса сброшены до 1.0!</b> Бот снова доверяет всем факторам одинаково.", parse_mode="HTML", reply_markup=get_main_keyboard())
+    await message.answer("🔄 <b>Все веса сброшены до 1.0!</b>", parse_mode="HTML", reply_markup=get_main_keyboard())
 
 @dp.message(lambda message: "История" in message.text or message.text == "/history")
 async def history_handler(message: types.Message, state: FSMContext):
