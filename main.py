@@ -641,7 +641,7 @@ async def api_get(
             if last_error is not None:
 
                 if attempt < 3:
-                    log.warning(
+                    log.debug(
                         "Ограничение BingX API. "
                         "Повтор %s/3",
                         attempt + 1
@@ -1424,7 +1424,7 @@ def ensure_part3_schema():
         conn.row_factory = sqlite3.Row
 
         # ----------------------------------------------------
-        # USER BALANCES (с миграцией старой схемы)
+        # USER BALANCES (миграция старой схемы)
         # ----------------------------------------------------
         table_exists = conn.execute(
             "SELECT name FROM sqlite_master "
@@ -1502,19 +1502,52 @@ def ensure_part3_schema():
             """)
 
         # ----------------------------------------------------
-        # TRADE EVENTS
+        # TRADE EVENTS (миграция старой схемы)
         # ----------------------------------------------------
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS trade_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trade_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                event_type TEXT NOT NULL,
-                message TEXT,
-                price REAL,
-                created_at TEXT
-            )
-        """)
+        trade_events_exists = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='trade_events'"
+        ).fetchone() is not None
+
+        if trade_events_exists:
+            te_cols = {
+                row["name"]
+                for row in conn.execute(
+                    "PRAGMA table_info(trade_events)"
+                ).fetchall()
+            }
+
+            required_te_columns = {
+                "trade_id": "INTEGER NOT NULL DEFAULT 0",
+                "user_id": "INTEGER NOT NULL DEFAULT 0",
+                "event_type": "TEXT NOT NULL DEFAULT 'legacy'",
+                "message": "TEXT",
+                "price": "REAL",
+                "created_at": "TEXT",
+            }
+
+            for column, definition in required_te_columns.items():
+                if column not in te_cols:
+                    conn.execute(
+                        f"ALTER TABLE trade_events "
+                        f"ADD COLUMN {column} {definition}"
+                    )
+                    log.info(
+                        "trade_events: добавлена колонка %s",
+                        column
+                    )
+        else:
+            conn.execute("""
+                CREATE TABLE trade_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    message TEXT,
+                    price REAL,
+                    created_at TEXT
+                )
+            """)
 
         # ----------------------------------------------------
         # TRADES — миграции
@@ -2036,10 +2069,9 @@ def trade_text(trade):
 
 
 # ============================================================
-# 23. MARKET ANALYSIS  (with 100204 handling)
+# 23. MARKET ANALYSIS  (100204 + 109425 + rate-limit filtering)
 # ============================================================
 
-# Кэш недоступных пар (market, symbol) — чтобы не спамить API
 _unavailable_symbols: set[tuple[str, str]] = set()
 
 
@@ -2060,7 +2092,12 @@ async def analyze_market_symbol(market, symbol):
         except MarketError as exc:
             text = str(exc).lower()
 
-            if "100204" in str(exc) or "symbol is not found" in text:
+            if (
+                "100204" in str(exc)
+                or "109425" in str(exc)
+                or "symbol is not found" in text
+                or "not exist" in text
+            ):
                 _unavailable_symbols.add(key)
                 log.warning(
                     "Символ %s %s недоступен на BingX — исключён из сканирования",
@@ -2117,11 +2154,18 @@ async def scan_market():
                     found_signals.append(signal)
 
             except MarketError as exc:
-                # Штатная рыночная ошибка — WARNING без трейсбека
-                log.warning(
-                    "Ошибка рынка %s %s: %s",
-                    market, symbol, exc
-                )
+                text = str(exc)
+
+                if "100410" in text or "100429" in text:
+                    log.debug(
+                        "Rate limit %s %s (пропуск цикла)",
+                        market, symbol
+                    )
+                else:
+                    log.warning(
+                        "Ошибка рынка %s %s: %s",
+                        market, symbol, exc
+                    )
             except Exception:
                 logging.exception(
                     "Ошибка сканирования %s %s",
