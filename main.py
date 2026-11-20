@@ -19,6 +19,7 @@ import sqlite3
 
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 from typing import Any
 
@@ -109,6 +110,8 @@ TF_MS = {
     "4h": 14_400_000,
     "1d": 86_400_000
 }
+
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 # Базовые параметры стратегии и риск-менеджмента (не менять без согласования)
 MIN_SCORE = 6
@@ -248,6 +251,18 @@ def parse_utc_text(value: str | None) -> datetime | None:
             return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             return None
+
+
+def format_moscow_from_utc(utc_str: str | None) -> str:
+    """
+    Переводит время из UTC (внутреннее хранение/расчёты) в Europe/Moscow
+    исключительно для отображения в Telegram-сообщениях.
+    """
+    dt_utc = parse_utc_text(utc_str)
+    if dt_utc is None:
+        return str(utc_str or "—")
+    dt_msk = dt_utc.astimezone(MOSCOW_TZ)
+    return dt_msk.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def compute_file_sha256(path: Path) -> str:
@@ -851,14 +866,12 @@ def init_db() -> None:
             for column, definition in columns.items():
                 ensure_column(con, table, column, definition)
 
-        # Нормализуем регистр статуса сделок без удаления записей
         con.execute("""
             UPDATE trades
             SET status = LOWER(status)
             WHERE status IN ('ACTIVE', 'OPEN', 'CLOSED')
         """)
 
-        # Заполняем initial_risk_amount / signal_entry для существующих сделок при миграции
         con.execute("""
             UPDATE trades
             SET signal_entry = COALESCE(signal_entry, entry, actual_entry)
@@ -1272,7 +1285,6 @@ def _is_cached_frame_fresh(
         return None
     last_open = int(cached.iloc[-1]["open_time"])
     tf_ms = TF_MS.get(interval, 60_000)
-    # Если текущая свеча интервала ещё не закрылась, данные закрытых свечей актуальны
     if now_ms() < last_open + tf_ms * 2:
         return cached.copy()
     return None
@@ -1726,7 +1738,6 @@ def build_signal_b(
 
     regime = _detect_market_regime(b, b_prev, atr, price)
 
-    # Фильтр перерастянутого импульса: цена ушла слишком далеко от EMA20 на 15м
     extension_atr = abs(price - safe_float(b["ema20"])) / atr
     if extension_atr > 3.2 and regime == "impulse":
         return None
@@ -1736,7 +1747,6 @@ def build_signal_b(
     long_reasons: list[str] = []
     short_reasons: list[str] = []
 
-    # Старший контекст 4H / 1H
     for row, label in ((c, "1H"), (d, "4H")):
         if row["close"] > row["ema200"] and row["ema20"] > row["ema50"]:
             long_score += 2.0
@@ -1745,7 +1755,6 @@ def build_signal_b(
             short_score += 2.0
             short_reasons.append(f"Контекст {label}: медвежий тренд ниже EMA200")
 
-    # Структура / BOS / CHoCH на 15м
     prev_sh = safe_float(b_prev.get("swing_high_prev"))
     prev_sl = safe_float(b_prev.get("swing_low_prev"))
     b_close = safe_float(b["close"])
@@ -1768,7 +1777,6 @@ def build_signal_b(
             short_score += 1.0
             short_reasons.append("15м CHoCH вниз: смена локальной структуры")
 
-    # Ложный пробой / сбор ликвидности за диапазоном
     rng_high = safe_float(b.get("range_high_20"))
     rng_low = safe_float(b.get("range_low_20"))
     if rng_low > 0 and b_low < rng_low and b_close > rng_low:
@@ -1778,7 +1786,6 @@ def build_signal_b(
         short_score += 1.5
         short_reasons.append("Sweep ликвидности выше диапазона и возврат вниз")
 
-    # VWAP подтверждение
     vwap_15 = safe_float(b.get("vwap"), price)
     if b_close > vwap_15:
         long_score += 1.0
@@ -1787,7 +1794,6 @@ def build_signal_b(
         short_score += 1.0
         short_reasons.append("15м: ниже VWAP")
 
-    # Объёмы и аномалии
     vol_ratio = safe_float(b.get("vol_ratio"), 1.0)
     if vol_ratio >= 1.4:
         if b_close > safe_float(b["open"]):
@@ -1797,7 +1803,6 @@ def build_signal_b(
             short_score += 1.0
             short_reasons.append(f"Объём x{vol_ratio:.1f} на медвежьем баре")
 
-    # 5м подтверждение импульса/направления
     if safe_float(a["close"]) > safe_float(a["ema20"]):
         long_score += 1.0
         long_reasons.append("5м: выше EMA20")
@@ -1821,7 +1826,6 @@ def build_signal_b(
     if market == "spot" and side == "SELL":
         return None
 
-    # Защита от слишком узкого и слишком широкого стопа (в долях цены и ATR)
     sl_dist = max(1.5 * atr, price * 0.0025)
     min_sl_dist = price * 0.002
     max_sl_dist = max(3.5 * atr, price * 0.025)
@@ -1855,7 +1859,6 @@ def build_signal_b(
     if gross_rr < MIN_RR:
         return None
 
-    # Учёт спреда, комиссий и проскальзывания в эффективном RR
     spread_pct = safe_float((quote or {}).get("spread_pct"), DEFAULT_SYNTHETIC_SPREAD_PCT)
     fee_pct = (TAKER_FEE_RATE * 2.0) * 100.0
     slip_pct = DEFAULT_SLIPPAGE_PCT * 2.0
@@ -1980,7 +1983,6 @@ def enrich_signal_with_live_data(
         enriched["ask"] = ask
         enriched["spread_pct"] = spread_pct
 
-        # Для рыночного входа актуализируем ориентировочную цену и переносим дистанцию SL/TP при умеренном сдвиге
         base_entry = safe_float(enriched["entry"])
         sl = safe_float(enriched["sl"])
         risk_dist = abs(base_entry - sl)
@@ -2916,8 +2918,6 @@ def update_trade_field(trade_id, user_id, field, value):
         if not is_long_side(trade["side"]) and value <= entry:
             return False, "Для SHORT стоп-лосс должен быть выше входа."
 
-        # Не изменяем исторический размер позиции, notional, маржу, initial_sl и первоначальный риск 1R.
-        # Пересчитываем только текущий риск оставшейся доли позиции.
         remaining_pct = safe_float(trade.get("remaining_percent"), 100.0)
         rem_frac = max(0.0, min(1.0, remaining_pct / 100.0))
         full_qty = safe_float(trade.get("position_size"), 0.0)
@@ -3164,7 +3164,8 @@ def signal_text(signal):
         if signal.get("confirmation_rule"):
             extra_lines.append(f"Условие подтверждения: {signal['confirmation_rule']}")
     if signal.get("expires_at"):
-        extra_lines.append(f"Действителен до (UTC): <code>{signal['expires_at']}</code>")
+        msk_expires = format_moscow_from_utc(signal["expires_at"])
+        extra_lines.append(f"Действителен до: <code>{msk_expires} МСК</code>")
 
     return (
         f"🚨 <b>НОВЫЙ ТОРГОВЫЙ СИГНАЛ</b>\n\n"
@@ -3180,10 +3181,7 @@ def signal_text(signal):
         f"закрытие {TP2_CLOSE_PERCENT:.0f}%\n\n"
         f"Оценка сигнала: {signal.get('score', 0)}\n"
         f"Соотношение риск/прибыль (TP2): {signal.get('rr', 0):.2f}\n\n"
-        f"Причины:\n{reasons_formatted}\n\n"
-        f"⚠️ Это аналитический сигнал, а не исполненная сделка. "
-        f"Сопровождение начнётся только после подтверждения входа "
-        f"и ввода фактической цены."
+        f"Причины:\n{reasons_formatted}"
     )
 
 
@@ -3225,8 +3223,9 @@ async def start_command(message: Message):
         "Привет! Это Trading Bot v9.2.\n\n"
         "Бот анализирует публичные рыночные данные BingX "
         "и отправляет торговые сигналы.\n\n"
-        "Бот не размещает ордера, не перемещает стопы "
-        "и не управляет твоими средствами.\n\n"
+        "⚠️ Это аналитический сигнал, а не исполненная сделка. "
+        "Сопровождение начнётся только после подтверждения входа "
+        "и ввода фактической цены.\n\n"
         "Выбери нужный раздел в меню.",
         reply_markup=main_keyboard()
     )
@@ -3338,10 +3337,30 @@ async def enter_trade_callback(callback: CallbackQuery):
 # 26. USER TEXT INPUT
 # ============================================================
 
+def _parse_price_input(raw_text: str | None) -> float | None:
+    if not raw_text:
+        return None
+    cleaned = (
+        raw_text.strip()
+        .replace("\u00a0", "")
+        .replace(" ", "")
+        .replace(",", ".")
+    )
+    if not cleaned:
+        return None
+    try:
+        val = float(cleaned)
+    except ValueError:
+        return None
+    if not math.isfinite(val):
+        return None
+    return val
+
+
 @router.message(
     F.text,
     lambda message: (
-        message.from_user
+        message.from_user is not None
         and get_user_dialog_state(message.from_user.id) is not None
     )
 )
@@ -3352,9 +3371,8 @@ async def handle_user_text(message: Message):
     if not state:
         return
 
-    text_value = (message.text or "").strip().replace(",", ".")
-
-    if text_value.lower() in ("отмена", "cancel", "/cancel"):
+    raw_stripped = (message.text or "").strip().lower()
+    if raw_stripped in ("отмена", "cancel", "/cancel"):
         clear_user_dialog_state(user_id)
 
         await message.answer(
@@ -3363,26 +3381,28 @@ async def handle_user_text(message: Message):
         )
         return
 
-    try:
-        value = float(text_value)
-    except ValueError:
+    value = _parse_price_input(message.text)
+    if value is None:
         await message.answer(
-            "Не удалось распознать число. "
-            "Введи цену цифрами, например: 67250.5"
+            "Не удалось распознать число. Введи цену цифрами, например: 67250.5"
         )
         return
 
-    if not math.isfinite(value) or value <= 0:
+    if value <= 0:
         await message.answer("Число должно быть больше нуля.")
         return
 
     state_type = state.get("type")
 
     if state_type == "waiting_entry":
-        signal_id = state["signal_id"]
+        signal_id = state.get("signal_id") if state.get("signal_id") is not None else state.get("ref_id")
+        if signal_id is None:
+            clear_user_dialog_state(user_id)
+            await message.answer("Не удалось определить сигнал. Нажми «Я вошёл в сделку» ещё раз.")
+            return
 
         trade_id, error, warning = create_personal_trade(
-            user_id, signal_id, value
+            user_id, int(signal_id), value
         )
 
         if error:
@@ -3404,19 +3424,23 @@ async def handle_user_text(message: Message):
         return
 
     if state_type == "waiting_new_entry":
-        trade_id = state["trade_id"]
+        trade_id = state.get("trade_id") if state.get("trade_id") is not None else state.get("ref_id")
+        if trade_id is None:
+            clear_user_dialog_state(user_id)
+            await message.answer("Не удалось определить сделку. Попробуй снова через «📊 Мои сделки».")
+            return
 
         success, result = update_trade_field(
-            trade_id, user_id, "actual_entry", value
+            int(trade_id), user_id, "actual_entry", value
         )
 
         if success:
             clear_user_dialog_state(user_id)
-            trade = get_trade(trade_id, user_id)
+            trade = get_trade(int(trade_id), user_id)
 
             await message.answer(
                 result + "\n\n" + trade_text(trade),
-                reply_markup=trade_keyboard(trade_id),
+                reply_markup=trade_keyboard(int(trade_id)),
                 parse_mode="HTML"
             )
         else:
@@ -3424,19 +3448,23 @@ async def handle_user_text(message: Message):
         return
 
     if state_type == "waiting_sl":
-        trade_id = state["trade_id"]
+        trade_id = state.get("trade_id") if state.get("trade_id") is not None else state.get("ref_id")
+        if trade_id is None:
+            clear_user_dialog_state(user_id)
+            await message.answer("Не удалось определить сделку. Попробуй снова через «📊 Мои сделки».")
+            return
 
         success, result = update_trade_field(
-            trade_id, user_id, "sl", value
+            int(trade_id), user_id, "sl", value
         )
 
         if success:
             clear_user_dialog_state(user_id)
-            trade = get_trade(trade_id, user_id)
+            trade = get_trade(int(trade_id), user_id)
 
             await message.answer(
                 result + "\n\n" + trade_text(trade),
-                reply_markup=trade_keyboard(trade_id),
+                reply_markup=trade_keyboard(int(trade_id)),
                 parse_mode="HTML"
             )
         else:
@@ -4383,7 +4411,6 @@ async def background_market_scan():
     while True:
         try:
             expire_stale_signals()
-            # Фоновый скан по умолчанию формирует сигналы базовой стратегии A
             signals = await scan_market(strategy_version=DEFAULT_STRATEGY)
 
             for signal in signals:
@@ -4404,14 +4431,6 @@ def simulate_strategy_on_frames(
     synthetic_spread_pct: float = DEFAULT_SYNTHETIC_SPREAD_PCT,
     slippage_pct: float = DEFAULT_SLIPPAGE_PCT,
 ) -> dict[str, Any]:
-    """
-    Виртуальный бэктест (строго отделён от живого бота) на закрытых свечах без look-ahead bias:
-    - LONG вход по Ask, выход по Bid;
-    - SHORT вход по Bid, выход по Ask;
-    - синтетический спред при отсутствии Bid/Ask помечается как модельный;
-    - частичные выходы 70% на TP1 (1.8R) и 30% на TP2 (3.0R) или стоп/БУ при консервативной обработке;
-    - максимум MAX_ACTIVE_TRADES (5) одновременных позиций в отдельном портфеле стратегии.
-    """
     m15_full = frames.get("15m")
     if m15_full is None or len(m15_full) <= MIN_CANDLE_ROWS:
         return {
@@ -4454,12 +4473,9 @@ def simulate_strategy_on_frames(
         bid_bar = b_close - half_sp
         ask_bar = b_close + half_sp
 
-        # 1. Сопровождение открытых виртуальных позиций по текущему бару
         still_open: list[dict[str, Any]] = []
         for pos in open_positions:
             long_pos = is_long_side(pos["side"])
-            # Консервативный порядок при одновременном достижении SL и TP без младшего подтверждения:
-            # проверяем стоп первым
             sl_px = pos["sl"]
             tp1_px = pos["tp1"]
             tp2_px = pos["tp2"]
@@ -4487,7 +4503,6 @@ def simulate_strategy_on_frames(
                 closed_rs.append(total_net / pos["init_risk"] if pos["init_risk"] > 0 else 0.0)
                 continue
 
-            # Если достигнут TP1 (и ещё не зафиксирован)
             if hit_tp1 and not pos["tp1_hit"]:
                 qty_70 = pos["qty"] * (TP1_CLOSE_PERCENT / 100.0)
                 tp1_exec = tp1_px * ((1.0 - slippage_pct / 100.0) if long_pos else (1.0 + slippage_pct / 100.0))
@@ -4497,11 +4512,8 @@ def simulate_strategy_on_frames(
                 pos["fees"] += fee1
                 pos["tp1_hit"] = True
                 pos["rem_pct"] = TP2_CLOSE_PERCENT
-                # Переводим SL в безубыток после TP1
                 pos["sl"] = pos["entry"]
                 balance += leg1 - fee1
-
-                # Консервативно не засчитываем TP2 на том же баре без подтверждения последовательности
                 still_open.append(pos)
                 continue
 
@@ -4524,7 +4536,6 @@ def simulate_strategy_on_frames(
         if dd > max_dd:
             max_dd = dd
 
-        # 2. Генерация нового сигнала и вход (до MAX_ACTIVE_TRADES)
         if len(open_positions) < MAX_ACTIVE_TRADES:
             sig = (
                 build_signal_b(market, symbol, sub_frames, quote={"spread_pct": synthetic_spread_pct})
@@ -4534,7 +4545,6 @@ def simulate_strategy_on_frames(
             if sig:
                 signals_count += 1
                 long_s = is_long_side(sig["side"])
-                # Вход: LONG по Ask (+slippage), SHORT по Bid (-slippage)
                 raw_entry = ask_bar if long_s else bid_bar
                 entry_exec = raw_entry * ((1.0 + slippage_pct / 100.0) if long_s else (1.0 - slippage_pct / 100.0))
                 dist = abs(safe_float(sig["entry"]) - safe_float(sig["sl"]))
@@ -4589,10 +4599,6 @@ def compare_strategies_fairly(
     oos_ratio: float = 0.3,
     initial_balance: float = 1000.0,
 ) -> dict[str, Any]:
-    """
-    Сравнивает Стратегию A и Стратегию B на одинаковых данных и условиях
-    в отдельных портфелях, включая проверку на отложенной Out-Of-Sample (OOS) выборке.
-    """
     m15 = frames["15m"]
     split_idx = max(MIN_CANDLE_ROWS + 1, int(len(m15) * (1.0 - oos_ratio)))
     oos_cutoff = int(m15.iloc[split_idx]["open_time"])
@@ -4625,6 +4631,10 @@ async def main():
     global dp
 
     logging.info("Запуск Trading Bot v9.2")
+    logging.info(
+        "Предупреждение: это аналитический сигнал, а не исполненная сделка. "
+        "Сопровождение начнётся только после подтверждения входа и ввода фактической цены."
+    )
 
     freeze_source_snapshot()
     init_db()
