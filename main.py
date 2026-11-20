@@ -1,17 +1,24 @@
 # ============================================================
-# TRADING BOT v9.2 (FIXED)
-# FULL SINGLE-FILE EDITION
+# TRADING BOT v9.2 -> v9.3 UPGRADED (SINGLE-FILE EDITION)
+# Strategy A (v9.2 baseline) + Strategy B (scalper structure/vol/VWAP)
+# Live quote check, TTL/expiry, >0.5R entry drift guard,
+# SL edit without altering historical position size/1R,
+# partial fill execution ledger & fair backtest comparator.
+# REAL EXCHANGE ORDER PLACEMENT IS STRICTLY DISABLED.
 # ============================================================
 
 import os
+import sys
 import time
 import math
+import shutil
+import hashlib
 import asyncio
 import logging
 import sqlite3
 
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
 from typing import Any
 
@@ -22,8 +29,10 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import Command
+from aiogram.filters import CommandStart, Command
 from aiogram.types import (
+    Message,
+    CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     ReplyKeyboardMarkup,
@@ -60,7 +69,7 @@ log = logging.getLogger("TradingBot")
 
 
 # ============================================================
-# 3. GENERAL SETTINGS
+# 3. GENERAL SETTINGS & TRANSPARENT INTERVALS
 # ============================================================
 
 BOT_NAME = "Trading Bot"
@@ -76,6 +85,11 @@ DB_PATH.parent.mkdir(
     parents=True,
     exist_ok=True
 )
+
+BACKUP_DIR = Path(
+    os.getenv("BACKUP_DIR", str(DB_PATH.parent / "backups"))
+)
+BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 MARKETS = ("spot", "swap")
 
@@ -96,6 +110,7 @@ TF_MS = {
     "1d": 86_400_000
 }
 
+# Базовые параметры стратегии и риск-менеджмента (не менять без согласования)
 MIN_SCORE = 6
 MIN_RR = 1.0
 
@@ -113,11 +128,29 @@ MAX_ACTIVE_TRADES = 5
 KLINE_LIMIT = 300
 MIN_CANDLE_ROWS = 205
 
-MARKET_SCAN_INTERVAL = 60
-TRADE_MONITOR_INTERVAL = 15
+# Явные интервалы (в секундах): устранена неоднозначность MARKET_SCAN_INTERVAL * 60
+MARKET_SCAN_INTERVAL_SEC = int(os.getenv("MARKET_SCAN_INTERVAL_SEC", "1800"))
+MARKET_SCAN_INTERVAL = 60  # сохранено для обратной совместимости имени константы
+TRADE_MONITOR_INTERVAL_SEC = int(os.getenv("TRADE_MONITOR_INTERVAL_SEC", "15"))
+TRADE_MONITOR_INTERVAL = TRADE_MONITOR_INTERVAL_SEC
 
 SIGNAL_COOLDOWN_MINUTES = 45
+SIGNAL_TTL_MINUTES = int(os.getenv("SIGNAL_TTL_MINUTES", "20"))
+MAX_ENTRY_DRIFT_R = 0.5
+MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.25"))
 
+# Модель комиссий и спреда / проскальзывания (модельные значения при отсутствии Bid/Ask)
+MAKER_FEE_RATE = float(os.getenv("MAKER_FEE_RATE", "0.0002"))     # 0.02%
+TAKER_FEE_RATE = float(os.getenv("TAKER_FEE_RATE", "0.0005"))     # 0.05%
+DEFAULT_SYNTHETIC_SPREAD_PCT = float(os.getenv("DEFAULT_SYNTHETIC_SPREAD_PCT", "0.04"))  # 0.04%
+DEFAULT_SLIPPAGE_PCT = float(os.getenv("DEFAULT_SLIPPAGE_PCT", "0.03"))  # 0.03%
+
+# Разделение стратегии A (эталон v9.2) и стратегии B (улучшенная)
+STRATEGY_A = "A"
+STRATEGY_B = "B"
+DEFAULT_STRATEGY = STRATEGY_A  # Переключение на B только после явного подтверждения пользователя
+
+# Размещение реальных ордеров через API биржи строго запрещено
 REAL_TRADING_ENABLED = False
 
 
@@ -155,7 +188,6 @@ router = Router()
 http_session: aiohttp.ClientSession | None = None
 
 _api_rate_lock = asyncio.Lock()
-
 _last_api_request = 0.0
 _api_cooldown_until = 0.0
 
@@ -169,30 +201,86 @@ latest_prices: dict[
     float
 ] = {}
 
+latest_quotes: dict[
+    tuple[str, str],
+    dict[str, Any]
+] = {}
+
 system_status = {
     "started": False,
     "last_scan": None,
     "last_error": None,
     "api_status": "Не проверено",
     "scan_count": 0,
-    "signals_count": 0
+    "signals_count": 0,
+    "source_sha256": None,
+    "backup_path": None,
 }
 
 background_tasks: list[asyncio.Task] = []
 
 
 # ============================================================
-# 6. TIME AND FORMAT HELPERS
+# 6. TIME, HASH AND FORMAT HELPERS
 # ============================================================
 
 def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def utc_text() -> str:
-    return datetime.now(
-        timezone.utc
-    ).strftime("%Y-%m-%d %H:%M:%S")
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def utc_text(dt: datetime | None = None) -> str:
+    target = dt if dt is not None else utc_now()
+    return target.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_utc_text(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        try:
+            dt = datetime.fromisoformat(value)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+
+def compute_file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def freeze_source_snapshot() -> str | None:
+    """
+    Создаёт неизменяемую резервную копию текущего исходного файла (если файл существует)
+    и возвращает его SHA-256.
+    """
+    try:
+        src_path = Path(__file__).resolve()
+        if not src_path.exists():
+            return None
+        sha = compute_file_sha256(src_path)
+        snapshot_path = BACKUP_DIR / f"source_v9_2_{sha[:12]}.py.bak"
+        if not snapshot_path.exists():
+            shutil.copy2(src_path, snapshot_path)
+            try:
+                os.chmod(snapshot_path, 0o444)
+            except OSError:
+                pass
+        system_status["source_sha256"] = sha
+        log.info("Зафиксирован эталон исходника: %s (SHA-256=%s)", snapshot_path.name, sha)
+        return sha
+    except Exception:
+        logging.exception("Не удалось создать резервную копию исходного файла")
+        return None
 
 
 def safe_float(
@@ -251,8 +339,17 @@ def is_long_side(side: str) -> bool:
     return str(side).strip().lower() in ("buy", "long")
 
 
+def normalize_trade_status(status: Any) -> str:
+    st = str(status or "active").strip().lower()
+    if st in ("active", "open"):
+        return "active"
+    if st == "closed":
+        return "closed"
+    return st
+
+
 # ============================================================
-# 7. DATABASE CONNECTION
+# 7. DATABASE CONNECTION, BACKUP, INSPECTION & MIGRATIONS
 # ============================================================
 
 @contextmanager
@@ -318,11 +415,138 @@ def ensure_column(
         )
 
 
+def inspect_existing_db() -> dict[str, Any]:
+    """
+    Изучает реальную структуру существующей SQLite БД: таблицы, колонки,
+    внешние ключи, индексы, количество записей и связи между таблицами.
+    """
+    report: dict[str, Any] = {
+        "exists": DB_PATH.exists(),
+        "tables": {},
+        "counts": {},
+        "integrity_check": None,
+        "orphan_checks": {},
+    }
+    if not DB_PATH.exists():
+        return report
+
+    with db() as con:
+        ic = con.execute("PRAGMA integrity_check").fetchone()
+        report["integrity_check"] = ic[0] if ic else "unknown"
+
+        tables = [
+            r["name"]
+            for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            ).fetchall()
+        ]
+
+        for t in tables:
+            cols = [dict(r) for r in con.execute(f'PRAGMA table_info("{t}")').fetchall()]
+            fks = [dict(r) for r in con.execute(f'PRAGMA foreign_key_list("{t}")').fetchall()]
+            idxs = [dict(r) for r in con.execute(f'PRAGMA index_list("{t}")').fetchall()]
+            cnt = con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+            report["tables"][t] = {
+                "columns": [c["name"] for c in cols],
+                "foreign_keys": fks,
+                "indexes": [i["name"] for i in idxs],
+            }
+            report["counts"][t] = cnt
+
+        if "trades" in tables and "users" in tables:
+            report["orphan_checks"]["trades_without_user"] = con.execute(
+                "SELECT COUNT(*) FROM trades WHERE user_id IS NOT NULL "
+                "AND user_id NOT IN (SELECT user_id FROM users)"
+            ).fetchone()[0]
+
+        if "trades" in tables and "signals" in tables:
+            report["orphan_checks"]["trades_without_signal"] = con.execute(
+                "SELECT COUNT(*) FROM trades WHERE signal_id IS NOT NULL "
+                "AND signal_id NOT IN (SELECT id FROM signals)"
+            ).fetchone()[0]
+
+        if "trade_events" in tables and "trades" in tables:
+            report["orphan_checks"]["events_without_trade"] = con.execute(
+                "SELECT COUNT(*) FROM trade_events WHERE trade_id NOT IN (SELECT id FROM trades)"
+            ).fetchone()[0]
+
+    return report
+
+
+def backup_and_verify_db() -> Path | None:
+    """
+    Создаёт резервную копию trading_bot_v9.db перед миграциями,
+    проверяет целостность резервной копии и возможность чтения/восстановления.
+    """
+    if not DB_PATH.exists():
+        return None
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    backup_file = BACKUP_DIR / f"{DB_PATH.stem}_pre_migration_{stamp}.db"
+
+    src_con = sqlite3.connect(str(DB_PATH), timeout=30)
+    dst_con = sqlite3.connect(str(backup_file), timeout=30)
+    try:
+        src_con.backup(dst_con)
+    finally:
+        dst_con.close()
+        src_con.close()
+
+    verify_con = sqlite3.connect(str(backup_file), timeout=30)
+    try:
+        check = verify_con.execute("PRAGMA integrity_check").fetchone()
+        if not check or str(check[0]).lower() != "ok":
+            raise RuntimeError(f"Резервная копия не прошла integrity_check: {check}")
+        verify_con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    finally:
+        verify_con.close()
+
+    system_status["backup_path"] = str(backup_file)
+    log.info("Резервная копия БД создана и проверена: %s", backup_file)
+    return backup_file
+
+
+def restore_db_from_backup(backup_file: Path) -> None:
+    """
+    Восстанавливает БД из проверенной резервной копии.
+    """
+    if not backup_file.exists():
+        raise FileNotFoundError(f"Файл резервной копии не найден: {backup_file}")
+
+    verify_con = sqlite3.connect(str(backup_file), timeout=30)
+    try:
+        check = verify_con.execute("PRAGMA integrity_check").fetchone()
+        if not check or str(check[0]).lower() != "ok":
+            raise RuntimeError(f"Повреждённый бэкап, восстановление отменено: {check}")
+    finally:
+        verify_con.close()
+
+    src_con = sqlite3.connect(str(backup_file), timeout=30)
+    dst_con = sqlite3.connect(str(DB_PATH), timeout=30)
+    try:
+        src_con.backup(dst_con)
+    finally:
+        dst_con.close()
+        src_con.close()
+
+    log.info("БД восстановлена из резервной копии: %s", backup_file)
+
+
 # ============================================================
-# 8. DATABASE INITIALIZATION
+# 8. DATABASE INITIALIZATION & MIGRATIONS
 # ============================================================
 
 def init_db() -> None:
+
+    if DB_PATH.exists():
+        backup_and_verify_db()
+        info = inspect_existing_db()
+        log.info(
+            "Инспекция БД перед миграцией: tables=%s, counts=%s, integrity=%s",
+            list(info.get("tables", {}).keys()),
+            info.get("counts", {}),
+            info.get("integrity_check"),
+        )
 
     with db() as con:
 
@@ -341,6 +565,7 @@ def init_db() -> None:
                 risk_percent REAL DEFAULT 2.0,
                 leverage INTEGER DEFAULT 5,
                 notifications INTEGER DEFAULT 1,
+                strategy_version TEXT DEFAULT 'A',
                 FOREIGN KEY(user_id)
                     REFERENCES users(user_id)
             )
@@ -360,8 +585,26 @@ def init_db() -> None:
                 score INTEGER,
                 reasons TEXT,
                 setup_key TEXT,
-                status TEXT DEFAULT 'NEW',
-                result TEXT
+                status TEXT DEFAULT 'ACTIVE',
+                result TEXT,
+                strategy_version TEXT DEFAULT 'A',
+                live_price REAL,
+                bid REAL,
+                ask REAL,
+                spread_pct REAL,
+                price_updated_at TEXT,
+                expires_at TEXT,
+                entry_mode TEXT DEFAULT 'market',
+                entry_zone_low REAL,
+                entry_zone_high REAL,
+                confirmation_rule TEXT,
+                quality_score REAL,
+                market_regime TEXT,
+                estimated_fee_pct REAL,
+                estimated_slippage_pct REAL,
+                net_rr REAL,
+                cancel_reason TEXT,
+                updated_at TEXT
             )
         """)
 
@@ -375,15 +618,31 @@ def init_db() -> None:
                 side TEXT,
                 entry REAL,
                 actual_entry REAL,
+                signal_entry REAL,
+                entry_drift_r REAL DEFAULT 0,
                 current_price REAL,
                 sl REAL,
                 tp1 REAL,
                 tp2 REAL,
                 initial_sl REAL,
                 risk_amount REAL,
+                initial_risk_amount REAL,
+                current_risk_amount REAL,
+                current_risk_r REAL,
                 remaining_percent REAL DEFAULT 100,
                 tp1_hit INTEGER DEFAULT 0,
                 tp2_hit INTEGER DEFAULT 0,
+                tp1_fill_price REAL,
+                tp1_fill_qty REAL,
+                tp1_fill_fee REAL DEFAULT 0,
+                tp1_closed_at TEXT,
+                tp2_fill_price REAL,
+                tp2_fill_qty REAL,
+                tp2_fill_fee REAL DEFAULT 0,
+                tp2_closed_at TEXT,
+                total_fees_paid REAL DEFAULT 0,
+                total_slippage_cost REAL DEFAULT 0,
+                strategy_version TEXT DEFAULT 'A',
                 status TEXT DEFAULT 'active',
                 last_recommendation TEXT,
                 opened_at TEXT,
@@ -407,9 +666,16 @@ def init_db() -> None:
                 result TEXT,
                 pnl_percent REAL DEFAULT 0,
                 pnl_r REAL DEFAULT 0,
+                net_pnl_usdt REAL DEFAULT 0,
+                initial_risk_amount REAL DEFAULT 0,
+                total_fees_paid REAL DEFAULT 0,
+                total_slippage_cost REAL DEFAULT 0,
+                strategy_version TEXT DEFAULT 'A',
                 close_reason TEXT,
                 opened_at TEXT,
-                closed_at TEXT
+                closed_at TEXT,
+                FOREIGN KEY(trade_id) REFERENCES trades(id),
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
             )
         """)
 
@@ -433,7 +699,60 @@ def init_db() -> None:
             )
         """)
 
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS trade_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                exec_type TEXT NOT NULL,
+                price REAL NOT NULL,
+                quantity REAL NOT NULL,
+                share_percent REAL NOT NULL,
+                fee_usdt REAL DEFAULT 0,
+                slippage_usdt REAL DEFAULT 0,
+                realized_pnl_usdt REAL DEFAULT 0,
+                executed_at TEXT NOT NULL,
+                FOREIGN KEY(trade_id) REFERENCES trades(id),
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+        """)
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS signal_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                old_status TEXT,
+                new_status TEXT,
+                price REAL,
+                reason TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(signal_id) REFERENCES signals(id)
+            )
+        """)
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS user_dialogs (
+                user_id INTEGER PRIMARY KEY,
+                state_type TEXT NOT NULL,
+                ref_id INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+        """)
+
         migrations = {
+            "users": {
+                "username": "TEXT",
+                "created_at": "TEXT",
+                "is_active": "INTEGER DEFAULT 1",
+            },
+            "user_settings": {
+                "risk_percent": "REAL DEFAULT 2.0",
+                "leverage": "INTEGER DEFAULT 5",
+                "notifications": "INTEGER DEFAULT 1",
+                "strategy_version": "TEXT DEFAULT 'A'",
+            },
             "signals": {
                 "created_at": "TEXT",
                 "market": "TEXT",
@@ -446,10 +765,27 @@ def init_db() -> None:
                 "score": "INTEGER",
                 "reasons": "TEXT",
                 "setup_key": "TEXT",
-                "status": "TEXT DEFAULT 'NEW'",
-                "result": "TEXT"
+                "status": "TEXT DEFAULT 'ACTIVE'",
+                "result": "TEXT",
+                "strategy_version": "TEXT DEFAULT 'A'",
+                "live_price": "REAL",
+                "bid": "REAL",
+                "ask": "REAL",
+                "spread_pct": "REAL",
+                "price_updated_at": "TEXT",
+                "expires_at": "TEXT",
+                "entry_mode": "TEXT DEFAULT 'market'",
+                "entry_zone_low": "REAL",
+                "entry_zone_high": "REAL",
+                "confirmation_rule": "TEXT",
+                "quality_score": "REAL",
+                "market_regime": "TEXT",
+                "estimated_fee_pct": "REAL",
+                "estimated_slippage_pct": "REAL",
+                "net_rr": "REAL",
+                "cancel_reason": "TEXT",
+                "updated_at": "TEXT",
             },
-
             "trades": {
                 "user_id": "INTEGER",
                 "signal_id": "INTEGER",
@@ -458,22 +794,37 @@ def init_db() -> None:
                 "side": "TEXT",
                 "entry": "REAL",
                 "actual_entry": "REAL",
+                "signal_entry": "REAL",
+                "entry_drift_r": "REAL DEFAULT 0",
                 "current_price": "REAL",
                 "sl": "REAL",
                 "tp1": "REAL",
                 "tp2": "REAL",
                 "initial_sl": "REAL",
                 "risk_amount": "REAL",
+                "initial_risk_amount": "REAL",
+                "current_risk_amount": "REAL",
+                "current_risk_r": "REAL",
                 "remaining_percent": "REAL DEFAULT 100",
                 "tp1_hit": "INTEGER DEFAULT 0",
                 "tp2_hit": "INTEGER DEFAULT 0",
+                "tp1_fill_price": "REAL",
+                "tp1_fill_qty": "REAL",
+                "tp1_fill_fee": "REAL DEFAULT 0",
+                "tp1_closed_at": "TEXT",
+                "tp2_fill_price": "REAL",
+                "tp2_fill_qty": "REAL",
+                "tp2_fill_fee": "REAL DEFAULT 0",
+                "tp2_closed_at": "TEXT",
+                "total_fees_paid": "REAL DEFAULT 0",
+                "total_slippage_cost": "REAL DEFAULT 0",
+                "strategy_version": "TEXT DEFAULT 'A'",
                 "status": "TEXT DEFAULT 'active'",
                 "last_recommendation": "TEXT",
                 "opened_at": "TEXT",
                 "closed_at": "TEXT",
-                "updated_at": "TEXT"
+                "updated_at": "TEXT",
             },
-
             "trade_history": {
                 "trade_id": "INTEGER",
                 "user_id": "INTEGER",
@@ -485,27 +836,43 @@ def init_db() -> None:
                 "result": "TEXT",
                 "pnl_percent": "REAL DEFAULT 0",
                 "pnl_r": "REAL DEFAULT 0",
+                "net_pnl_usdt": "REAL DEFAULT 0",
+                "initial_risk_amount": "REAL DEFAULT 0",
+                "total_fees_paid": "REAL DEFAULT 0",
+                "total_slippage_cost": "REAL DEFAULT 0",
+                "strategy_version": "TEXT DEFAULT 'A'",
                 "close_reason": "TEXT",
                 "opened_at": "TEXT",
-                "closed_at": "TEXT"
+                "closed_at": "TEXT",
             },
-
-            "users": {
-                "username": "TEXT",
-                "created_at": "TEXT",
-                "is_active": "INTEGER DEFAULT 1"
-            }
         }
 
         for table, columns in migrations.items():
             for column, definition in columns.items():
                 ensure_column(con, table, column, definition)
 
-        # Нормализуем регистр статуса активных сделок для совместимости со старыми записями
+        # Нормализуем регистр статуса сделок без удаления записей
         con.execute("""
             UPDATE trades
             SET status = LOWER(status)
             WHERE status IN ('ACTIVE', 'OPEN', 'CLOSED')
+        """)
+
+        # Заполняем initial_risk_amount / signal_entry для существующих сделок при миграции
+        con.execute("""
+            UPDATE trades
+            SET signal_entry = COALESCE(signal_entry, entry, actual_entry)
+            WHERE signal_entry IS NULL
+        """)
+        con.execute("""
+            UPDATE trades
+            SET initial_risk_amount = COALESCE(initial_risk_amount, risk_amount, 0)
+            WHERE initial_risk_amount IS NULL
+        """)
+        con.execute("""
+            UPDATE trades
+            SET current_risk_amount = COALESCE(current_risk_amount, risk_amount, 0)
+            WHERE current_risk_amount IS NULL
         """)
 
         con.execute("""
@@ -522,6 +889,12 @@ def init_db() -> None:
 
         con.execute("""
             CREATE INDEX IF NOT EXISTS
+            idx_signals_status_exp
+            ON signals(status, expires_at)
+        """)
+
+        con.execute("""
+            CREATE INDEX IF NOT EXISTS
             idx_trades_user_status
             ON trades(user_id, status)
         """)
@@ -530,6 +903,12 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS
             idx_history_user
             ON trade_history(user_id, closed_at)
+        """)
+
+        con.execute("""
+            CREATE INDEX IF NOT EXISTS
+            idx_executions_trade
+            ON trade_executions(trade_id, executed_at)
         """)
 
     log.info(
@@ -566,7 +945,7 @@ async def api_get(
                 now = time.monotonic()
 
                 wait = max(
-                    1.6 - (now - _last_api_request),
+                    1.2 - (now - _last_api_request),
                     _api_cooldown_until - now,
                     0.0
                 )
@@ -879,8 +1258,25 @@ def normalize_candles(
 
 
 # ============================================================
-# 12. GET MARKET CANDLES
+# 12. GET MARKET CANDLES (WITH SMART TF CACHE)
 # ============================================================
+
+def _is_cached_frame_fresh(
+    market: str,
+    symbol: str,
+    interval: str,
+    min_rows: int
+) -> pd.DataFrame | None:
+    cached = candle_cache.get((market, symbol, interval))
+    if cached is None or cached.empty or len(cached) < min_rows:
+        return None
+    last_open = int(cached.iloc[-1]["open_time"])
+    tf_ms = TF_MS.get(interval, 60_000)
+    # Если текущая свеча интервала ещё не закрылась, данные закрытых свечей актуальны
+    if now_ms() < last_open + tf_ms * 2:
+        return cached.copy()
+    return None
+
 
 async def get_klines(
     market: str,
@@ -888,8 +1284,14 @@ async def get_klines(
     interval: str,
     limit: int = KLINE_LIMIT,
     min_rows: int = MIN_CANDLE_ROWS,
-    session: aiohttp.ClientSession | None = None
+    session: aiohttp.ClientSession | None = None,
+    use_cache: bool = True
 ) -> pd.DataFrame:
+
+    if use_cache:
+        fresh = _is_cached_frame_fresh(market, symbol, interval, min_rows)
+        if fresh is not None:
+            return fresh
 
     active_session = session or http_session
 
@@ -1005,7 +1407,7 @@ def save_closed_candles(
 
 
 # ============================================================
-# 14. TECHNICAL INDICATORS
+# 14. TECHNICAL INDICATORS (BASE + STRATEGY B EXTRAS)
 # ============================================================
 
 def indicators(
@@ -1088,16 +1490,42 @@ def indicators(
     return x
 
 
+def enrich_scalper_series(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Дополнительные ряды только для Стратегии B:
+    объёмное среднее/всплеск, скользящий VWAP по окну (rolling 48 баров) и локальные свинги.
+    """
+    x = indicators(df)
+    vol = x["volume"].replace(0, np.nan)
+    x["vol_ma20"] = vol.rolling(20, min_periods=5).mean().fillna(0)
+    x["vol_ratio"] = (x["volume"] / x["vol_ma20"].replace(0, np.nan)).fillna(1.0)
+
+    typical_price = (x["high"] + x["low"] + x["close"]) / 3.0
+    pv = typical_price * x["volume"]
+    cum_pv = pv.rolling(48, min_periods=10).sum()
+    cum_v = x["volume"].rolling(48, min_periods=10).sum().replace(0, np.nan)
+    x["vwap"] = (cum_pv / cum_v).fillna(x["close"])
+
+    x["swing_high_prev"] = x["high"].rolling(5, min_periods=3).max().shift(1)
+    x["swing_low_prev"] = x["low"].rolling(5, min_periods=3).min().shift(1)
+    x["range_high_20"] = x["high"].rolling(20, min_periods=10).max().shift(1)
+    x["range_low_20"] = x["low"].rolling(20, min_periods=10).min().shift(1)
+    return x
+
+
 # ============================================================
-# 15. SIGNAL STRATEGY
+# 15. STRATEGY A (UNCHANGED v9.2 BASELINE) & STRATEGY B
 # ============================================================
 
-def build_signal(
+def build_signal_a_v92(
     market: str,
     symbol: str,
     frames: dict[str, pd.DataFrame]
 ) -> dict[str, Any] | None:
-
+    """
+    Точная эталонная реализация сигнальной логики Trading Bot v9.2 (Стратегия A).
+    Не изменять формулы, индикаторы, пороги и правила.
+    """
     required_frames = ("5m", "15m", "1h", "4h")
 
     if any(
@@ -1224,6 +1652,7 @@ def build_signal(
         return None
 
     return {
+        "strategy_version": STRATEGY_A,
         "market": market,
         "symbol": symbol,
         "side": side,
@@ -1243,13 +1672,385 @@ def build_signal(
     }
 
 
+def _detect_market_regime(m15_row: pd.Series, m15_prev: pd.Series, atr: float, price: float) -> str:
+    adx = safe_float(m15_row.get("adx"))
+    atr_pct = (atr / price * 100.0) if price > 0 else 0.0
+    vol_ratio = safe_float(m15_row.get("vol_ratio"), 1.0)
+    prev_vol_ratio = safe_float(m15_prev.get("vol_ratio"), 1.0)
+
+    if vol_ratio >= 1.6 and abs(safe_float(m15_row["close"]) - safe_float(m15_row["open"])) > atr * 1.1:
+        return "impulse"
+    if prev_vol_ratio >= 1.5 and vol_ratio < 0.9 and adx >= 18:
+        return "exhaustion"
+    if adx >= 20 and atr_pct >= 0.15:
+        return "trend"
+    return "range"
+
+
+def build_signal_b(
+    market: str,
+    symbol: str,
+    frames: dict[str, pd.DataFrame],
+    quote: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """
+    Улучшенная стратегия B (изолирована от Стратегии A):
+    режим рынка, уровни поддержки/сопротивления, BOS/CHoCH, sweep/ложный пробой,
+    объёмы и аномалии, VWAP, фильтр перерастянутого импульса, учёт издержек и качества.
+    """
+    required_frames = ("5m", "15m", "1h", "4h")
+
+    if any(
+        timeframe not in frames
+        or frames[timeframe] is None
+        or len(frames[timeframe]) < MIN_CANDLE_ROWS
+        for timeframe in required_frames
+    ):
+        return None
+
+    m5 = enrich_scalper_series(frames["5m"])
+    m15 = enrich_scalper_series(frames["15m"])
+    h1 = enrich_scalper_series(frames["1h"])
+    h4 = enrich_scalper_series(frames["4h"])
+
+    a = m5.iloc[-1]
+    b = m15.iloc[-1]
+    b_prev = m15.iloc[-2]
+    c = h1.iloc[-1]
+    d = h4.iloc[-1]
+
+    price = safe_float(b["close"])
+    atr = safe_float(b["atr"])
+    if price <= 0 or atr <= 0:
+        return None
+
+    regime = _detect_market_regime(b, b_prev, atr, price)
+
+    # Фильтр перерастянутого импульса: цена ушла слишком далеко от EMA20 на 15м
+    extension_atr = abs(price - safe_float(b["ema20"])) / atr
+    if extension_atr > 3.2 and regime == "impulse":
+        return None
+
+    long_score = 0.0
+    short_score = 0.0
+    long_reasons: list[str] = []
+    short_reasons: list[str] = []
+
+    # Старший контекст 4H / 1H
+    for row, label in ((c, "1H"), (d, "4H")):
+        if row["close"] > row["ema200"] and row["ema20"] > row["ema50"]:
+            long_score += 2.0
+            long_reasons.append(f"Контекст {label}: бычий тренд выше EMA200")
+        if row["close"] < row["ema200"] and row["ema20"] < row["ema50"]:
+            short_score += 2.0
+            short_reasons.append(f"Контекст {label}: медвежий тренд ниже EMA200")
+
+    # Структура / BOS / CHoCH на 15м
+    prev_sh = safe_float(b_prev.get("swing_high_prev"))
+    prev_sl = safe_float(b_prev.get("swing_low_prev"))
+    b_close = safe_float(b["close"])
+    b_high = safe_float(b["high"])
+    b_low = safe_float(b["low"])
+
+    if prev_sh > 0 and b_close > prev_sh:
+        if safe_float(b["ema20"]) >= safe_float(b["ema50"]):
+            long_score += 1.5
+            long_reasons.append("15м BOS вверх: пробой локального максимума")
+        else:
+            long_score += 1.0
+            long_reasons.append("15м CHoCH вверх: смена локальной структуры")
+
+    if prev_sl > 0 and b_close < prev_sl:
+        if safe_float(b["ema20"]) <= safe_float(b["ema50"]):
+            short_score += 1.5
+            short_reasons.append("15м BOS вниз: пробой локального минимума")
+        else:
+            short_score += 1.0
+            short_reasons.append("15м CHoCH вниз: смена локальной структуры")
+
+    # Ложный пробой / сбор ликвидности за диапазоном
+    rng_high = safe_float(b.get("range_high_20"))
+    rng_low = safe_float(b.get("range_low_20"))
+    if rng_low > 0 and b_low < rng_low and b_close > rng_low:
+        long_score += 1.5
+        long_reasons.append("Sweep ликвидности ниже диапазона и возврат вверх")
+    if rng_high > 0 and b_high > rng_high and b_close < rng_high:
+        short_score += 1.5
+        short_reasons.append("Sweep ликвидности выше диапазона и возврат вниз")
+
+    # VWAP подтверждение
+    vwap_15 = safe_float(b.get("vwap"), price)
+    if b_close > vwap_15:
+        long_score += 1.0
+        long_reasons.append("15м: выше VWAP")
+    elif b_close < vwap_15:
+        short_score += 1.0
+        short_reasons.append("15м: ниже VWAP")
+
+    # Объёмы и аномалии
+    vol_ratio = safe_float(b.get("vol_ratio"), 1.0)
+    if vol_ratio >= 1.4:
+        if b_close > safe_float(b["open"]):
+            long_score += 1.0
+            long_reasons.append(f"Объём x{vol_ratio:.1f} на бычьем баре")
+        elif b_close < safe_float(b["open"]):
+            short_score += 1.0
+            short_reasons.append(f"Объём x{vol_ratio:.1f} на медвежьем баре")
+
+    # 5м подтверждение импульса/направления
+    if safe_float(a["close"]) > safe_float(a["ema20"]):
+        long_score += 1.0
+        long_reasons.append("5м: выше EMA20")
+    if safe_float(a["close"]) < safe_float(a["ema20"]):
+        short_score += 1.0
+        short_reasons.append("5м: ниже EMA20")
+
+    if long_score > short_score:
+        side = "BUY"
+        raw_score = long_score
+        reasons = long_reasons
+    else:
+        side = "SELL"
+        raw_score = short_score
+        reasons = short_reasons
+
+    score_int = int(round(raw_score))
+    if score_int < MIN_SCORE or abs(long_score - short_score) < 1.5:
+        return None
+
+    if market == "spot" and side == "SELL":
+        return None
+
+    # Защита от слишком узкого и слишком широкого стопа (в долях цены и ATR)
+    sl_dist = max(1.5 * atr, price * 0.0025)
+    min_sl_dist = price * 0.002
+    max_sl_dist = max(3.5 * atr, price * 0.025)
+    if sl_dist < min_sl_dist or sl_dist > max_sl_dist:
+        return None
+
+    tp1_dist = sl_dist * TP1_R
+    tp2_dist = sl_dist * TP2_R
+
+    if side == "BUY":
+        sl = price - sl_dist
+        tp1 = price + tp1_dist
+        tp2 = price + tp2_dist
+        entry_mode = "level" if (extension_atr > 1.8 or regime == "exhaustion") else "market"
+        zone_low = max(sl * 1.002, min(price, vwap_15))
+        zone_high = price
+        conf_rule = "Дождаться удержания уровня/зоны и подтверждения на 5м/15м перед входом."
+    else:
+        sl = price + sl_dist
+        tp1 = price - tp1_dist
+        tp2 = price - tp2_dist
+        entry_mode = "level" if (extension_atr > 1.8 or regime == "exhaustion") else "market"
+        zone_low = price
+        zone_high = min(sl * 0.998, max(price, vwap_15))
+        conf_rule = "Дождаться теста зоны сопротивления/VWAP и реакции продавцов на 5м/15м."
+
+    if min(sl, tp1, tp2) <= 0:
+        return None
+
+    gross_rr = abs(tp2 - price) / abs(price - sl)
+    if gross_rr < MIN_RR:
+        return None
+
+    # Учёт спреда, комиссий и проскальзывания в эффективном RR
+    spread_pct = safe_float((quote or {}).get("spread_pct"), DEFAULT_SYNTHETIC_SPREAD_PCT)
+    fee_pct = (TAKER_FEE_RATE * 2.0) * 100.0
+    slip_pct = DEFAULT_SLIPPAGE_PCT * 2.0
+    cost_dist = price * ((spread_pct + fee_pct + slip_pct) / 100.0)
+    eff_risk_dist = max(abs(price - sl) + cost_dist * 0.5, 1e-9)
+    eff_reward_dist = max(abs(tp2 - price) - cost_dist, 0.0)
+    net_rr = eff_reward_dist / eff_risk_dist
+
+    if net_rr < MIN_RR:
+        return None
+
+    quality_score = round(min(100.0, raw_score * 11.0 + (10.0 if net_rr >= 2.0 else 0.0) - spread_pct * 20.0), 1)
+
+    return {
+        "strategy_version": STRATEGY_B,
+        "market": market,
+        "symbol": symbol,
+        "side": side,
+        "entry": price,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp": tp2,
+        "rr": gross_rr,
+        "net_rr": net_rr,
+        "score": score_int,
+        "quality_score": quality_score,
+        "market_regime": regime,
+        "entry_mode": entry_mode,
+        "entry_zone_low": min(zone_low, zone_high),
+        "entry_zone_high": max(zone_low, zone_high),
+        "confirmation_rule": conf_rule if entry_mode == "level" else "Рыночный вход с проверкой фактической цены и отклонения <= 0.5R.",
+        "spread_pct": spread_pct,
+        "estimated_fee_pct": fee_pct,
+        "estimated_slippage_pct": slip_pct,
+        "reasons": reasons,
+        "atr": atr,
+        "setup_key": (
+            f"B:{market}:{symbol}:{side}:"
+            f"{int(b['open_time'])}"
+        )
+    }
+
+
+def verify_strategy_a_unchanged(sample_frames: dict[str, pd.DataFrame] | None = None) -> dict[str, Any]:
+    """
+    Проверяет детерминированность и воспроизводимость Стратегии A (v9.2)
+    на заданном наборе свечей (без обращения к сети).
+    """
+    if not sample_frames:
+        return {"checked": False, "reason": "no_sample_frames"}
+
+    res1 = build_signal_a_v92("swap", "BTC-USDT", sample_frames)
+    res2 = build_signal_a_v92("swap", "BTC-USDT", sample_frames)
+    identical = (res1 == res2)
+    return {"checked": True, "identical_on_repeat": identical, "signal": res1}
+
+
 # ============================================================
-# 16. SIGNAL STORAGE
+# 16. LIVE QUOTE, SIGNAL LIFECYCLE & SIGNAL STORAGE
 # ============================================================
+
+async def fetch_live_market_snapshot(market: str, symbol: str) -> dict[str, Any] | None:
+    """
+    Получает актуальную цену с BingX (и Bid/Ask/спред, если они доступны в ответе).
+    """
+    price = await get_live_price(market, symbol)
+    if price is None or price <= 0:
+        return None
+
+    cached_quote = latest_quotes.get((market, symbol), {})
+    bid = safe_float(cached_quote.get("bid"), 0.0)
+    ask = safe_float(cached_quote.get("ask"), 0.0)
+    is_synthetic = False
+
+    if bid <= 0 or ask <= 0 or ask < bid:
+        half_spread = price * (DEFAULT_SYNTHETIC_SPREAD_PCT / 200.0)
+        bid = max(price - half_spread, 1e-9)
+        ask = price + half_spread
+        is_synthetic = True
+
+    spread_pct = ((ask - bid) / price * 100.0) if price > 0 else DEFAULT_SYNTHETIC_SPREAD_PCT
+    snap = {
+        "price": price,
+        "bid": bid,
+        "ask": ask,
+        "spread_pct": spread_pct,
+        "is_synthetic_spread": is_synthetic,
+        "updated_at": utc_text(),
+    }
+    latest_quotes[(market, symbol)] = snap
+    return snap
+
+
+def enrich_signal_with_live_data(
+    sig: dict[str, Any],
+    snapshot: dict[str, Any] | None
+) -> dict[str, Any]:
+    """
+    Актуализирует цену сигнала перед отправкой, задаёт TTL и контролирует допустимое отклонение.
+    """
+    enriched = dict(sig)
+    now_dt = utc_now()
+    enriched.setdefault("strategy_version", STRATEGY_A)
+    enriched.setdefault("entry_mode", "market")
+    enriched.setdefault("market_regime", "standard")
+    enriched.setdefault("quality_score", float(enriched.get("score", 0)) * 10.0)
+    enriched.setdefault("estimated_fee_pct", (TAKER_FEE_RATE * 2.0) * 100.0)
+    enriched.setdefault("estimated_slippage_pct", DEFAULT_SLIPPAGE_PCT * 2.0)
+    enriched.setdefault("net_rr", safe_float(enriched.get("rr"), 0.0))
+    enriched["price_updated_at"] = utc_text(now_dt)
+    enriched["expires_at"] = utc_text(now_dt + timedelta(minutes=SIGNAL_TTL_MINUTES))
+
+    if snapshot and safe_float(snapshot.get("price")) > 0:
+        live_p = safe_float(snapshot["price"])
+        bid = safe_float(snapshot.get("bid"), live_p)
+        ask = safe_float(snapshot.get("ask"), live_p)
+        spread_pct = safe_float(snapshot.get("spread_pct"), DEFAULT_SYNTHETIC_SPREAD_PCT)
+
+        enriched["live_price"] = live_p
+        enriched["bid"] = bid
+        enriched["ask"] = ask
+        enriched["spread_pct"] = spread_pct
+
+        # Для рыночного входа актуализируем ориентировочную цену и переносим дистанцию SL/TP при умеренном сдвиге
+        base_entry = safe_float(enriched["entry"])
+        sl = safe_float(enriched["sl"])
+        risk_dist = abs(base_entry - sl)
+        drift_r = (abs(live_p - base_entry) / risk_dist) if risk_dist > 0 else 0.0
+
+        if drift_r > MAX_ENTRY_DRIFT_R * 2.0 and enriched.get("entry_mode") == "market":
+            enriched["status"] = "CANCELLED"
+            enriched["cancel_reason"] = f"Цена ушла слишком далеко от сигнала ({drift_r:.2f}R)"
+            return enriched
+
+        if enriched.get("entry_mode") == "market" and risk_dist > 0:
+            exec_entry = ask if is_long_side(enriched["side"]) else bid
+            if exec_entry > 0:
+                enriched["entry"] = exec_entry
+                if is_long_side(enriched["side"]):
+                    enriched["sl"] = exec_entry - risk_dist
+                    enriched["tp1"] = exec_entry + risk_dist * TP1_R
+                    enriched["tp2"] = exec_entry + risk_dist * TP2_R
+                else:
+                    enriched["sl"] = exec_entry + risk_dist
+                    enriched["tp1"] = exec_entry - risk_dist * TP1_R
+                    enriched["tp2"] = exec_entry - risk_dist * TP2_R
+                enriched["tp"] = enriched["tp2"]
+                enriched["rr"] = abs(enriched["tp2"] - exec_entry) / abs(exec_entry - enriched["sl"])
+    else:
+        enriched["live_price"] = enriched["entry"]
+        enriched["bid"] = enriched["entry"]
+        enriched["ask"] = enriched["entry"]
+        enriched["spread_pct"] = DEFAULT_SYNTHETIC_SPREAD_PCT
+
+    if enriched.get("entry_mode") == "level":
+        enriched["status"] = "WAITING_LEVEL"
+    else:
+        enriched.setdefault("status", "ACTIVE")
+
+    return enriched
+
+
+def log_signal_event(
+    signal_id: int,
+    event_type: str,
+    old_status: str | None = None,
+    new_status: str | None = None,
+    price: float | None = None,
+    reason: str = ""
+) -> None:
+    with db() as con:
+        con.execute("""
+            INSERT INTO signal_events (
+                signal_id, event_type, old_status, new_status,
+                price, reason, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            signal_id,
+            event_type,
+            old_status,
+            new_status,
+            safe_float(price, 0.0) if price is not None else None,
+            reason,
+            utc_text()
+        ))
+
 
 def save_signal(
     sig: dict[str, Any]
 ) -> int | None:
+
+    if sig.get("status") == "CANCELLED":
+        return None
 
     now = utc_text()
 
@@ -1278,6 +2079,7 @@ def save_signal(
             WHERE market=?
               AND symbol=?
               AND side=?
+              AND COALESCE(strategy_version, 'A')=?
               AND julianday(created_at)
                   >= julianday('now', '-{SIGNAL_COOLDOWN_MINUTES} minutes')
             ORDER BY id DESC
@@ -1285,7 +2087,8 @@ def save_signal(
         """, (
             sig["market"],
             sig["symbol"],
-            sig["side"]
+            sig["side"],
+            sig.get("strategy_version", STRATEGY_A)
         )).fetchone()
 
         if recent:
@@ -1293,6 +2096,7 @@ def save_signal(
 
         values = {
             "created_at": now,
+            "updated_at": now,
             "market": sig["market"],
             "symbol": sig["symbol"],
             "side": sig["side"],
@@ -1303,7 +2107,24 @@ def save_signal(
             "score": sig["score"],
             "reasons": reasons_text,
             "setup_key": sig["setup_key"],
-            "status": "NEW"
+            "status": sig.get("status", "ACTIVE"),
+            "strategy_version": sig.get("strategy_version", STRATEGY_A),
+            "live_price": sig.get("live_price", sig["entry"]),
+            "bid": sig.get("bid"),
+            "ask": sig.get("ask"),
+            "spread_pct": sig.get("spread_pct"),
+            "price_updated_at": sig.get("price_updated_at", now),
+            "expires_at": sig.get("expires_at"),
+            "entry_mode": sig.get("entry_mode", "market"),
+            "entry_zone_low": sig.get("entry_zone_low"),
+            "entry_zone_high": sig.get("entry_zone_high"),
+            "confirmation_rule": sig.get("confirmation_rule"),
+            "quality_score": sig.get("quality_score"),
+            "market_regime": sig.get("market_regime"),
+            "estimated_fee_pct": sig.get("estimated_fee_pct"),
+            "estimated_slippage_pct": sig.get("estimated_slippage_pct"),
+            "net_rr": sig.get("net_rr"),
+            "cancel_reason": sig.get("cancel_reason"),
         }
 
         available = [
@@ -1325,8 +2146,58 @@ def save_signal(
         )
 
         cur = con.execute(sql, tuple(values[column] for column in available))
+        signal_id = int(cur.lastrowid)
 
-        return int(cur.lastrowid)
+    log_signal_event(
+        signal_id=signal_id,
+        event_type="created",
+        old_status=None,
+        new_status=values.get("status", "ACTIVE"),
+        price=safe_float(sig.get("live_price", sig["entry"])),
+        reason=f"Стратегия {values.get('strategy_version', 'A')}, режим {values.get('entry_mode', 'market')}"
+    )
+
+    return signal_id
+
+
+def expire_stale_signals() -> list[dict[str, Any]]:
+    """
+    Помечает просроченные сигналы (по expires_at) как EXPIRED и пишет в signal_events.
+    """
+    expired_items: list[dict[str, Any]] = []
+    now_dt = utc_now()
+
+    with db() as con:
+        rows = con.execute("""
+            SELECT id, symbol, market, side, status, expires_at
+            FROM signals
+            WHERE UPPER(COALESCE(status, '')) IN ('ACTIVE', 'WAITING_LEVEL', 'NEW')
+              AND expires_at IS NOT NULL
+        """).fetchall()
+
+        for r in rows:
+            exp_dt = parse_utc_text(r["expires_at"])
+            if exp_dt and now_dt >= exp_dt:
+                old_st = r["status"]
+                con.execute("""
+                    UPDATE signals
+                    SET status = 'EXPIRED',
+                        cancel_reason = 'Истёк срок действия сигнала (TTL)',
+                        updated_at = ?
+                    WHERE id = ?
+                """, (utc_text(now_dt), r["id"]))
+                expired_items.append(dict(r))
+
+    for item in expired_items:
+        log_signal_event(
+            signal_id=item["id"],
+            event_type="expired",
+            old_status=item["status"],
+            new_status="EXPIRED",
+            reason="Истёк срок действия сигнала (TTL)"
+        )
+
+    return expired_items
 
 
 # ============================================================
@@ -1401,10 +2272,74 @@ def confirm_keyboard(action, trade_id):
 
 
 # ============================================================
-# 18. USER STATES AND DATABASE HELPERS
+# 18. USER STATES (DB + MEMORY) & DATABASE HELPERS
 # ============================================================
 
 user_states: dict[int, dict[str, Any]] = {}
+
+
+def set_user_dialog_state(user_id: int, state_type: str, ref_id: int | None = None) -> None:
+    user_states[user_id] = {"type": state_type, "ref_id": ref_id, "signal_id": ref_id, "trade_id": ref_id}
+    with db() as con:
+        con.execute("""
+            INSERT INTO user_dialogs (user_id, state_type, ref_id, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                state_type = excluded.state_type,
+                ref_id = excluded.ref_id,
+                created_at = excluded.created_at
+        """, (user_id, state_type, ref_id, utc_text()))
+
+
+def clear_user_dialog_state(user_id: int) -> None:
+    user_states.pop(user_id, None)
+    with db() as con:
+        con.execute("DELETE FROM user_dialogs WHERE user_id = ?", (user_id,))
+
+
+def get_user_dialog_state(user_id: int) -> dict[str, Any] | None:
+    if user_id in user_states:
+        return user_states[user_id]
+    with db() as con:
+        row = con.execute(
+            "SELECT state_type, ref_id FROM user_dialogs WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+    if not row:
+        return None
+    st = {
+        "type": row["state_type"],
+        "ref_id": row["ref_id"],
+        "signal_id": row["ref_id"],
+        "trade_id": row["ref_id"],
+    }
+    user_states[user_id] = st
+    return st
+
+
+def get_user_strategy(user_id: int) -> str:
+    with db() as con:
+        row = con.execute(
+            "SELECT strategy_version FROM user_settings WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+    if not row:
+        return DEFAULT_STRATEGY
+    ver = str(row["strategy_version"] or DEFAULT_STRATEGY).upper()
+    return ver if ver in (STRATEGY_A, STRATEGY_B) else DEFAULT_STRATEGY
+
+
+def set_user_strategy(user_id: int, version: str) -> str:
+    ver = str(version).upper()
+    if ver not in (STRATEGY_A, STRATEGY_B):
+        raise ValueError("Неизвестная версия стратегии")
+    with db() as con:
+        con.execute("""
+            INSERT INTO user_settings (user_id, risk_percent, leverage, notifications, strategy_version)
+            VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT(user_id) DO UPDATE SET strategy_version = excluded.strategy_version
+        """, (user_id, RISK_PERCENT, FUTURES_LEVERAGE, ver))
+    return ver
 
 
 def row_to_dict(row):
@@ -1420,16 +2355,10 @@ def row_to_dict(row):
 
 def ensure_part3_schema():
     """
-    Добавляет необходимые поля и таблицы.
-    Существующие записи не удаляются.
-    ВАЖНО: вызывать только после init_db().
+    Совместимость со старой схемой user_balances и trade_events.
+    Вызывается после init_db() без удаления данных.
     """
     with db() as conn:
-        conn.row_factory = sqlite3.Row
-
-        # ----------------------------------------------------
-        # USER BALANCES (миграция старой схемы)
-        # ----------------------------------------------------
         table_exists = conn.execute(
             "SELECT name FROM sqlite_master "
             "WHERE type='table' AND name='user_balances'"
@@ -1447,11 +2376,7 @@ def ensure_part3_schema():
                 log.info(
                     "Миграция user_balances: старая схема без 'market' → перестройка"
                 )
-
-                conn.execute(
-                    "ALTER TABLE user_balances RENAME TO user_balances_old"
-                )
-
+                conn.execute("ALTER TABLE user_balances RENAME TO user_balances_old")
                 conn.execute("""
                     CREATE TABLE user_balances (
                         user_id INTEGER NOT NULL,
@@ -1461,7 +2386,6 @@ def ensure_part3_schema():
                         PRIMARY KEY (user_id, market)
                     )
                 """)
-
                 if "balance" in existing_cols:
                     conn.execute("""
                         INSERT INTO user_balances
@@ -1473,27 +2397,7 @@ def ensure_part3_schema():
                             COALESCE(updated_at, ?)
                         FROM user_balances_old
                     """, (utc_text(),))
-
                 conn.execute("DROP TABLE user_balances_old")
-                log.info(
-                    "user_balances: миграция завершена, старые балансы перенесены в SPOT"
-                )
-
-            else:
-                for column, definition in {
-                    "balance": "REAL NOT NULL DEFAULT 0",
-                    "updated_at": "TEXT",
-                }.items():
-                    if column not in existing_cols:
-                        conn.execute(
-                            f"ALTER TABLE user_balances "
-                            f"ADD COLUMN {column} {definition}"
-                        )
-                        log.info(
-                            "user_balances: добавлена колонка %s",
-                            column
-                        )
-
         else:
             conn.execute("""
                 CREATE TABLE user_balances (
@@ -1504,98 +2408,6 @@ def ensure_part3_schema():
                     PRIMARY KEY (user_id, market)
                 )
             """)
-
-        # ----------------------------------------------------
-        # TRADE EVENTS (миграция старой схемы)
-        # ----------------------------------------------------
-        trade_events_exists = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='trade_events'"
-        ).fetchone() is not None
-
-        if trade_events_exists:
-            te_cols = {
-                row["name"]
-                for row in conn.execute(
-                    "PRAGMA table_info(trade_events)"
-                ).fetchall()
-            }
-
-            required_te_columns = {
-                "trade_id": "INTEGER NOT NULL DEFAULT 0",
-                "user_id": "INTEGER NOT NULL DEFAULT 0",
-                "event_type": "TEXT NOT NULL DEFAULT 'legacy'",
-                "message": "TEXT",
-                "price": "REAL",
-                "created_at": "TEXT",
-            }
-
-            for column, definition in required_te_columns.items():
-                if column not in te_cols:
-                    conn.execute(
-                        f"ALTER TABLE trade_events "
-                        f"ADD COLUMN {column} {definition}"
-                    )
-                    log.info(
-                        "trade_events: добавлена колонка %s",
-                        column
-                    )
-        else:
-            conn.execute("""
-                CREATE TABLE trade_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trade_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    event_type TEXT NOT NULL,
-                    message TEXT,
-                    price REAL,
-                    created_at TEXT
-                )
-            """)
-
-        # ----------------------------------------------------
-        # TRADES — миграции
-        # ----------------------------------------------------
-        existing_tables = {
-            row["name"]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-
-        if "trades" not in existing_tables:
-            log.warning(
-                "ensure_part3_schema: таблица trades не найдена. "
-                "Схема Part 3 будет применена после init_db()."
-            )
-            return
-
-        required_trade_columns = {
-            "position_size": "REAL DEFAULT 0",
-            "notional": "REAL DEFAULT 0",
-            "margin_required": "REAL DEFAULT 0",
-            "balance_snapshot": "REAL DEFAULT 0",
-            "risk_amount": "REAL DEFAULT 0",
-            "initial_sl": "REAL",
-            "remaining_percent": "REAL DEFAULT 100",
-            "tp1_hit": "INTEGER DEFAULT 0",
-            "tp2_hit": "INTEGER DEFAULT 0",
-            "last_recommendation": "TEXT",
-            "updated_at": "TEXT",
-        }
-
-        existing_cols = {
-            row["name"]
-            for row in conn.execute(
-                "PRAGMA table_info(trades)"
-            ).fetchall()
-        }
-
-        for column, definition in required_trade_columns.items():
-            if column not in existing_cols:
-                conn.execute(
-                    f"ALTER TABLE trades ADD COLUMN {column} {definition}"
-                )
 
 
 def save_trade_event(
@@ -1622,6 +2434,40 @@ def save_trade_event(
         ))
 
 
+def save_trade_execution(
+    trade_id: int,
+    user_id: int,
+    exec_type: str,
+    price: float,
+    quantity: float,
+    share_percent: float,
+    fee_usdt: float = 0.0,
+    slippage_usdt: float = 0.0,
+    realized_pnl_usdt: float = 0.0,
+    executed_at: str | None = None
+) -> None:
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO trade_executions (
+                trade_id, user_id, exec_type, price, quantity,
+                share_percent, fee_usdt, slippage_usdt,
+                realized_pnl_usdt, executed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            trade_id,
+            user_id,
+            exec_type,
+            safe_float(price),
+            safe_float(quantity),
+            safe_float(share_percent),
+            safe_float(fee_usdt),
+            safe_float(slippage_usdt),
+            safe_float(realized_pnl_usdt),
+            executed_at or utc_text(),
+        ))
+
+
 def register_user(user):
     if user is None:
         return
@@ -1640,13 +2486,14 @@ def register_user(user):
 
         conn.execute("""
             INSERT OR IGNORE INTO user_settings (
-                user_id, risk_percent, leverage, notifications
+                user_id, risk_percent, leverage, notifications, strategy_version
             )
-            VALUES (?, ?, ?, 1)
+            VALUES (?, ?, ?, 1, ?)
         """, (
             user.id,
             RISK_PERCENT,
-            FUTURES_LEVERAGE
+            FUTURES_LEVERAGE,
+            DEFAULT_STRATEGY
         ))
 
 
@@ -1681,8 +2528,6 @@ def set_user_balance(user_id, market, balance):
 
 def get_user_balance(user_id, market):
     with db() as conn:
-        conn.row_factory = sqlite3.Row
-
         row = conn.execute("""
             SELECT balance
             FROM user_balances
@@ -1697,8 +2542,6 @@ def get_user_balance(user_id, market):
 
 def get_active_trades(user_id):
     with db() as conn:
-        conn.row_factory = sqlite3.Row
-
         rows = conn.execute("""
             SELECT *
             FROM trades
@@ -1712,8 +2555,6 @@ def get_active_trades(user_id):
 
 def get_trade(trade_id, user_id=None):
     with db() as conn:
-        conn.row_factory = sqlite3.Row
-
         if user_id is None:
             row = conn.execute("""
                 SELECT * FROM trades WHERE id = ?
@@ -1728,7 +2569,7 @@ def get_trade(trade_id, user_id=None):
 
 
 # ============================================================
-# 19. POSITION SIZE AND RISK CALCULATION
+# 19. POSITION SIZE, RISK & DRIFT CALCULATION
 # ============================================================
 
 def calculate_position_size(balance, entry, stop_loss, market):
@@ -1780,6 +2621,31 @@ def calculate_position_size(balance, entry, stop_loss, market):
     }
 
 
+def assess_entry_drift(
+    signal_entry: float,
+    signal_sl: float,
+    tp2: float,
+    actual_entry: float
+) -> dict[str, Any]:
+    """
+    Оценивает отклонение фактической цены входа от сигнальной в единицах 1R.
+    При отклонении > 0.5R выдаёт предупреждение и пересчитанный RR.
+    """
+    one_r = abs(signal_entry - signal_sl)
+    drift_abs = abs(actual_entry - signal_entry)
+    drift_r = (drift_abs / one_r) if one_r > 0 else 0.0
+    new_rr = (abs(tp2 - actual_entry) / one_r) if one_r > 0 else 0.0
+    exceeds_threshold = drift_r > MAX_ENTRY_DRIFT_R
+    unfavorable = exceeds_threshold and (new_rr < MIN_RR or drift_r > 1.0)
+
+    return {
+        "drift_r": drift_r,
+        "exceeds_0_5r": exceeds_threshold,
+        "unfavorable": unfavorable,
+        "recalculated_rr": new_rr,
+    }
+
+
 # ============================================================
 # 20. PERSONAL TRADE CREATION
 # ============================================================
@@ -1788,19 +2654,20 @@ def create_personal_trade(user_id, signal_id, actual_entry):
     actual_entry = safe_float(actual_entry, 0)
 
     if actual_entry <= 0:
-        return None, "Цена входа должна быть больше нуля."
+        return None, "Цена входа должна быть больше нуля.", None
 
     with db() as conn:
-        conn.row_factory = sqlite3.Row
-
         signal_row = conn.execute("""
             SELECT * FROM signals WHERE id = ?
         """, (signal_id,)).fetchone()
 
         if not signal_row:
-            return None, "Сигнал не найден или уже недоступен."
+            return None, "Сигнал не найден или уже недоступен.", None
 
         signal = row_to_dict(signal_row)
+        sig_status = str(signal.get("status") or "").upper()
+        if sig_status in ("EXPIRED", "CANCELLED"):
+            return None, f"Сигнал неактуален (статус: {sig_status}). Вход не открыт.", None
 
         active_count = conn.execute("""
             SELECT COUNT(*) FROM trades
@@ -1812,7 +2679,7 @@ def create_personal_trade(user_id, signal_id, actual_entry):
             return None, (
                 f"У тебя уже есть {MAX_ACTIVE_TRADES} активных сделок. "
                 "Сначала закрой одну из них."
-            )
+            ), None
 
         market = str(signal["market"]).lower()
         symbol = signal["symbol"]
@@ -1828,23 +2695,23 @@ def create_personal_trade(user_id, signal_id, actual_entry):
                 "Сначала укажи баланс этого рынка в разделе "
                 "«Настройки». Без баланса бот не сможет рассчитать "
                 "размер позиции и риск."
-            )
+            ), None
 
         balance = safe_float(balance_row["balance"], 0)
 
         if balance <= 0:
-            return None, "Сначала укажи корректный баланс в настройках."
+            return None, "Сначала укажи корректный баланс в настройках.", None
 
         signal_entry = safe_float(signal["entry"], 0)
         signal_sl = safe_float(signal["sl"], 0)
 
         if signal_entry <= 0 or signal_sl <= 0:
-            return None, "В сигнале отсутствуют корректные цены."
+            return None, "В сигнале отсутствуют корректные цены.", None
 
         stop_distance = abs(signal_entry - signal_sl)
 
         if stop_distance <= 0:
-            return None, "Невозможно рассчитать дистанцию стоп-лосса."
+            return None, "Невозможно рассчитать дистанцию стоп-лосса.", None
 
         if is_long_side(side):
             actual_sl = actual_entry - stop_distance
@@ -1856,7 +2723,9 @@ def create_personal_trade(user_id, signal_id, actual_entry):
             tp2 = actual_entry - stop_distance * TP2_R
 
         if min(actual_sl, tp1, tp2) <= 0:
-            return None, "При указанной цене входа уровни SL/TP выходят в некорректную зону."
+            return None, "При указанной цене входа уровни SL/TP выходят в некорректную зону.", None
+
+        drift_info = assess_entry_drift(signal_entry, signal_sl, tp2, actual_entry)
 
         sizing = calculate_position_size(
             balance,
@@ -1865,36 +2734,46 @@ def create_personal_trade(user_id, signal_id, actual_entry):
             market
         )
 
+        entry_fee = sizing["notional"] * TAKER_FEE_RATE
         now = utc_text()
 
         cursor = conn.execute("""
             INSERT INTO trades (
                 user_id, signal_id, market, symbol, side,
-                entry, actual_entry, current_price,
-                sl, tp1, tp2, initial_sl, risk_amount,
+                entry, actual_entry, signal_entry, entry_drift_r,
+                current_price, sl, tp1, tp2, initial_sl,
+                risk_amount, initial_risk_amount,
+                current_risk_amount, current_risk_r,
                 position_size, notional, margin_required,
                 balance_snapshot, remaining_percent,
-                tp1_hit, tp2_hit, status, last_recommendation,
+                tp1_hit, tp2_hit, total_fees_paid,
+                strategy_version, status, last_recommendation,
                 opened_at, updated_at
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, 100, 0, 0, 'active', ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, 1.0, ?, ?, ?, ?, 100, 0, 0, ?, ?,
+                'active', ?, ?, ?
             )
         """, (
             user_id, signal_id, market, symbol, side,
-            actual_entry, actual_entry, actual_entry,
-            actual_sl, tp1, tp2, actual_sl,
-            sizing["risk_amount"],
-            sizing["quantity"],
-            sizing["notional"],
-            sizing["margin_required"],
-            balance,
+            actual_entry, actual_entry, signal_entry, drift_info["drift_r"],
+            actual_entry, actual_sl, tp1, tp2, actual_sl,
+            sizing["risk_amount"], sizing["risk_amount"], sizing["risk_amount"],
+            sizing["quantity"], sizing["notional"], sizing["margin_required"],
+            balance, entry_fee,
+            signal.get("strategy_version", STRATEGY_A),
             "Сделка открыта пользователем",
             now, now
         ))
 
-        trade_id = cursor.lastrowid
+        trade_id = int(cursor.lastrowid)
+
+        conn.execute("""
+            UPDATE signals
+            SET status = 'ENTERED', updated_at = ?
+            WHERE id = ?
+        """, (now, signal_id))
 
         conn.execute("""
             INSERT INTO trade_events (
@@ -1908,11 +2787,34 @@ def create_personal_trade(user_id, signal_id, actual_entry):
             actual_entry, now
         ))
 
-    return trade_id, None
+        conn.execute("""
+            INSERT INTO trade_executions (
+                trade_id, user_id, exec_type, price, quantity,
+                share_percent, fee_usdt, slippage_usdt,
+                realized_pnl_usdt, executed_at
+            )
+            VALUES (?, ?, 'entry', ?, ?, 100.0, ?, 0.0, 0.0, ?)
+        """, (
+            trade_id, user_id, actual_entry,
+            sizing["quantity"], entry_fee, now
+        ))
+
+    warning_lines: list[str] = []
+    if drift_info["exceeds_0_5r"]:
+        warning_lines.append(
+            f"⚠️ Отклонение входа от сигнала составило {drift_info['drift_r']:.2f}R (> 0.5R). "
+            f"Пересчитанный RR до TP2: {drift_info['recalculated_rr']:.2f}."
+        )
+        if drift_info["unfavorable"]:
+            warning_lines.append(
+                "⛔ Вход стал невыгодным относительно риска/целей — при возможности лучше пропустить такую сделку."
+            )
+
+    return trade_id, None, ("\n".join(warning_lines) if warning_lines else None)
 
 
 # ============================================================
-# 21. TRADE UPDATE FUNCTIONS
+# 21. TRADE UPDATE FUNCTIONS (PRESERVING HISTORICAL SIZE & 1R)
 # ============================================================
 
 def update_trade_field(trade_id, user_id, field, value):
@@ -1931,7 +2833,7 @@ def update_trade_field(trade_id, user_id, field, value):
     if not trade:
         return False, "Сделка не найдена."
 
-    if str(trade.get("status", "")).lower() not in ("active", "open"):
+    if normalize_trade_status(trade.get("status")) not in ("active", "open"):
         return False, "Эта сделка уже не активна."
 
     market = str(trade["market"]).lower()
@@ -1962,28 +2864,30 @@ def update_trade_field(trade_id, user_id, field, value):
         sizing = calculate_position_size(
             balance, value, new_sl, market
         )
+        sig_entry = safe_float(trade.get("signal_entry"), old_entry)
+        drift_info = assess_entry_drift(sig_entry, new_sl, new_tp2, value)
 
         with db() as conn:
             conn.execute("""
                 UPDATE trades
                 SET actual_entry = ?, entry = ?, current_price = ?,
                     sl = ?, initial_sl = ?, tp1 = ?, tp2 = ?,
-                    risk_amount = ?, position_size = ?,
-                    notional = ?, margin_required = ?,
+                    entry_drift_r = ?,
+                    risk_amount = ?, initial_risk_amount = ?,
+                    current_risk_amount = ?, current_risk_r = 1.0,
+                    position_size = ?, notional = ?, margin_required = ?,
                     updated_at = ?
                 WHERE id = ? AND user_id = ?
             """, (
                 value, value, value,
                 new_sl, new_sl, new_tp1, new_tp2,
-                sizing["risk_amount"],
-                sizing["quantity"],
-                sizing["notional"],
-                sizing["margin_required"],
+                drift_info["drift_r"],
+                sizing["risk_amount"], sizing["risk_amount"], sizing["risk_amount"],
+                sizing["quantity"], sizing["notional"], sizing["margin_required"],
                 utc_text(),
                 trade_id, user_id
             ))
 
-            # При изменении цены входа позволяем заново отслеживать касания уровней
             conn.execute("""
                 DELETE FROM trade_events
                 WHERE trade_id = ? AND user_id = ?
@@ -1995,7 +2899,13 @@ def update_trade_field(trade_id, user_id, field, value):
             "Пользователь исправил цену входа", value
         )
 
-        return True, "Цена входа и торговые уровни пересчитаны."
+        msg = "Цена входа и торговые уровни пересчитаны."
+        if drift_info["exceeds_0_5r"]:
+            msg += (
+                f"\n⚠️ Отклонение от сигнала: {drift_info['drift_r']:.2f}R (> 0.5R), "
+                f"RR: {drift_info['recalculated_rr']:.2f}."
+            )
+        return True, msg
 
     if field == "sl":
         entry = safe_float(trade["actual_entry"], 0)
@@ -2006,33 +2916,44 @@ def update_trade_field(trade_id, user_id, field, value):
         if not is_long_side(trade["side"]) and value <= entry:
             return False, "Для SHORT стоп-лосс должен быть выше входа."
 
-        sizing = calculate_position_size(
-            balance, entry, value, market
-        )
+        # Не изменяем исторический размер позиции, notional, маржу, initial_sl и первоначальный риск 1R.
+        # Пересчитываем только текущий риск оставшейся доли позиции.
+        remaining_pct = safe_float(trade.get("remaining_percent"), 100.0)
+        rem_frac = max(0.0, min(1.0, remaining_pct / 100.0))
+        full_qty = safe_float(trade.get("position_size"), 0.0)
+        rem_qty = full_qty * rem_frac
+        new_current_risk = rem_qty * abs(entry - value)
+
+        base_one_r = safe_float(trade.get("initial_risk_amount"), 0.0)
+        if base_one_r <= 0:
+            base_one_r = safe_float(trade.get("risk_amount"), 0.0)
+        new_current_risk_r = (new_current_risk / base_one_r) if base_one_r > 0 else 0.0
 
         with db() as conn:
             conn.execute("""
                 UPDATE trades
-                SET sl = ?, initial_sl = ?, risk_amount = ?,
-                    position_size = ?, notional = ?,
-                    margin_required = ?, updated_at = ?
+                SET sl = ?,
+                    current_risk_amount = ?,
+                    current_risk_r = ?,
+                    updated_at = ?
                 WHERE id = ? AND user_id = ?
             """, (
-                value, value,
-                sizing["risk_amount"],
-                sizing["quantity"],
-                sizing["notional"],
-                sizing["margin_required"],
+                value,
+                new_current_risk,
+                new_current_risk_r,
                 utc_text(),
                 trade_id, user_id
             ))
 
         save_trade_event(
             trade_id, user_id, "sl_updated",
-            "Пользователь изменил стоп-лосс", value
+            "Пользователь изменил стоп-лосс (размер позиции и 1R сохранены)", value
         )
 
-        return True, "Стоп-лосс обновлён. Размер риска пересчитан."
+        return True, (
+            f"Стоп-лосс обновлён. Текущий риск остатка: {new_current_risk:.4f} USDT "
+            f"({new_current_risk_r:.2f}R). Объём позиции и исходный 1R сохранены."
+        )
 
     return False, "Неизвестная операция."
 
@@ -2051,15 +2972,17 @@ def trade_text(trade):
     tp1 = safe_float(trade.get("tp1"), 0)
     tp2 = safe_float(trade.get("tp2"), 0)
 
-    risk = safe_float(trade.get("risk_amount"), 0)
+    init_risk = safe_float(trade.get("initial_risk_amount"), safe_float(trade.get("risk_amount"), 0))
+    curr_risk = safe_float(trade.get("current_risk_amount"), init_risk)
     quantity = safe_float(trade.get("position_size"), 0)
     notional = safe_float(trade.get("notional"), 0)
     margin = safe_float(trade.get("margin_required"), 0)
+    fees = safe_float(trade.get("total_fees_paid"), 0)
 
     remaining = safe_float(trade.get("remaining_percent"), 100)
 
     return (
-        f"📊 <b>{trade['symbol']}</b>\n"
+        f"📊 <b>{trade['symbol']}</b> [Стратегия {trade.get('strategy_version', 'A')}]\n"
         f"Рынок: {market}\n"
         f"Направление: {side}\n"
         f"Статус: {trade['status']}\n\n"
@@ -2068,10 +2991,12 @@ def trade_text(trade):
         f"Стоп-лосс: <code>{format_price(sl)}</code>\n"
         f"TP1: <code>{format_price(tp1)}</code>\n"
         f"TP2: <code>{format_price(tp2)}</code>\n\n"
-        f"Риск в USDT: {risk:.4f}\n"
+        f"Исходный риск (1R): {init_risk:.4f} USDT\n"
+        f"Текущий риск остатка: {curr_risk:.4f} USDT\n"
         f"Количество: {quantity:.8f}\n"
         f"Объём позиции: {notional:.2f} USDT\n"
         f"Маржа: {margin:.2f} USDT\n"
+        f"Комиссии (учтено): {fees:.4f} USDT\n"
         f"Остаток позиции: {remaining:.0f}%\n\n"
         f"TP1 подтверждён: {'Да' if trade.get('tp1_hit') else 'Нет'}\n"
         f"TP2 подтверждён: {'Да' if trade.get('tp2_hit') else 'Нет'}\n\n"
@@ -2087,7 +3012,7 @@ def trade_text(trade):
 _unavailable_symbols: set[tuple[str, str]] = set()
 
 
-async def analyze_market_symbol(market, symbol):
+async def analyze_market_symbol(market, symbol, strategy_version: str = DEFAULT_STRATEGY):
     key = (market, symbol)
 
     if key in _unavailable_symbols:
@@ -2133,17 +3058,30 @@ async def analyze_market_symbol(market, symbol):
             )
 
     try:
-        signal = build_signal(market, symbol, candles)
+        ver = str(strategy_version or DEFAULT_STRATEGY).upper()
+        if ver == STRATEGY_B:
+            quote = latest_quotes.get(key)
+            signal = build_signal_b(market, symbol, candles, quote=quote)
+        else:
+            signal = build_signal_a_v92(market, symbol, candles)
     except Exception:
         logging.exception(
             "Ошибка анализа %s %s", market, symbol
         )
         return None
 
-    return signal
+    if not signal:
+        return None
+
+    try:
+        snapshot = await fetch_live_market_snapshot(market, symbol)
+    except Exception:
+        snapshot = None
+
+    return enrich_signal_with_live_data(signal, snapshot)
 
 
-async def scan_market():
+async def scan_market(strategy_version: str = DEFAULT_STRATEGY):
     found_signals = []
     system_status["scan_count"] = int(system_status.get("scan_count", 0)) + 1
     system_status["last_scan"] = utc_text()
@@ -2156,7 +3094,7 @@ async def scan_market():
                 continue
 
             try:
-                signal = await analyze_market_symbol(market, symbol)
+                signal = await analyze_market_symbol(market, symbol, strategy_version=strategy_version)
 
                 if not signal:
                     continue
@@ -2202,6 +3140,10 @@ def signal_text(signal):
 
     tp1 = safe_float(signal.get("tp1"), 0)
     tp2 = safe_float(signal.get("tp2"), signal.get("tp", 0))
+    live_p = safe_float(signal.get("live_price"), signal["entry"])
+    spread_pct = safe_float(signal.get("spread_pct"), DEFAULT_SYNTHETIC_SPREAD_PCT)
+    entry_mode = signal.get("entry_mode", "market")
+    mode_label = "Вход от уровня / отката" if entry_mode == "level" else "Рыночный вход"
 
     raw_reasons = signal.get("reasons", "")
     if isinstance(raw_reasons, (list, tuple)):
@@ -2210,12 +3152,27 @@ def signal_text(signal):
         parts = [p.strip() for p in str(raw_reasons).split(";") if p.strip()]
         reasons_formatted = "\n".join(f"• {p}" for p in parts) if parts else "—"
 
+    extra_lines = [
+        f"Стратегия: <b>{signal.get('strategy_version', 'A')}</b>",
+        f"Режим входа: <b>{mode_label}</b>",
+        f"Актуальная цена: <code>{format_price(live_p)}</code> (спред ~{spread_pct:.3f}%)",
+    ]
+    if entry_mode == "level":
+        z_low = safe_float(signal.get("entry_zone_low"), signal["entry"])
+        z_high = safe_float(signal.get("entry_zone_high"), signal["entry"])
+        extra_lines.append(f"Зона входа: <code>{format_price(z_low)} — {format_price(z_high)}</code>")
+        if signal.get("confirmation_rule"):
+            extra_lines.append(f"Условие подтверждения: {signal['confirmation_rule']}")
+    if signal.get("expires_at"):
+        extra_lines.append(f"Действителен до (UTC): <code>{signal['expires_at']}</code>")
+
     return (
         f"🚨 <b>НОВЫЙ ТОРГОВЫЙ СИГНАЛ</b>\n\n"
         f"Монета: <b>{signal['symbol']}</b>\n"
         f"Рынок: {market}\n"
-        f"Направление: {side}\n\n"
-        f"Вход: <code>{format_price(signal['entry'])}</code>\n"
+        f"Направление: {side}\n"
+        + "\n".join(extra_lines) + "\n\n"
+        f"Ориентир входа: <code>{format_price(signal['entry'])}</code>\n"
         f"Стоп-лосс: <code>{format_price(signal['sl'])}</code>\n"
         f"TP1: <code>{format_price(tp1)}</code> ({TP1_R}R) — "
         f"закрытие {TP1_CLOSE_PERCENT:.0f}%\n"
@@ -2232,14 +3189,14 @@ def signal_text(signal):
 
 async def broadcast_signal(signal):
     with db() as conn:
-        conn.row_factory = sqlite3.Row
-
         users = conn.execute("""
             SELECT user_id FROM users WHERE is_active = 1
         """).fetchall()
 
     for row in users:
         user_id = row["user_id"]
+        if get_user_strategy(user_id) != str(signal.get("strategy_version", STRATEGY_A)).upper():
+            continue
 
         try:
             await bot.send_message(
@@ -2259,9 +3216,10 @@ async def broadcast_signal(signal):
 # 25. BASIC TELEGRAM HANDLERS
 # ============================================================
 
-@router.message(Command("start"))
-async def start_command(message):
+@router.message(CommandStart())
+async def start_command(message: Message):
     register_user(message.from_user)
+    clear_user_dialog_state(message.from_user.id)
 
     await message.answer(
         "Привет! Это Trading Bot v9.2.\n\n"
@@ -2275,16 +3233,18 @@ async def start_command(message):
 
 
 @router.message(F.text == "🔎 Анализ рынка")
-async def scan_market_callback(message):
+async def scan_market_callback(message: Message):
     register_user(message.from_user)
+    ver = get_user_strategy(message.from_user.id)
 
     status_message = await message.answer(
-        "⏳ Начинаю анализ рынка BingX.\n"
+        f"⏳ Начинаю анализ рынка BingX (стратегия {ver}).\n"
         "Сканирование может занять некоторое время."
     )
 
     try:
-        signals = await scan_market()
+        expire_stale_signals()
+        signals = await scan_market(strategy_version=ver)
 
         if not signals:
             await status_message.edit_text(
@@ -2316,7 +3276,7 @@ async def scan_market_callback(message):
 
 
 @router.callback_query(F.data.startswith("enter:"))
-async def enter_trade_callback(callback):
+async def enter_trade_callback(callback: CallbackQuery):
     register_user(callback.from_user)
 
     try:
@@ -2326,14 +3286,18 @@ async def enter_trade_callback(callback):
         return
 
     with db() as conn:
-        conn.row_factory = sqlite3.Row
-
         signal = conn.execute("""
-            SELECT id, market, symbol FROM signals WHERE id = ?
+            SELECT id, market, symbol, status, expires_at FROM signals WHERE id = ?
         """, (signal_id,)).fetchone()
 
     if not signal:
         await callback.answer("Сигнал не найден.", show_alert=True)
+        return
+
+    sig_status = str(signal["status"] or "").upper()
+    exp_dt = parse_utc_text(signal["expires_at"])
+    if sig_status in ("EXPIRED", "CANCELLED") or (exp_dt and utc_now() >= exp_dt):
+        await callback.answer("Сигнал просрочен или отменён.", show_alert=True)
         return
 
     active_trades = get_active_trades(callback.from_user.id)
@@ -2357,10 +3321,7 @@ async def enter_trade_callback(callback):
         await callback.answer()
         return
 
-    user_states[callback.from_user.id] = {
-        "type": "waiting_entry",
-        "signal_id": signal_id
-    }
+    set_user_dialog_state(callback.from_user.id, "waiting_entry", signal_id)
 
     await callback.message.answer(
         f"Ты подтвердил вход в {signal['symbol']}.\n\n"
@@ -2381,12 +3342,12 @@ async def enter_trade_callback(callback):
     F.text,
     lambda message: (
         message.from_user
-        and message.from_user.id in user_states
+        and get_user_dialog_state(message.from_user.id) is not None
     )
 )
-async def handle_user_text(message):
+async def handle_user_text(message: Message):
     user_id = message.from_user.id
-    state = user_states.get(user_id)
+    state = get_user_dialog_state(user_id)
 
     if not state:
         return
@@ -2394,7 +3355,7 @@ async def handle_user_text(message):
     text_value = (message.text or "").strip().replace(",", ".")
 
     if text_value.lower() in ("отмена", "cancel", "/cancel"):
-        user_states.pop(user_id, None)
+        clear_user_dialog_state(user_id)
 
         await message.answer(
             "Действие отменено.",
@@ -2420,7 +3381,7 @@ async def handle_user_text(message):
     if state_type == "waiting_entry":
         signal_id = state["signal_id"]
 
-        trade_id, error = create_personal_trade(
+        trade_id, error, warning = create_personal_trade(
             user_id, signal_id, value
         )
 
@@ -2428,16 +3389,18 @@ async def handle_user_text(message):
             await message.answer(error)
             return
 
-        user_states.pop(user_id, None)
+        clear_user_dialog_state(user_id)
         trade = get_trade(trade_id, user_id)
 
+        prefix = "✅ Сделка добавлена в «Мои сделки»."
+        if warning:
+            prefix = f"{prefix}\n\n{warning}"
+
         await message.answer(
-            "✅ Сделка добавлена в «Мои сделки».\n\n"
-            + trade_text(trade),
+            f"{prefix}\n\n" + trade_text(trade),
             reply_markup=trade_keyboard(trade_id),
             parse_mode="HTML"
         )
-
         return
 
     if state_type == "waiting_new_entry":
@@ -2448,7 +3411,7 @@ async def handle_user_text(message):
         )
 
         if success:
-            user_states.pop(user_id, None)
+            clear_user_dialog_state(user_id)
             trade = get_trade(trade_id, user_id)
 
             await message.answer(
@@ -2458,7 +3421,6 @@ async def handle_user_text(message):
             )
         else:
             await message.answer(result)
-
         return
 
     if state_type == "waiting_sl":
@@ -2469,7 +3431,7 @@ async def handle_user_text(message):
         )
 
         if success:
-            user_states.pop(user_id, None)
+            clear_user_dialog_state(user_id)
             trade = get_trade(trade_id, user_id)
 
             await message.answer(
@@ -2479,7 +3441,6 @@ async def handle_user_text(message):
             )
         else:
             await message.answer(result)
-
         return
 
 
@@ -2502,7 +3463,7 @@ def trades_list_keyboard(trades):
 
 
 @router.message(F.text == "📊 Мои сделки")
-async def my_trades_handler(message):
+async def my_trades_handler(message: Message):
     register_user(message.from_user)
 
     trades = get_active_trades(message.from_user.id)
@@ -2529,7 +3490,7 @@ async def my_trades_handler(message):
 
 
 @router.callback_query(F.data.startswith("trade_refresh:"))
-async def trade_refresh_callback(callback):
+async def trade_refresh_callback(callback: CallbackQuery):
     try:
         trade_id = int(callback.data.split(":")[1])
     except (ValueError, IndexError):
@@ -2552,7 +3513,7 @@ async def trade_refresh_callback(callback):
 
 
 @router.callback_query(F.data.startswith("trade_edit_entry:"))
-async def trade_edit_entry_callback(callback):
+async def trade_edit_entry_callback(callback: CallbackQuery):
     try:
         trade_id = int(callback.data.split(":")[1])
     except (ValueError, IndexError):
@@ -2565,10 +3526,7 @@ async def trade_edit_entry_callback(callback):
         await callback.answer("Сделка не найдена.", show_alert=True)
         return
 
-    user_states[callback.from_user.id] = {
-        "type": "waiting_new_entry",
-        "trade_id": trade_id
-    }
+    set_user_dialog_state(callback.from_user.id, "waiting_new_entry", trade_id)
 
     await callback.message.answer(
         "Введи новую фактическую цену входа.\n"
@@ -2579,7 +3537,7 @@ async def trade_edit_entry_callback(callback):
 
 
 @router.callback_query(F.data.startswith("trade_edit_sl:"))
-async def trade_edit_sl_callback(callback):
+async def trade_edit_sl_callback(callback: CallbackQuery):
     try:
         trade_id = int(callback.data.split(":")[1])
     except (ValueError, IndexError):
@@ -2592,14 +3550,11 @@ async def trade_edit_sl_callback(callback):
         await callback.answer("Сделка не найдена.", show_alert=True)
         return
 
-    user_states[callback.from_user.id] = {
-        "type": "waiting_sl",
-        "trade_id": trade_id
-    }
+    set_user_dialog_state(callback.from_user.id, "waiting_sl", trade_id)
 
     await callback.message.answer(
         "Введи новую цену стоп-лосса.\n"
-        "Бот сохранит её и пересчитает риск."
+        "Бот сохранит её и пересчитает текущий риск остатка (исходный 1R и объём сохраняются)."
     )
 
     await callback.answer()
@@ -2610,12 +3565,10 @@ async def trade_edit_sl_callback(callback):
 # ============================================================
 
 @router.message(F.text == "📚 История")
-async def history_handler(message):
+async def history_handler(message: Message):
     register_user(message.from_user)
 
     with db() as conn:
-        conn.row_factory = sqlite3.Row
-
         rows = conn.execute("""
             SELECT * FROM trade_history
             WHERE user_id = ?
@@ -2647,12 +3600,10 @@ async def history_handler(message):
 
 
 @router.message(F.text == "📈 Статистика")
-async def statistics_handler(message):
+async def statistics_handler(message: Message):
     register_user(message.from_user)
 
     with db() as conn:
-        conn.row_factory = sqlite3.Row
-
         total = conn.execute("""
             SELECT COUNT(*) AS total FROM trade_history
             WHERE user_id = ?
@@ -2697,32 +3648,46 @@ async def statistics_handler(message):
 # ============================================================
 
 @router.message(F.text == "⚙️ Настройки")
-async def settings_handler(message):
+async def settings_handler(message: Message):
     register_user(message.from_user)
 
     spot_balance = get_user_balance(message.from_user.id, "spot")
     swap_balance = get_user_balance(message.from_user.id, "swap")
+    ver = get_user_strategy(message.from_user.id)
 
     await message.answer(
         "⚙️ <b>Настройки торгового бота</b>\n\n"
+        f"Активная стратегия: <b>{ver}</b>\n"
         f"Риск на сделку: {RISK_PERCENT}%\n"
         f"Плечо Futures: {FUTURES_LEVERAGE}x\n"
         f"TP1: {TP1_R}R — закрытие {TP1_CLOSE_PERCENT:.0f}%\n"
         f"TP2: {TP2_R}R — закрытие {TP2_CLOSE_PERCENT:.0f}%\n\n"
         f"Баланс Spot: {spot_balance:.2f} USDT\n"
         f"Баланс Futures: {swap_balance:.2f} USDT\n\n"
-        "Для изменения баланса отправь одну из команд:\n"
+        "Команды:\n"
         "<code>/spotbalance 1000</code>\n"
-        "<code>/swapbalance 500</code>\n\n"
-        "Укажи вместо числа свой фактический баланс в USDT.\n\n"
+        "<code>/swapbalance 500</code>\n"
+        "<code>/strategy A</code> или <code>/strategy B</code>\n\n"
         "Баланс вводится вручную. Бот не получает доступ "
         "к твоему аккаунту или средствам.",
         parse_mode="HTML"
     )
 
 
+@router.message(Command("strategy"))
+async def set_strategy_handler(message: Message):
+    register_user(message.from_user)
+    parts = (message.text or "").split()
+    if len(parts) != 2 or parts[1].upper() not in (STRATEGY_A, STRATEGY_B):
+        await message.answer("Укажи стратегию так: /strategy A или /strategy B")
+        return
+
+    chosen = set_user_strategy(message.from_user.id, parts[1].upper())
+    await message.answer(f"✅ Выбрана стратегия: <b>{chosen}</b>", parse_mode="HTML")
+
+
 @router.message(Command("spotbalance"))
-async def set_spot_balance_handler(message):
+async def set_spot_balance_handler(message: Message):
     parts = (message.text or "").split()
 
     if len(parts) != 2:
@@ -2746,7 +3711,7 @@ async def set_spot_balance_handler(message):
 
 
 @router.message(Command("swapbalance"))
-async def set_swap_balance_handler(message):
+async def set_swap_balance_handler(message: Message):
     parts = (message.text or "").split()
 
     if len(parts) != 2:
@@ -2774,15 +3739,17 @@ async def set_swap_balance_handler(message):
 # ============================================================
 
 @router.message(F.text == "🖥 Статус системы")
-async def system_status_handler(message):
+async def system_status_handler(message: Message):
     register_user(message.from_user)
 
     active = len(get_active_trades(message.from_user.id))
+    ver = get_user_strategy(message.from_user.id)
 
     await message.answer(
         "🖥 <b>Состояние Trading Bot v9.2</b>\n\n"
         f"Режим: публичный анализ BingX\n"
         f"Реальные ордера: отключены\n"
+        f"Стратегия пользователя: {ver}\n"
         f"Spot: включён в анализе\n"
         f"USDT-M Futures: включён в анализе\n"
         f"API BingX: {system_status.get('api_status', 'Не проверено')}\n"
@@ -2795,7 +3762,7 @@ async def system_status_handler(message):
 
 
 # ============================================================
-# 31. LIVE PRICE
+# 31. LIVE PRICE & BID/ASK
 # ============================================================
 
 async def get_live_price(market, symbol):
@@ -2818,11 +3785,22 @@ async def get_live_price(market, symbol):
             data = data[0] if data else None
 
         if isinstance(data, dict):
+            bid = safe_float(data.get("bidPrice") or data.get("bid"), 0.0)
+            ask = safe_float(data.get("askPrice") or data.get("ask"), 0.0)
             for key in ("price", "lastPrice", "last", "close"):
                 price = safe_float(data.get(key), 0)
 
                 if price > 0:
                     latest_prices[(market, symbol)] = price
+                    if bid > 0 and ask > 0 and ask >= bid:
+                        latest_quotes[(market, symbol)] = {
+                            "price": price,
+                            "bid": bid,
+                            "ask": ask,
+                            "spread_pct": ((ask - bid) / price * 100.0),
+                            "is_synthetic_spread": False,
+                            "updated_at": utc_text(),
+                        }
                     return price
 
     except Exception:
@@ -2835,7 +3813,7 @@ async def get_live_price(market, symbol):
 
 
 # ============================================================
-# 32. TRADE MONITORING
+# 32. TRADE MONITORING (NOTIFICATIONS ONLY, NO AUTO-EXECUTION)
 # ============================================================
 
 def trade_event_exists(trade_id, event_type):
@@ -2981,9 +3959,9 @@ async def background_monitor():
 
     while True:
         try:
-            with db() as conn:
-                conn.row_factory = sqlite3.Row
+            expire_stale_signals()
 
+            with db() as conn:
                 rows = conn.execute("""
                     SELECT * FROM trades
                     WHERE LOWER(COALESCE(status, '')) IN ('active', 'open')
@@ -3004,14 +3982,14 @@ async def background_monitor():
         except Exception:
             logging.exception("Ошибка фонового мониторинга")
 
-        await asyncio.sleep(max(TRADE_MONITOR_INTERVAL, 30))
+        await asyncio.sleep(max(TRADE_MONITOR_INTERVAL_SEC, 5))
 
 
 # ============================================================
-# 33. CONFIRMATION OF TRADE EVENTS
+# 33. CONFIRMATION OF USER EXECUTIONS & CLOSING
 # ============================================================
 
-async def close_trade_record(trade, exit_price, reason):
+async def close_trade_record(trade, exit_price, reason, exec_type: str = "manual_close"):
     trade_id = trade["id"]
     user_id = trade["user_id"]
 
@@ -3027,43 +4005,48 @@ async def close_trade_record(trade, exit_price, reason):
         return False, "Нет корректной цены выхода."
 
     direction = 1 if is_long_side(trade["side"]) else -1
-
-    initial_risk_per_unit = abs(entry - initial_sl)
-
-    if initial_risk_per_unit <= 0:
-        return False, "Невозможно рассчитать первоначальный риск."
-
     tp1_hit = bool(trade.get("tp1_hit"))
+    prev_fees = safe_float(trade.get("total_fees_paid"), 0.0)
 
     if tp1_hit:
         tp1 = safe_float(trade["tp1"], 0)
-        realized = (
-            quantity * 0.70 * (tp1 - entry) * direction
-            + quantity * 0.30 * (exit_price - entry) * direction
-        )
+        qty_tp1 = safe_float(trade.get("tp1_fill_qty"), quantity * 0.70)
+        rem_qty = max(0.0, quantity - qty_tp1)
+        gross_tp1 = qty_tp1 * (tp1 - entry) * direction
+        gross_rem = rem_qty * (exit_price - entry) * direction
+        gross_realized = gross_tp1 + gross_rem
+        exit_fee = rem_qty * exit_price * TAKER_FEE_RATE
+        total_fees = prev_fees + exit_fee
     else:
-        realized = quantity * (exit_price - entry) * direction
+        qty_tp1 = 0.0
+        rem_qty = quantity
+        gross_realized = quantity * (exit_price - entry) * direction
+        exit_fee = quantity * exit_price * TAKER_FEE_RATE
+        total_fees = prev_fees + exit_fee
 
-    risk_amount = safe_float(trade.get("risk_amount"), 0)
+    net_realized = gross_realized - total_fees
 
-    if risk_amount <= 0:
-        risk_amount = quantity * initial_risk_per_unit
+    initial_risk = safe_float(trade.get("initial_risk_amount"), 0.0)
+    if initial_risk <= 0:
+        initial_risk = safe_float(trade.get("risk_amount"), 0.0)
+    if initial_risk <= 0:
+        initial_risk = quantity * abs(entry - initial_sl)
 
-    pnl_r = realized / risk_amount if risk_amount > 0 else 0
+    pnl_r = net_realized / initial_risk if initial_risk > 0 else 0.0
 
     if str(trade["market"]).lower() == "swap":
-        base = safe_float(trade.get("margin_required"), 0)
+        base = safe_float(trade.get("margin_required"), 0.0)
     else:
         base = quantity * entry
 
     if base <= 0:
         base = quantity * entry
 
-    pnl_percent = realized / base * 100 if base > 0 else 0
+    pnl_percent = net_realized / base * 100.0 if base > 0 else 0.0
 
     result = (
-        "win" if realized > 0
-        else ("loss" if realized < 0 else "breakeven")
+        "win" if net_realized > 0
+        else ("loss" if net_realized < 0 else "breakeven")
     )
 
     now = utc_text()
@@ -3073,25 +4056,50 @@ async def close_trade_record(trade, exit_price, reason):
             UPDATE trades
             SET status = 'closed',
                 remaining_percent = 0,
+                tp2_fill_price = ?,
+                tp2_fill_qty = ?,
+                tp2_fill_fee = ?,
+                tp2_closed_at = ?,
+                total_fees_paid = ?,
                 closed_at = ?,
                 updated_at = ?
             WHERE id = ? AND user_id = ?
-        """, (now, now, trade_id, user_id))
+        """, (
+            exit_price, rem_qty, exit_fee, now,
+            total_fees, now, now, trade_id, user_id
+        ))
 
         conn.execute("""
             INSERT INTO trade_history (
                 trade_id, user_id, market, symbol, side,
                 entry, exit_price, result,
-                pnl_percent, pnl_r, close_reason,
-                opened_at, closed_at
+                pnl_percent, pnl_r, net_pnl_usdt,
+                initial_risk_amount, total_fees_paid,
+                total_slippage_cost, strategy_version,
+                close_reason, opened_at, closed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             trade_id, user_id, trade["market"], trade["symbol"],
             trade["side"], entry, exit_price, result,
-            pnl_percent, pnl_r, reason,
-            trade["opened_at"], now
+            pnl_percent, pnl_r, net_realized,
+            initial_risk, total_fees,
+            safe_float(trade.get("total_slippage_cost"), 0.0),
+            trade.get("strategy_version", STRATEGY_A),
+            reason, trade["opened_at"], now
         ))
+
+    save_trade_execution(
+        trade_id=trade_id,
+        user_id=user_id,
+        exec_type=exec_type,
+        price=exit_price,
+        quantity=rem_qty,
+        share_percent=safe_float(trade.get("remaining_percent"), 100.0),
+        fee_usdt=exit_fee,
+        realized_pnl_usdt=gross_realized - exit_fee,
+        executed_at=now
+    )
 
     save_trade_event(
         trade_id, user_id, "closed", reason, exit_price
@@ -3100,13 +4108,13 @@ async def close_trade_record(trade, exit_price, reason):
     return True, (
         f"Сделка закрыта.\n"
         f"Результат: {result}\n"
-        f"PnL: {realized:.4f} USDT\n"
-        f"Результат: {pnl_r:.2f}R"
+        f"Чистый PnL (после комиссий): {net_realized:.4f} USDT\n"
+        f"Результат (от 1R): {pnl_r:.2f}R"
     )
 
 
 @router.callback_query(F.data.startswith("trade_close:"))
-async def trade_close_callback(callback):
+async def trade_close_callback(callback: CallbackQuery):
     try:
         trade_id = int(callback.data.split(":")[1])
     except (ValueError, IndexError):
@@ -3132,7 +4140,7 @@ async def trade_close_callback(callback):
 
 
 @router.callback_query(F.data.startswith("close_cancel:"))
-async def close_cancel_callback(callback):
+async def close_cancel_callback(callback: CallbackQuery):
     await callback.answer("Закрытие отменено.")
     await callback.message.answer(
         "Сопровождение сделки продолжается."
@@ -3140,7 +4148,7 @@ async def close_cancel_callback(callback):
 
 
 @router.callback_query(F.data.startswith("close_confirm:"))
-async def close_confirm_callback(callback):
+async def close_confirm_callback(callback: CallbackQuery):
     try:
         trade_id = int(callback.data.split(":")[1])
     except (ValueError, IndexError):
@@ -3164,7 +4172,8 @@ async def close_confirm_callback(callback):
 
     success, result = await close_trade_record(
         trade, exit_price,
-        "Пользователь подтвердил закрытие"
+        "Пользователь подтвердил закрытие",
+        exec_type="manual_close"
     )
 
     await callback.answer(
@@ -3176,7 +4185,7 @@ async def close_confirm_callback(callback):
 
 
 @router.callback_query(F.data.startswith("tp1_confirm:"))
-async def tp1_confirm_callback(callback):
+async def tp1_confirm_callback(callback: CallbackQuery):
     try:
         trade_id = int(callback.data.split(":")[1])
     except (ValueError, IndexError):
@@ -3193,31 +4202,60 @@ async def tp1_confirm_callback(callback):
         await callback.answer("TP1 уже подтверждён.")
         return
 
+    qty_full = safe_float(trade.get("position_size"), 0.0)
+    qty_tp1 = qty_full * (TP1_CLOSE_PERCENT / 100.0)
+    tp1_price = safe_float(trade.get("tp1"), safe_float(trade.get("current_price"), 0.0))
+    tp1_fee = qty_tp1 * tp1_price * TAKER_FEE_RATE if tp1_price > 0 else 0.0
+    prev_fees = safe_float(trade.get("total_fees_paid"), 0.0)
+    now = utc_text()
+
     with db() as conn:
         conn.execute("""
             UPDATE trades
             SET tp1_hit = 1,
-                remaining_percent = 30,
+                remaining_percent = ?,
+                tp1_fill_price = ?,
+                tp1_fill_qty = ?,
+                tp1_fill_fee = ?,
+                tp1_closed_at = ?,
+                total_fees_paid = ?,
                 last_recommendation = ?,
                 updated_at = ?
             WHERE id = ? AND user_id = ?
         """, (
+            TP2_CLOSE_PERCENT,
+            tp1_price,
+            qty_tp1,
+            tp1_fee,
+            now,
+            prev_fees + tp1_fee,
             "TP1 подтверждён пользователем. "
             "Рекомендуется вручную перенести SL на цену входа.",
-            utc_text(),
+            now,
             trade_id,
             callback.from_user.id
         ))
 
+    save_trade_execution(
+        trade_id=trade_id,
+        user_id=callback.from_user.id,
+        exec_type="tp1_partial",
+        price=tp1_price,
+        quantity=qty_tp1,
+        share_percent=TP1_CLOSE_PERCENT,
+        fee_usdt=tp1_fee,
+        executed_at=now
+    )
+
     save_trade_event(
         trade_id, callback.from_user.id, "tp1_confirmed",
-        "Пользователь подтвердил закрытие 70% позиции"
+        "Пользователь подтвердил закрытие 70% позиции", tp1_price
     )
 
     await callback.message.answer(
         "✅ TP1 подтверждён.\n\n"
-        "Зафиксировано закрытие 70% позиции.\n"
-        "Остаток: 30%.\n\n"
+        f"Зафиксировано закрытие {TP1_CLOSE_PERCENT:.0f}% позиции.\n"
+        f"Остаток: {TP2_CLOSE_PERCENT:.0f}%.\n\n"
         "Рекомендация: вручную перенести стоп-лосс "
         "на фактическую цену входа в BingX.\n"
         "Бот не перемещает стоп автоматически."
@@ -3227,7 +4265,7 @@ async def tp1_confirm_callback(callback):
 
 
 @router.callback_query(F.data.startswith("tp2_cancel:"))
-async def tp2_cancel_callback(callback):
+async def tp2_cancel_callback(callback: CallbackQuery):
     await callback.answer("Подтверждение отменено.")
     await callback.message.answer(
         "Сделка остаётся под сопровождением."
@@ -3235,7 +4273,7 @@ async def tp2_cancel_callback(callback):
 
 
 @router.callback_query(F.data.startswith("tp2_confirm:"))
-async def tp2_confirm_callback(callback):
+async def tp2_confirm_callback(callback: CallbackQuery):
     try:
         trade_id = int(callback.data.split(":")[1])
     except (ValueError, IndexError):
@@ -3266,7 +4304,8 @@ async def tp2_confirm_callback(callback):
 
     success, result = await close_trade_record(
         trade, exit_price,
-        "Пользователь подтвердил исполнение TP2"
+        "Пользователь подтвердил исполнение TP2",
+        exec_type="tp2_final"
     )
 
     await callback.answer(
@@ -3278,7 +4317,7 @@ async def tp2_confirm_callback(callback):
 
 
 @router.callback_query(F.data.startswith("sl_keep:"))
-async def sl_keep_callback(callback):
+async def sl_keep_callback(callback: CallbackQuery):
     try:
         trade_id = int(callback.data.split(":")[1])
     except (ValueError, IndexError):
@@ -3298,7 +4337,7 @@ async def sl_keep_callback(callback):
 
 
 @router.callback_query(F.data.startswith("sl_confirm:"))
-async def sl_confirm_callback(callback):
+async def sl_confirm_callback(callback: CallbackQuery):
     try:
         trade_id = int(callback.data.split(":")[1])
     except (ValueError, IndexError):
@@ -3322,7 +4361,8 @@ async def sl_confirm_callback(callback):
 
     success, result = await close_trade_record(
         trade, exit_price,
-        "Пользователь подтвердил закрытие по SL"
+        "Пользователь подтвердил закрытие по SL",
+        exec_type="sl_close"
     )
 
     await callback.answer(
@@ -3334,7 +4374,7 @@ async def sl_confirm_callback(callback):
 
 
 # ============================================================
-# 34. BACKGROUND MARKET SCAN
+# 34. BACKGROUND MARKET SCAN & FAIR BACKTEST ENGINE
 # ============================================================
 
 async def background_market_scan():
@@ -3342,7 +4382,9 @@ async def background_market_scan():
 
     while True:
         try:
-            signals = await scan_market()
+            expire_stale_signals()
+            # Фоновый скан по умолчанию формирует сигналы базовой стратегии A
+            signals = await scan_market(strategy_version=DEFAULT_STRATEGY)
 
             for signal in signals:
                 await broadcast_signal(signal)
@@ -3350,7 +4392,227 @@ async def background_market_scan():
         except Exception:
             logging.exception("Ошибка фонового анализа рынка")
 
-        await asyncio.sleep(max(MARKET_SCAN_INTERVAL * 60, 1800))
+        await asyncio.sleep(max(MARKET_SCAN_INTERVAL_SEC, 60))
+
+
+def simulate_strategy_on_frames(
+    strategy_version: str,
+    market: str,
+    symbol: str,
+    frames: dict[str, pd.DataFrame],
+    initial_balance: float = 1000.0,
+    synthetic_spread_pct: float = DEFAULT_SYNTHETIC_SPREAD_PCT,
+    slippage_pct: float = DEFAULT_SLIPPAGE_PCT,
+) -> dict[str, Any]:
+    """
+    Виртуальный бэктест (строго отделён от живого бота) на закрытых свечах без look-ahead bias:
+    - LONG вход по Ask, выход по Bid;
+    - SHORT вход по Bid, выход по Ask;
+    - синтетический спред при отсутствии Bid/Ask помечается как модельный;
+    - частичные выходы 70% на TP1 (1.8R) и 30% на TP2 (3.0R) или стоп/БУ при консервативной обработке;
+    - максимум MAX_ACTIVE_TRADES (5) одновременных позиций в отдельном портфеле стратегии.
+    """
+    m15_full = frames.get("15m")
+    if m15_full is None or len(m15_full) <= MIN_CANDLE_ROWS:
+        return {
+            "strategy": strategy_version,
+            "is_modeled_spread": True,
+            "net_pnl": 0.0,
+            "win_rate": 0.0,
+            "profit_factor": 0.0,
+            "max_drawdown": 0.0,
+            "avg_r": 0.0,
+            "signals_count": 0,
+            "trades_count": 0,
+            "reward_to_risk": 0.0,
+        }
+
+    balance = float(initial_balance)
+    peak_balance = balance
+    max_dd = 0.0
+    open_positions: list[dict[str, Any]] = []
+    closed_pnls: list[float] = []
+    closed_rs: list[float] = []
+    signals_count = 0
+
+    for idx in range(MIN_CANDLE_ROWS, len(m15_full)):
+        cutoff_ms = int(m15_full.iloc[idx]["open_time"])
+        sub_frames = {
+            tf: df[df["open_time"] <= cutoff_ms].reset_index(drop=True)
+            for tf, df in frames.items()
+            if df is not None and not df.empty
+        }
+        if any(len(sub_frames.get(tf, [])) < MIN_CANDLE_ROWS for tf in ("5m", "15m", "1h", "4h")):
+            continue
+
+        bar = sub_frames["15m"].iloc[-1]
+        b_high = safe_float(bar["high"])
+        b_low = safe_float(bar["low"])
+        b_open = safe_float(bar["open"])
+        b_close = safe_float(bar["close"])
+        half_sp = b_close * (synthetic_spread_pct / 200.0)
+        bid_bar = b_close - half_sp
+        ask_bar = b_close + half_sp
+
+        # 1. Сопровождение открытых виртуальных позиций по текущему бару
+        still_open: list[dict[str, Any]] = []
+        for pos in open_positions:
+            long_pos = is_long_side(pos["side"])
+            # Консервативный порядок при одновременном достижении SL и TP без младшего подтверждения:
+            # проверяем стоп первым
+            sl_px = pos["sl"]
+            tp1_px = pos["tp1"]
+            tp2_px = pos["tp2"]
+
+            if long_pos:
+                hit_sl = (b_low - half_sp) <= sl_px
+                hit_tp1 = (b_high - half_sp) >= tp1_px
+                hit_tp2 = (b_high - half_sp) >= tp2_px
+            else:
+                hit_sl = (b_high + half_sp) >= sl_px
+                hit_tp1 = (b_low + half_sp) <= tp1_px
+                hit_tp2 = (b_low + half_sp) <= tp2_px
+
+            if hit_sl:
+                exit_px = (b_open - half_sp) if (long_pos and b_open < sl_px) else (
+                    (b_open + half_sp) if (not long_pos and b_open > sl_px) else sl_px
+                )
+                exit_px *= (1.0 - slippage_pct / 100.0) if long_pos else (1.0 + slippage_pct / 100.0)
+                rem_qty = pos["qty"] * (pos["rem_pct"] / 100.0)
+                pnl_leg = rem_qty * (exit_px - pos["entry"]) * (1.0 if long_pos else -1.0)
+                fee_leg = rem_qty * exit_px * TAKER_FEE_RATE
+                total_net = pos["realized_gross"] + pnl_leg - pos["fees"] - fee_leg
+                balance += pnl_leg - fee_leg
+                closed_pnls.append(total_net)
+                closed_rs.append(total_net / pos["init_risk"] if pos["init_risk"] > 0 else 0.0)
+                continue
+
+            # Если достигнут TP1 (и ещё не зафиксирован)
+            if hit_tp1 and not pos["tp1_hit"]:
+                qty_70 = pos["qty"] * (TP1_CLOSE_PERCENT / 100.0)
+                tp1_exec = tp1_px * ((1.0 - slippage_pct / 100.0) if long_pos else (1.0 + slippage_pct / 100.0))
+                leg1 = qty_70 * (tp1_exec - pos["entry"]) * (1.0 if long_pos else -1.0)
+                fee1 = qty_70 * tp1_exec * TAKER_FEE_RATE
+                pos["realized_gross"] += leg1
+                pos["fees"] += fee1
+                pos["tp1_hit"] = True
+                pos["rem_pct"] = TP2_CLOSE_PERCENT
+                # Переводим SL в безубыток после TP1
+                pos["sl"] = pos["entry"]
+                balance += leg1 - fee1
+
+                # Консервативно не засчитываем TP2 на том же баре без подтверждения последовательности
+                still_open.append(pos)
+                continue
+
+            if pos["tp1_hit"] and hit_tp2:
+                qty_30 = pos["qty"] * (pos["rem_pct"] / 100.0)
+                tp2_exec = tp2_px * ((1.0 - slippage_pct / 100.0) if long_pos else (1.0 + slippage_pct / 100.0))
+                leg2 = qty_30 * (tp2_exec - pos["entry"]) * (1.0 if long_pos else -1.0)
+                fee2 = qty_30 * tp2_exec * TAKER_FEE_RATE
+                total_net = pos["realized_gross"] + leg2 - pos["fees"] - fee2
+                balance += leg2 - fee2
+                closed_pnls.append(total_net)
+                closed_rs.append(total_net / pos["init_risk"] if pos["init_risk"] > 0 else 0.0)
+                continue
+
+            still_open.append(pos)
+
+        open_positions = still_open
+        peak_balance = max(peak_balance, balance)
+        dd = peak_balance - balance
+        if dd > max_dd:
+            max_dd = dd
+
+        # 2. Генерация нового сигнала и вход (до MAX_ACTIVE_TRADES)
+        if len(open_positions) < MAX_ACTIVE_TRADES:
+            sig = (
+                build_signal_b(market, symbol, sub_frames, quote={"spread_pct": synthetic_spread_pct})
+                if strategy_version == STRATEGY_B
+                else build_signal_a_v92(market, symbol, sub_frames)
+            )
+            if sig:
+                signals_count += 1
+                long_s = is_long_side(sig["side"])
+                # Вход: LONG по Ask (+slippage), SHORT по Bid (-slippage)
+                raw_entry = ask_bar if long_s else bid_bar
+                entry_exec = raw_entry * ((1.0 + slippage_pct / 100.0) if long_s else (1.0 - slippage_pct / 100.0))
+                dist = abs(safe_float(sig["entry"]) - safe_float(sig["sl"]))
+                if dist > 0 and entry_exec > 0:
+                    sl_exec = (entry_exec - dist) if long_s else (entry_exec + dist)
+                    tp1_exec = (entry_exec + dist * TP1_R) if long_s else (entry_exec - dist * TP1_R)
+                    tp2_exec = (entry_exec + dist * TP2_R) if long_s else (entry_exec - dist * TP2_R)
+                    if min(sl_exec, tp1_exec, tp2_exec) > 0:
+                        sizing = calculate_position_size(balance, entry_exec, sl_exec, market)
+                        entry_fee = sizing["notional"] * TAKER_FEE_RATE
+                        balance -= entry_fee
+                        open_positions.append({
+                            "side": sig["side"],
+                            "entry": entry_exec,
+                            "sl": sl_exec,
+                            "tp1": tp1_exec,
+                            "tp2": tp2_exec,
+                            "qty": sizing["quantity"],
+                            "rem_pct": 100.0,
+                            "tp1_hit": False,
+                            "init_risk": sizing["risk_amount"],
+                            "realized_gross": 0.0,
+                            "fees": entry_fee,
+                        })
+
+    wins = [p for p in closed_pnls if p > 0]
+    losses = [abs(p) for p in closed_pnls if p < 0]
+    gross_profit = sum(wins)
+    gross_loss = sum(losses)
+    pf = (gross_profit / gross_loss) if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
+    avg_win = (gross_profit / len(wins)) if wins else 0.0
+    avg_loss = (gross_loss / len(losses)) if losses else 0.0
+
+    return {
+        "strategy": strategy_version,
+        "is_modeled_spread": True,
+        "net_pnl": balance - initial_balance,
+        "win_rate": (len(wins) / len(closed_pnls) * 100.0) if closed_pnls else 0.0,
+        "profit_factor": pf,
+        "max_drawdown": max_dd,
+        "avg_r": (sum(closed_rs) / len(closed_rs)) if closed_rs else 0.0,
+        "signals_count": signals_count,
+        "trades_count": len(closed_pnls),
+        "reward_to_risk": (avg_win / avg_loss) if avg_loss > 0 else 0.0,
+    }
+
+
+def compare_strategies_fairly(
+    market: str,
+    symbol: str,
+    frames: dict[str, pd.DataFrame],
+    oos_ratio: float = 0.3,
+    initial_balance: float = 1000.0,
+) -> dict[str, Any]:
+    """
+    Сравнивает Стратегию A и Стратегию B на одинаковых данных и условиях
+    в отдельных портфелях, включая проверку на отложенной Out-Of-Sample (OOS) выборке.
+    """
+    m15 = frames["15m"]
+    split_idx = max(MIN_CANDLE_ROWS + 1, int(len(m15) * (1.0 - oos_ratio)))
+    oos_cutoff = int(m15.iloc[split_idx]["open_time"])
+
+    oos_frames = {
+        tf: df[df["open_time"] >= oos_cutoff].reset_index(drop=True)
+        for tf, df in frames.items()
+        if df is not None and not df.empty
+    }
+
+    return {
+        "full_sample": {
+            "A": simulate_strategy_on_frames(STRATEGY_A, market, symbol, frames, initial_balance=initial_balance),
+            "B": simulate_strategy_on_frames(STRATEGY_B, market, symbol, frames, initial_balance=initial_balance),
+        },
+        "out_of_sample": {
+            "A": simulate_strategy_on_frames(STRATEGY_A, market, symbol, oos_frames, initial_balance=initial_balance),
+            "B": simulate_strategy_on_frames(STRATEGY_B, market, symbol, oos_frames, initial_balance=initial_balance),
+        },
+    }
 
 
 # ============================================================
@@ -3364,6 +4626,7 @@ async def main():
 
     logging.info("Запуск Trading Bot v9.2")
 
+    freeze_source_snapshot()
     init_db()
     ensure_part3_schema()
 
