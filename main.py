@@ -1,13 +1,11 @@
 # ============================================================
 # TRADING BOT v9.2 (FIXED)
-# PART 1 / 4
-# FOUNDATION, CONFIGURATION, DATABASE
+# FULL SINGLE-FILE EDITION
 # ============================================================
 
 import os
 import time
 import math
-import json
 import asyncio
 import logging
 import sqlite3
@@ -24,10 +22,8 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import Command
 from aiogram.types import (
-    Message,
-    CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     ReplyKeyboardMarkup,
@@ -239,14 +235,20 @@ def market_name(market: str) -> str:
     return {
         "spot": "SPOT",
         "swap": "USDT-M Futures"
-    }.get(market, market.upper())
+    }.get(str(market).lower(), str(market).upper())
 
 
 def side_name(side: str) -> str:
     return {
         "BUY": "LONG / BUY",
-        "SELL": "SHORT / SELL"
-    }.get(side, side)
+        "LONG": "LONG / BUY",
+        "SELL": "SHORT / SELL",
+        "SHORT": "SHORT / SELL"
+    }.get(str(side).upper(), str(side))
+
+
+def is_long_side(side: str) -> bool:
+    return str(side).strip().lower() in ("buy", "long")
 
 
 # ============================================================
@@ -358,7 +360,8 @@ def init_db() -> None:
                 score INTEGER,
                 reasons TEXT,
                 setup_key TEXT,
-                status TEXT DEFAULT 'NEW'
+                status TEXT DEFAULT 'NEW',
+                result TEXT
             )
         """)
 
@@ -381,11 +384,13 @@ def init_db() -> None:
                 remaining_percent REAL DEFAULT 100,
                 tp1_hit INTEGER DEFAULT 0,
                 tp2_hit INTEGER DEFAULT 0,
-                status TEXT DEFAULT 'ACTIVE',
+                status TEXT DEFAULT 'active',
                 last_recommendation TEXT,
                 opened_at TEXT,
                 closed_at TEXT,
-                updated_at TEXT
+                updated_at TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(user_id),
+                FOREIGN KEY(signal_id) REFERENCES signals(id)
             )
         """)
 
@@ -462,7 +467,7 @@ def init_db() -> None:
                 "remaining_percent": "REAL DEFAULT 100",
                 "tp1_hit": "INTEGER DEFAULT 0",
                 "tp2_hit": "INTEGER DEFAULT 0",
-                "status": "TEXT DEFAULT 'ACTIVE'",
+                "status": "TEXT DEFAULT 'active'",
                 "last_recommendation": "TEXT",
                 "opened_at": "TEXT",
                 "closed_at": "TEXT",
@@ -496,6 +501,13 @@ def init_db() -> None:
             for column, definition in columns.items():
                 ensure_column(con, table, column, definition)
 
+        # Нормализуем регистр статуса активных сделок для совместимости со старыми записями
+        con.execute("""
+            UPDATE trades
+            SET status = LOWER(status)
+            WHERE status IN ('ACTIVE', 'OPEN', 'CLOSED')
+        """)
+
         con.execute("""
             CREATE INDEX IF NOT EXISTS
             idx_signals_created
@@ -524,16 +536,6 @@ def init_db() -> None:
         "База данных готова: %s",
         DB_PATH
     )
-
-
-# ============================================================
-# END OF PART 1 / 4
-# ============================================================
-# ============================================================
-# TRADING BOT v9.2 (FIXED)
-# PART 2 / 4
-# BINGX API, CANDLES, INDICATORS, SIGNAL STRATEGY
-# ============================================================
 
 
 # ============================================================
@@ -633,9 +635,11 @@ async def api_get(
                                 )
 
                         else:
+                            system_status["api_status"] = "OK"
                             return payload
 
                     else:
+                        system_status["api_status"] = "OK"
                         return payload
 
             if last_error is not None:
@@ -658,7 +662,9 @@ async def api_get(
         except asyncio.CancelledError:
             raise
 
-        except MarketError:
+        except MarketError as exc:
+            system_status["api_status"] = f"Ошибка ({exc})"
+            system_status["last_error"] = str(exc)
             raise
 
         except (
@@ -667,6 +673,8 @@ async def api_get(
         ) as exc:
 
             last_error = MarketError(str(exc))
+            system_status["api_status"] = "Ошибка сети"
+            system_status["last_error"] = str(exc)
 
             if attempt < 3:
                 await asyncio.sleep(
@@ -1245,6 +1253,12 @@ def save_signal(
 
     now = utc_text()
 
+    reasons_val = sig.get("reasons", "")
+    if isinstance(reasons_val, (list, tuple)):
+        reasons_text = "; ".join(str(item) for item in reasons_val)
+    else:
+        reasons_text = str(reasons_val)
+
     with db() as con:
 
         columns = table_columns(con, "signals")
@@ -1287,7 +1301,7 @@ def save_signal(
             "tp": sig["tp2"],
             "rr": sig["rr"],
             "score": sig["score"],
-            "reasons": "; ".join(sig["reasons"]),
+            "reasons": reasons_text,
             "setup_key": sig["setup_key"],
             "status": "NEW"
         }
@@ -1313,16 +1327,6 @@ def save_signal(
         cur = con.execute(sql, tuple(values[column] for column in available))
 
         return int(cur.lastrowid)
-
-
-# ============================================================
-# END OF PART 2 / 4
-# ============================================================
-# ============================================================
-# TRADING BOT v9.2 (FIXED)
-# PART 3 / 4
-# MARKET SCANNER, TELEGRAM, PERSONAL TRADES
-# ============================================================
 
 
 # ============================================================
@@ -1400,7 +1404,7 @@ def confirm_keyboard(action, trade_id):
 # 18. USER STATES AND DATABASE HELPERS
 # ============================================================
 
-user_states = {}
+user_states: dict[int, dict[str, Any]] = {}
 
 
 def row_to_dict(row):
@@ -1564,7 +1568,6 @@ def ensure_part3_schema():
                 "ensure_part3_schema: таблица trades не найдена. "
                 "Схема Part 3 будет применена после init_db()."
             )
-            conn.commit()
             return
 
         required_trade_columns = {
@@ -1594,8 +1597,6 @@ def ensure_part3_schema():
                     f"ALTER TABLE trades ADD COLUMN {column} {definition}"
                 )
 
-        conn.commit()
-
 
 def save_trade_event(
     trade_id,
@@ -1616,13 +1617,15 @@ def save_trade_event(
             user_id,
             event_type,
             str(message),
-            safe_float(price, None),
+            safe_float(price, 0.0) if price is not None else None,
             utc_text()
         ))
-        conn.commit()
 
 
 def register_user(user):
+    if user is None:
+        return
+
     with db() as conn:
         conn.execute("""
             INSERT OR IGNORE INTO users (
@@ -1645,8 +1648,6 @@ def register_user(user):
             RISK_PERCENT,
             FUTURES_LEVERAGE
         ))
-
-        conn.commit()
 
 
 def set_user_balance(user_id, market, balance):
@@ -1676,7 +1677,6 @@ def set_user_balance(user_id, market, balance):
             balance,
             utc_text()
         ))
-        conn.commit()
 
 
 def get_user_balance(user_id, market):
@@ -1687,7 +1687,7 @@ def get_user_balance(user_id, market):
             SELECT balance
             FROM user_balances
             WHERE user_id = ? AND market = ?
-        """, (user_id, market)).fetchone()
+        """, (user_id, str(market).lower())).fetchone()
 
     if not row:
         return 0.0
@@ -1703,8 +1703,8 @@ def get_active_trades(user_id):
             SELECT *
             FROM trades
             WHERE user_id = ?
-              AND status IN ('active', 'open')
-            ORDER BY opened_at DESC
+              AND LOWER(COALESCE(status, '')) IN ('active', 'open')
+            ORDER BY opened_at DESC, id DESC
         """, (user_id,)).fetchall()
 
     return [row_to_dict(row) for row in rows]
@@ -1735,6 +1735,7 @@ def calculate_position_size(balance, entry, stop_loss, market):
     balance = safe_float(balance, 0)
     entry = safe_float(entry, 0)
     stop_loss = safe_float(stop_loss, 0)
+    market = str(market).lower()
 
     if balance <= 0 or entry <= 0 or stop_loss <= 0:
         raise ValueError("Некорректный баланс или торговые цены")
@@ -1804,7 +1805,7 @@ def create_personal_trade(user_id, signal_id, actual_entry):
         active_count = conn.execute("""
             SELECT COUNT(*) FROM trades
             WHERE user_id = ?
-              AND status IN ('active', 'open')
+              AND LOWER(COALESCE(status, '')) IN ('active', 'open')
         """, (user_id,)).fetchone()[0]
 
         if active_count >= MAX_ACTIVE_TRADES:
@@ -1845,7 +1846,7 @@ def create_personal_trade(user_id, signal_id, actual_entry):
         if stop_distance <= 0:
             return None, "Невозможно рассчитать дистанцию стоп-лосса."
 
-        if side in ("buy", "long"):
+        if is_long_side(side):
             actual_sl = actual_entry - stop_distance
             tp1 = actual_entry + stop_distance * TP1_R
             tp2 = actual_entry + stop_distance * TP2_R
@@ -1853,6 +1854,9 @@ def create_personal_trade(user_id, signal_id, actual_entry):
             actual_sl = actual_entry + stop_distance
             tp1 = actual_entry - stop_distance * TP1_R
             tp2 = actual_entry - stop_distance * TP2_R
+
+        if min(actual_sl, tp1, tp2) <= 0:
+            return None, "При указанной цене входа уровни SL/TP выходят в некорректную зону."
 
         sizing = calculate_position_size(
             balance,
@@ -1904,8 +1908,6 @@ def create_personal_trade(user_id, signal_id, actual_entry):
             actual_entry, now
         ))
 
-        conn.commit()
-
     return trade_id, None
 
 
@@ -1929,11 +1931,13 @@ def update_trade_field(trade_id, user_id, field, value):
     if not trade:
         return False, "Сделка не найдена."
 
-    if trade["status"] not in ("active", "open"):
+    if str(trade.get("status", "")).lower() not in ("active", "open"):
         return False, "Эта сделка уже не активна."
 
     market = str(trade["market"]).lower()
     balance = safe_float(trade.get("balance_snapshot"), 0)
+    if balance <= 0:
+        balance = get_user_balance(user_id, market)
 
     if field == "actual_entry":
         old_entry = safe_float(trade["actual_entry"], 0)
@@ -1943,7 +1947,7 @@ def update_trade_field(trade_id, user_id, field, value):
         if distance <= 0:
             return False, "Не удалось определить дистанцию стопа."
 
-        if trade["side"] in ("buy", "long"):
+        if is_long_side(trade["side"]):
             new_sl = value - distance
             new_tp1 = value + distance * TP1_R
             new_tp2 = value + distance * TP2_R
@@ -1951,6 +1955,9 @@ def update_trade_field(trade_id, user_id, field, value):
             new_sl = value + distance
             new_tp1 = value - distance * TP1_R
             new_tp2 = value - distance * TP2_R
+
+        if min(new_sl, new_tp1, new_tp2) <= 0:
+            return False, "Новая цена входа даёт некорректные уровни SL/TP."
 
         sizing = calculate_position_size(
             balance, value, new_sl, market
@@ -1975,7 +1982,13 @@ def update_trade_field(trade_id, user_id, field, value):
                 utc_text(),
                 trade_id, user_id
             ))
-            conn.commit()
+
+            # При изменении цены входа позволяем заново отслеживать касания уровней
+            conn.execute("""
+                DELETE FROM trade_events
+                WHERE trade_id = ? AND user_id = ?
+                  AND event_type IN ('touch_tp1', 'touch_tp2', 'touch_sl')
+            """, (trade_id, user_id))
 
         save_trade_event(
             trade_id, user_id, "entry_updated",
@@ -1987,10 +2000,10 @@ def update_trade_field(trade_id, user_id, field, value):
     if field == "sl":
         entry = safe_float(trade["actual_entry"], 0)
 
-        if trade["side"] in ("buy", "long") and value >= entry:
+        if is_long_side(trade["side"]) and value >= entry:
             return False, "Для LONG стоп-лосс должен быть ниже входа."
 
-        if trade["side"] not in ("buy", "long") and value <= entry:
+        if not is_long_side(trade["side"]) and value <= entry:
             return False, "Для SHORT стоп-лосс должен быть выше входа."
 
         sizing = calculate_position_size(
@@ -2013,7 +2026,6 @@ def update_trade_field(trade_id, user_id, field, value):
                 utc_text(),
                 trade_id, user_id
             ))
-            conn.commit()
 
         save_trade_event(
             trade_id, user_id, "sl_updated",
@@ -2133,6 +2145,8 @@ async def analyze_market_symbol(market, symbol):
 
 async def scan_market():
     found_signals = []
+    system_status["scan_count"] = int(system_status.get("scan_count", 0)) + 1
+    system_status["last_scan"] = utc_text()
 
     for market in MARKETS:
         for symbol in SYMBOLS:
@@ -2172,6 +2186,9 @@ async def scan_market():
                     market, symbol
                 )
 
+    system_status["signals_count"] = (
+        int(system_status.get("signals_count", 0)) + len(found_signals)
+    )
     return found_signals
 
 
@@ -2186,6 +2203,13 @@ def signal_text(signal):
     tp1 = safe_float(signal.get("tp1"), 0)
     tp2 = safe_float(signal.get("tp2"), signal.get("tp", 0))
 
+    raw_reasons = signal.get("reasons", "")
+    if isinstance(raw_reasons, (list, tuple)):
+        reasons_formatted = "\n".join(f"• {r}" for r in raw_reasons if r)
+    else:
+        parts = [p.strip() for p in str(raw_reasons).split(";") if p.strip()]
+        reasons_formatted = "\n".join(f"• {p}" for p in parts) if parts else "—"
+
     return (
         f"🚨 <b>НОВЫЙ ТОРГОВЫЙ СИГНАЛ</b>\n\n"
         f"Монета: <b>{signal['symbol']}</b>\n"
@@ -2199,7 +2223,7 @@ def signal_text(signal):
         f"закрытие {TP2_CLOSE_PERCENT:.0f}%\n\n"
         f"Оценка сигнала: {signal.get('score', 0)}\n"
         f"Соотношение риск/прибыль (TP2): {signal.get('rr', 0):.2f}\n\n"
-        f"Причины:\n{signal.get('reasons', '')}\n\n"
+        f"Причины:\n{reasons_formatted}\n\n"
         f"⚠️ Это аналитический сигнал, а не исполненная сделка. "
         f"Сопровождение начнётся только после подтверждения входа "
         f"и ввода фактической цены."
@@ -2457,16 +2481,6 @@ async def handle_user_text(message):
             await message.answer(result)
 
         return
-
-
-# ============================================================
-# END OF PART 3 / 4
-# ============================================================
-# ============================================================
-# TRADING BOT v9.2 (FIXED)
-# PART 4 / 4
-# MONITORING, CONFIRMATION, STARTUP
-# ============================================================
 
 
 # ============================================================
@@ -2771,10 +2785,12 @@ async def system_status_handler(message):
         f"Реальные ордера: отключены\n"
         f"Spot: включён в анализе\n"
         f"USDT-M Futures: включён в анализе\n"
+        f"API BingX: {system_status.get('api_status', 'Не проверено')}\n"
+        f"Последний скан: {system_status.get('last_scan') or '—'}\n"
         f"Лимит активных сделок: {MAX_ACTIVE_TRADES}\n"
         f"Твои активные сделки: {active}\n\n"
-        "Цены и сигналы зависят от доступности публичного API BingX.\n"
-        "Состояние соединения уточняется фоновым мониторингом."
+        "Цены и сигналы зависят от доступности публичного API BingX.",
+        parse_mode="HTML"
     )
 
 
@@ -2806,6 +2822,7 @@ async def get_live_price(market, symbol):
                 price = safe_float(data.get(key), 0)
 
                 if price > 0:
+                    latest_prices[(market, symbol)] = price
                     return price
 
     except Exception:
@@ -2925,40 +2942,37 @@ async def monitor_one_trade(trade):
             SET current_price = ?, updated_at = ?
             WHERE id = ? AND user_id = ?
         """, (price, utc_text(), trade_id, user_id))
-        conn.commit()
-
-    side = str(trade["side"]).lower()
 
     sl = safe_float(trade["sl"], 0)
     tp1 = safe_float(trade["tp1"], 0)
     tp2 = safe_float(trade["tp2"], 0)
 
-    if side in ("buy", "long"):
-        if price <= sl:
+    if is_long_side(trade["side"]):
+        if sl > 0 and price <= sl:
             await notify_trade_touch(trade, "touch_sl", price)
             return
 
-        if price >= tp2:
-            if not trade.get("tp1_hit"):
+        if tp2 > 0 and price >= tp2:
+            if not trade.get("tp1_hit") and tp1 > 0:
                 await notify_trade_touch(trade, "touch_tp1", tp1)
             await notify_trade_touch(trade, "touch_tp2", price)
             return
 
-        if price >= tp1 and not trade.get("tp1_hit"):
+        if tp1 > 0 and price >= tp1 and not trade.get("tp1_hit"):
             await notify_trade_touch(trade, "touch_tp1", price)
 
     else:
-        if price >= sl:
+        if sl > 0 and price >= sl:
             await notify_trade_touch(trade, "touch_sl", price)
             return
 
-        if price <= tp2:
-            if not trade.get("tp1_hit"):
+        if tp2 > 0 and price <= tp2:
+            if not trade.get("tp1_hit") and tp1 > 0:
                 await notify_trade_touch(trade, "touch_tp1", tp1)
             await notify_trade_touch(trade, "touch_tp2", price)
             return
 
-        if price <= tp1 and not trade.get("tp1_hit"):
+        if tp1 > 0 and price <= tp1 and not trade.get("tp1_hit"):
             await notify_trade_touch(trade, "touch_tp1", price)
 
 
@@ -2972,8 +2986,8 @@ async def background_monitor():
 
                 rows = conn.execute("""
                     SELECT * FROM trades
-                    WHERE status IN ('active', 'open')
-                    ORDER BY opened_at
+                    WHERE LOWER(COALESCE(status, '')) IN ('active', 'open')
+                    ORDER BY opened_at, id
                 """).fetchall()
 
             for row in rows:
@@ -3008,15 +3022,11 @@ async def close_trade_record(trade, exit_price, reason):
     if entry <= 0 or initial_sl <= 0 or quantity <= 0:
         return False, "Недостаточно данных для расчёта результата."
 
-    if exit_price is None or safe_float(exit_price, 0) <= 0:
+    exit_price = safe_float(exit_price, 0)
+    if exit_price <= 0:
         return False, "Нет корректной цены выхода."
 
-    exit_price = safe_float(exit_price, 0)
-
-    if trade["side"] in ("buy", "long"):
-        direction = 1
-    else:
-        direction = -1
+    direction = 1 if is_long_side(trade["side"]) else -1
 
     initial_risk_per_unit = abs(entry - initial_sl)
 
@@ -3082,8 +3092,6 @@ async def close_trade_record(trade, exit_price, reason):
             pnl_percent, pnl_r, reason,
             trade["opened_at"], now
         ))
-
-        conn.commit()
 
     save_trade_event(
         trade_id, user_id, "closed", reason, exit_price
@@ -3200,7 +3208,6 @@ async def tp1_confirm_callback(callback):
             trade_id,
             callback.from_user.id
         ))
-        conn.commit()
 
     save_trade_event(
         trade_id, callback.from_user.id, "tp1_confirmed",
@@ -3371,7 +3378,10 @@ async def main():
             "Dispatcher не создан. Проверь инициализацию части 1."
         )
 
-    dp.include_router(router)
+    if router.parent_router is None:
+        dp.include_router(router)
+
+    system_status["started"] = True
 
     async with aiohttp.ClientSession() as session:
         http_session = session
@@ -3386,6 +3396,8 @@ async def main():
             await dp.start_polling(bot)
 
         finally:
+            system_status["started"] = False
+
             for task in background_tasks:
                 task.cancel()
 
@@ -3403,8 +3415,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-# ============================================================
-# END OF PART 4 / 4
-# ============================================================
