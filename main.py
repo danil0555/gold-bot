@@ -1804,9 +1804,14 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
                                  scan_no, symbol, signal.get("side"),
                                  safe_float(signal.get("quality_score")), safe_float(signal.get("net_rr")))
                         if len(found) >= MAX_SIGNALS_PER_CYCLE:
-                            log.info("SCAN #%s reached MAX_SIGNALS_PER_CYCLE=%s; B signals capped, "
-                                     "continuing market-data collection for independent C/D/E checks",
-                                     scan_no, MAX_SIGNALS_PER_CYCLE)
+                            if ENABLE_ADDON_STRATEGIES:
+                                log.info("SCAN #%s reached MAX_SIGNALS_PER_CYCLE=%s; B signals capped, "
+                                         "continuing market-data collection for independent C/D/E checks",
+                                         scan_no, MAX_SIGNALS_PER_CYCLE)
+                            else:
+                                log.info("SCAN #%s reached MAX_SIGNALS_PER_CYCLE=%s; "
+                                         "stopping B-only scan", scan_no, MAX_SIGNALS_PER_CYCLE)
+                                break
                     else:
                         reason = "B: сигнал прошёл анализ, но не сохранён (дубликат/cooldown)"
                         reason_counts[reason] = reason_counts.get(reason, 0) + 1
