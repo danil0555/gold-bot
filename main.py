@@ -1,6 +1,6 @@
-# ============================================================
-# TRADING BOT v9.3 (SINGLE-FILE, PYTHON 3.13 + AIOGRAM 3 + SQLITE)
-# Strategy A (v9.2 baseline, unchanged) + Strategy B (scalper)
+============================================================
+# TRADING BOT v10.0 — USDT-M FUTURES SCALPING
+# Strict multi-timeframe signal filter; no personal trade monitoring
 # REAL EXCHANGE ORDER PLACEMENT IS STRICTLY DISABLED.
 # ============================================================
 
@@ -31,13 +31,9 @@ from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
-from aiogram.enums import ParseMode
 
 
 # ============================================================
@@ -51,7 +47,7 @@ if not BOT_TOKEN:
     raise RuntimeError("Не найден BOT_TOKEN. Добавь токен в файл .env")
 
 BOT_NAME = "Trading Bot"
-BOT_VERSION = "9.3"
+BOT_VERSION = "10.0"
 
 BASE = "https://open-api.bingx.com"
 
@@ -72,8 +68,8 @@ log = logging.getLogger("TradingBot")
 # 2. TRADING PARAMETERS
 # ============================================================
 
-MARKETS = ("spot", "swap")
-TIMEFRAMES = ("5m", "15m", "1h", "4h")
+MARKETS = ("swap",)
+TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h")
 
 TF_MS = {
     "1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
@@ -82,40 +78,41 @@ TF_MS = {
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
-MIN_SCORE = 6
 MIN_RR = 1.0
+MIN_SCALPER_RAW_SCORE = 7.0
+MIN_QUALITY_SCORE = 85.0
+MIN_NET_RR = 1.30
+MIN_SCALPER_ADX = 18.0
+MIN_VOLUME_RATIO = 0.85
+MIN_ATR_PCT = 0.08
+MAX_ATR_PCT = 1.50
+MAX_EXTENSION_ATR = 2.20
 
 TP1_R = 1.8
 TP2_R = 3.0
 
-TP1_CLOSE_PERCENT = 70.0
-TP2_CLOSE_PERCENT = 30.0
-
 RISK_PERCENT = 2.0
 FUTURES_LEVERAGE = 5
 
-MAX_ACTIVE_TRADES = 5
 MAX_SIGNALS_PER_CYCLE = 3
 
 KLINE_LIMIT = 300
 MIN_CANDLE_ROWS = 205
 
-MARKET_SCAN_INTERVAL_SEC = int(os.getenv("MARKET_SCAN_INTERVAL_SEC", "1800"))
-TRADE_MONITOR_INTERVAL_SEC = max(5, int(os.getenv("TRADE_MONITOR_INTERVAL_SEC", "15")))
+MARKET_SCAN_INTERVAL_SEC = 60  # пауза между завершёнными циклами; API-запросы ограничены rate limiter
 
-SIGNAL_COOLDOWN_MINUTES = 45
-SIGNAL_TTL_MINUTES = max(1, int(os.getenv("SIGNAL_TTL_MINUTES", "20")))
+SIGNAL_COOLDOWN_MINUTES = 30
+SIGNAL_TTL_MINUTES = 8
 MAX_ENTRY_DRIFT_R = 0.5
-MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.25"))
+MAX_SPREAD_PCT = 0.08
 
 MAKER_FEE_RATE = float(os.getenv("MAKER_FEE_RATE", "0.0002"))
 TAKER_FEE_RATE = float(os.getenv("TAKER_FEE_RATE", "0.0005"))
 DEFAULT_SYNTHETIC_SPREAD_PCT = float(os.getenv("DEFAULT_SYNTHETIC_SPREAD_PCT", "0.04"))
 DEFAULT_SLIPPAGE_PCT = float(os.getenv("DEFAULT_SLIPPAGE_PCT", "0.03"))
 
-STRATEGY_A = "A"
 STRATEGY_B = "B"
-DEFAULT_STRATEGY = STRATEGY_A
+DEFAULT_STRATEGY = STRATEGY_B
 
 REAL_TRADING_ENABLED = False
 
@@ -149,7 +146,6 @@ latest_prices: dict[tuple[str, str], float] = {}
 latest_quotes: dict[tuple[str, str], dict[str, Any]] = {}
 _unavailable_symbols: set[tuple[str, str]] = set()
 _insufficient_history: dict[tuple[str, str], float] = {}
-user_states: dict[int, dict[str, Any]] = {}
 background_tasks: list[asyncio.Task] = []
 
 system_status: dict[str, Any] = {
@@ -216,7 +212,7 @@ def format_price(value: Any) -> str:
     return f"{price:.8f}".rstrip("0").rstrip(".")
 
 def market_name(market: str) -> str:
-    return {"spot": "SPOT", "swap": "USDT-M Futures"}.get(str(market).lower(), str(market).upper())
+    return "USDT-M Futures" if str(market).lower() == "swap" else str(market).upper()
 
 def side_name(side: str) -> str:
     return {
@@ -227,13 +223,6 @@ def side_name(side: str) -> str:
 def is_long_side(side: str) -> bool:
     return str(side).strip().lower() in ("buy", "long")
 
-def normalize_trade_status(status: Any) -> str:
-    st = str(status or "active").strip().lower()
-    if st in ("active", "open"):
-        return "active"
-    if st == "closed":
-        return "closed"
-    return st
 
 def compute_file_sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -353,15 +342,7 @@ def init_db() -> None:
             risk_percent REAL DEFAULT 2.0,
             leverage INTEGER DEFAULT 5,
             notifications INTEGER DEFAULT 1,
-            strategy_version TEXT DEFAULT 'A',
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
-        )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS user_balances (
-            user_id INTEGER NOT NULL,
-            market TEXT NOT NULL,
-            balance REAL NOT NULL DEFAULT 0,
-            updated_at TEXT,
-            PRIMARY KEY (user_id, market),
+            strategy_version TEXT DEFAULT 'B',
             FOREIGN KEY(user_id) REFERENCES users(user_id)
         )""")
         con.execute("""CREATE TABLE IF NOT EXISTS signals (
@@ -371,7 +352,7 @@ def init_db() -> None:
             entry REAL, sl REAL, tp REAL, rr REAL,
             score INTEGER, reasons TEXT, setup_key TEXT,
             status TEXT DEFAULT 'ACTIVE', result TEXT,
-            strategy_version TEXT DEFAULT 'A',
+            strategy_version TEXT DEFAULT 'B',
             live_price REAL, bid REAL, ask REAL,
             spread_pct REAL, price_updated_at TEXT, expires_at TEXT,
             entry_mode TEXT DEFAULT 'market',
@@ -381,72 +362,12 @@ def init_db() -> None:
             estimated_slippage_pct REAL, net_rr REAL,
             cancel_reason TEXT
         )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL, signal_id INTEGER,
-            market TEXT, symbol TEXT, side TEXT,
-            entry REAL, actual_entry REAL, signal_entry REAL,
-            entry_drift_r REAL DEFAULT 0, current_price REAL,
-            sl REAL, tp1 REAL, tp2 REAL, initial_sl REAL,
-            risk_amount REAL, initial_risk_amount REAL,
-            current_risk_amount REAL, current_risk_r REAL,
-            position_size REAL DEFAULT 0, notional REAL DEFAULT 0,
-            margin_required REAL DEFAULT 0, balance_snapshot REAL DEFAULT 0,
-            remaining_percent REAL DEFAULT 100,
-            tp1_hit INTEGER DEFAULT 0, tp2_hit INTEGER DEFAULT 0,
-            tp1_fill_price REAL, tp1_fill_qty REAL, tp1_fill_fee REAL DEFAULT 0,
-            tp1_closed_at TEXT, tp2_fill_price REAL, tp2_fill_qty REAL,
-            tp2_fill_fee REAL DEFAULT 0, tp2_closed_at TEXT,
-            total_fees_paid REAL DEFAULT 0, total_slippage_cost REAL DEFAULT 0,
-            strategy_version TEXT DEFAULT 'A',
-            status TEXT DEFAULT 'active', last_recommendation TEXT,
-            opened_at TEXT, closed_at TEXT, updated_at TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(user_id),
-            FOREIGN KEY(signal_id) REFERENCES signals(id)
-        )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS trade_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
-            event_type TEXT NOT NULL, message TEXT, price REAL,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(trade_id) REFERENCES trades(id),
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
-        )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS trade_executions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
-            exec_type TEXT NOT NULL, price REAL NOT NULL,
-            quantity REAL NOT NULL, share_percent REAL NOT NULL,
-            fee_usdt REAL DEFAULT 0, slippage_usdt REAL DEFAULT 0,
-            realized_pnl_usdt REAL DEFAULT 0, executed_at TEXT NOT NULL,
-            FOREIGN KEY(trade_id) REFERENCES trades(id),
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
-        )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS trade_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_id INTEGER, user_id INTEGER NOT NULL,
-            market TEXT, symbol TEXT, side TEXT,
-            entry REAL, exit_price REAL, result TEXT,
-            pnl_percent REAL DEFAULT 0, pnl_r REAL DEFAULT 0,
-            net_pnl_usdt REAL DEFAULT 0, initial_risk_amount REAL DEFAULT 0,
-            total_fees_paid REAL DEFAULT 0, total_slippage_cost REAL DEFAULT 0,
-            strategy_version TEXT DEFAULT 'A', close_reason TEXT,
-            opened_at TEXT, closed_at TEXT,
-            FOREIGN KEY(trade_id) REFERENCES trades(id),
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
-        )""")
         con.execute("""CREATE TABLE IF NOT EXISTS signal_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             signal_id INTEGER NOT NULL, event_type TEXT NOT NULL,
             old_status TEXT, new_status TEXT, price REAL,
             reason TEXT, created_at TEXT NOT NULL,
             FOREIGN KEY(signal_id) REFERENCES signals(id)
-        )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS user_dialogs (
-            user_id INTEGER PRIMARY KEY,
-            state_type TEXT NOT NULL, ref_id INTEGER,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
         )""")
         con.execute("""CREATE TABLE IF NOT EXISTS market_candles (
             market TEXT NOT NULL, symbol TEXT NOT NULL,
@@ -458,36 +379,16 @@ def init_db() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(market, symbol, side)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_signals_status_exp ON signals(status, expires_at)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_trades_user_status ON trades(user_id, status)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_trade ON trade_events(trade_id, created_at)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_history_user ON trade_history(user_id, closed_at)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_executions_trade ON trade_executions(trade_id, executed_at)")
 
     log.info("База данных готова: %s", DB_PATH)
 
 def ensure_part3_schema() -> None:
-    """Миграция старой user_balances (без market) в новую (PK user_id+market)."""
+    """Переводим настройки пользователей на единственную стратегию Futures Scalping B.
+    Старые таблицы личных сделок, если они есть, не удаляем и не используем.
+    """
     with db() as conn:
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='user_balances'"
-        ).fetchone()
-        if not row:
-            return
-        existing = {r["name"] for r in conn.execute("PRAGMA table_info(user_balances)").fetchall()}
-        if "market" in existing:
-            return
-        log.info("Миграция user_balances: старая схема → новая")
-        conn.execute("ALTER TABLE user_balances RENAME TO user_balances_old")
-        conn.execute("""CREATE TABLE user_balances (
-            user_id INTEGER NOT NULL, market TEXT NOT NULL,
-            balance REAL NOT NULL DEFAULT 0, updated_at TEXT,
-            PRIMARY KEY (user_id, market)
-        )""")
-        if "balance" in existing:
-            conn.execute("""INSERT INTO user_balances (user_id, market, balance, updated_at)
-                SELECT user_id, 'spot', COALESCE(balance, 0), COALESCE(updated_at, ?)
-                FROM user_balances_old""", (utc_text(),))
-        conn.execute("DROP TABLE user_balances_old")
+        conn.execute("UPDATE user_settings SET strategy_version=?", (STRATEGY_B,))
+
 
 
 # ============================================================
@@ -646,12 +547,9 @@ async def get_klines(market: str, symbol: str, interval: str,
     if active_session is None or active_session.closed:
         raise MarketError("HTTP-сессия BingX ещё не запущена")
 
-    if market == "spot":
-        path = "/openApi/spot/v2/market/kline"
-    elif market == "swap":
-        path = "/openApi/swap/v3/quote/klines"
-    else:
-        raise MarketError(f"Неизвестный рынок: {market}")
+    if market != "swap":
+        raise MarketError("Эта версия работает только с USDT-M Futures")
+    path = "/openApi/swap/v3/quote/klines"
 
     payload = await api_get(active_session, path,
                             {"symbol": symbol, "interval": interval, "limit": limit})
@@ -735,68 +633,6 @@ def enrich_scalper_series(df: pd.DataFrame) -> pd.DataFrame:
     x["range_low_20"] = x["low"].rolling(20, min_periods=10).min().shift(1)
     return x
 
-def build_signal_a_v92(market: str, symbol: str, frames: dict[str, pd.DataFrame]) -> dict[str, Any] | None:
-    """Стратегия A — эталон v9.2, БЕЗ ИЗМЕНЕНИЙ."""
-    required = ("5m", "15m", "1h", "4h")
-    if any(tf not in frames or frames[tf] is None or len(frames[tf]) < MIN_CANDLE_ROWS for tf in required):
-        return None
-    m5, m15, h1, h4 = (indicators(frames[tf]) for tf in required)
-    a, b, c, d = m5.iloc[-1], m15.iloc[-1], h1.iloc[-1], h4.iloc[-1]
-    price = safe_float(b["close"]); atr = safe_float(b["atr"])
-    if price <= 0 or atr <= 0:
-        return None
-    ls = ss = 0
-    lr, sr = [], []
-    for row, label in ((c, "1H"), (d, "4H")):
-        if row["close"] > row["ema200"] and row["ema20"] > row["ema50"]:
-            ls += 2; lr.append(f"Тренд {label}: выше EMA200")
-        if row["close"] < row["ema200"] and row["ema20"] < row["ema50"]:
-            ss += 2; sr.append(f"Тренд {label}: ниже EMA200")
-    if b["ema20"] > b["ema50"] and b["close"] > b["ema20"]:
-        ls += 2; lr.append("15м: EMA20 выше EMA50")
-    if b["ema20"] < b["ema50"] and b["close"] < b["ema20"]:
-        ss += 2; sr.append("15м: EMA20 ниже EMA50")
-    if 48 <= b["rsi"] <= 68:
-        ls += 1; lr.append(f"RSI 15м {b['rsi']:.1f}")
-    if 32 <= b["rsi"] <= 52:
-        ss += 1; sr.append(f"RSI 15м {b['rsi']:.1f}")
-    if b["macd"] > b["macd_signal"]:
-        ls += 1; lr.append("MACD 15м положительный")
-    if b["macd"] < b["macd_signal"]:
-        ss += 1; sr.append("MACD 15м отрицательный")
-    if b["adx"] >= 18 and b["plus_di"] > b["minus_di"]:
-        ls += 1; lr.append(f"ADX {b['adx']:.1f}, покупатели сильнее")
-    if b["adx"] >= 18 and b["minus_di"] > b["plus_di"]:
-        ss += 1; sr.append(f"ADX {b['adx']:.1f}, продавцы сильнее")
-    if a["close"] > a["ema20"]:
-        ls += 1; lr.append("5м: цена выше EMA20")
-    if a["close"] < a["ema20"]:
-        ss += 1; sr.append("5м: цена ниже EMA20")
-    if ls > ss:
-        side, score, reasons = "BUY", ls, lr
-    else:
-        side, score, reasons = "SELL", ss, sr
-    if score < MIN_SCORE or abs(ls - ss) < 2:
-        return None
-    if market == "spot" and side == "SELL":
-        return None
-    sl_dist = max(1.5 * atr, price * 0.002)
-    tp1_dist = sl_dist * TP1_R; tp2_dist = sl_dist * TP2_R
-    if side == "BUY":
-        sl, tp1, tp2 = price - sl_dist, price + tp1_dist, price + tp2_dist
-    else:
-        sl, tp1, tp2 = price + sl_dist, price - tp1_dist, price - tp2_dist
-    if min(sl, tp1, tp2) <= 0:
-        return None
-    rr = abs(tp2 - price) / abs(price - sl)
-    if rr < MIN_RR:
-        return None
-    return {
-        "strategy_version": STRATEGY_A, "market": market, "symbol": symbol, "side": side,
-        "entry": price, "sl": sl, "tp1": tp1, "tp2": tp2, "tp": tp2, "rr": rr,
-        "score": score, "reasons": reasons, "atr": atr,
-        "setup_key": f"{market}:{symbol}:{side}:{int(b['open_time'])}",
-    }
 
 def _detect_market_regime(m15_row, m15_prev, atr, price):
     adx = safe_float(m15_row.get("adx"))
@@ -812,117 +648,169 @@ def _detect_market_regime(m15_row, m15_prev, atr, price):
     return "range"
 
 def build_signal_b(market, symbol, frames, quote=None):
-    required = ("5m", "15m", "1h", "4h")
+    """Строгий многотаймфреймовый сетап для USDT-M Futures scalping.
+
+    Это rule-based фильтр, а не статистическая вероятность выигрыша.
+    Сигнал допускается только при согласовании 1H/15m/5m и наличии
+    структурного триггера (BOS/CHoCH или sweep).
+    """
+    if str(market).lower() != "swap":
+        return None
+    required = ("1m", "5m", "15m", "1h", "4h")
     if any(tf not in frames or frames[tf] is None or len(frames[tf]) < MIN_CANDLE_ROWS for tf in required):
         return None
+
+    m1 = enrich_scalper_series(frames["1m"])
     m5 = enrich_scalper_series(frames["5m"])
     m15 = enrich_scalper_series(frames["15m"])
     h1 = enrich_scalper_series(frames["1h"])
     h4 = enrich_scalper_series(frames["4h"])
-    a, b, b_prev = m5.iloc[-1], m15.iloc[-1], m15.iloc[-2]
-    c, d = h1.iloc[-1], h4.iloc[-1]
-    price = safe_float(b["close"]); atr = safe_float(b["atr"])
+    m1_now = m1.iloc[-1]
+    m5_now, m15_now, m15_prev = m5.iloc[-1], m15.iloc[-1], m15.iloc[-2]
+    h1_now, h4_now = h1.iloc[-1], h4.iloc[-1]
+
+    price = safe_float(m15_now["close"])
+    atr = safe_float(m15_now["atr"])
     if price <= 0 or atr <= 0:
         return None
-    regime = _detect_market_regime(b, b_prev, atr, price)
-    extension_atr = abs(price - safe_float(b["ema20"])) / atr
-    if extension_atr > 3.2 and regime == "impulse":
+
+    atr_pct = atr / price * 100.0
+    if atr_pct < MIN_ATR_PCT or atr_pct > MAX_ATR_PCT:
         return None
-    ls = ss = 0.0
-    lr, sr = [], []
-    for row, label in ((c, "1H"), (d, "4H")):
-        if row["close"] > row["ema200"] and row["ema20"] > row["ema50"]:
-            ls += 2.0; lr.append(f"Контекст {label}: бычий тренд выше EMA200")
-        if row["close"] < row["ema200"] and row["ema20"] < row["ema50"]:
-            ss += 2.0; sr.append(f"Контекст {label}: медвежий тренд ниже EMA200")
-    prev_sh = safe_float(b_prev.get("swing_high_prev"))
-    prev_sl = safe_float(b_prev.get("swing_low_prev"))
-    b_close = safe_float(b["close"]); b_high = safe_float(b["high"]); b_low = safe_float(b["low"])
-    if prev_sh > 0 and b_close > prev_sh:
-        if safe_float(b["ema20"]) >= safe_float(b["ema50"]):
-            ls += 1.5; lr.append("15м BOS вверх")
-        else:
-            ls += 1.0; lr.append("15м CHoCH вверх")
-    if prev_sl > 0 and b_close < prev_sl:
-        if safe_float(b["ema20"]) <= safe_float(b["ema50"]):
-            ss += 1.5; sr.append("15м BOS вниз")
-        else:
-            ss += 1.0; sr.append("15м CHoCH вниз")
-    rng_high = safe_float(b.get("range_high_20"))
-    rng_low = safe_float(b.get("range_low_20"))
-    if rng_low > 0 and b_low < rng_low and b_close > rng_low:
-        ls += 1.5; lr.append("Sweep вниз + возврат")
-    if rng_high > 0 and b_high > rng_high and b_close < rng_high:
-        ss += 1.5; sr.append("Sweep вверх + возврат")
-    vwap_15 = safe_float(b.get("vwap"), price)
-    if b_close > vwap_15:
-        ls += 1.0; lr.append("15м: выше VWAP")
-    elif b_close < vwap_15:
-        ss += 1.0; sr.append("15м: ниже VWAP")
-    vol_ratio = safe_float(b.get("vol_ratio"), 1.0)
-    if vol_ratio >= 1.4:
-        if b_close > safe_float(b["open"]):
-            ls += 1.0; lr.append(f"Объём x{vol_ratio:.1f} на бычьем баре")
-        elif b_close < safe_float(b["open"]):
-            ss += 1.0; sr.append(f"Объём x{vol_ratio:.1f} на медвежьем баре")
-    if safe_float(a["close"]) > safe_float(a["ema20"]):
-        ls += 1.0; lr.append("5м: выше EMA20")
-    if safe_float(a["close"]) < safe_float(a["ema20"]):
-        ss += 1.0; sr.append("5м: ниже EMA20")
-    if ls > ss:
-        side, raw_score, reasons = "BUY", ls, lr
+    if safe_float(m15_now["adx"]) < MIN_SCALPER_ADX:
+        return None
+
+    regime = _detect_market_regime(m15_now, m15_prev, atr, price)
+    extension_atr = abs(price - safe_float(m15_now["ema20"])) / atr
+    if extension_atr > MAX_EXTENSION_ATR or regime == "exhaustion":
+        return None
+
+    # Контекст: 1H обязан задавать направление, 4H не должен ему противоречить.
+    h1_bull = h1_now["close"] > h1_now["ema200"] and h1_now["ema20"] > h1_now["ema50"]
+    h1_bear = h1_now["close"] < h1_now["ema200"] and h1_now["ema20"] < h1_now["ema50"]
+    h4_bull = h4_now["close"] > h4_now["ema200"] and h4_now["ema20"] > h4_now["ema50"]
+    h4_bear = h4_now["close"] < h4_now["ema200"] and h4_now["ema20"] < h4_now["ema50"]
+
+    m15_bull = m15_now["close"] > m15_now["ema20"] and m15_now["ema20"] > m15_now["ema50"]
+    m15_bear = m15_now["close"] < m15_now["ema20"] and m15_now["ema20"] < m15_now["ema50"]
+    m5_bull = (m5_now["close"] > m5_now["ema20"] > m5_now["ema50"]
+               and m5_now["macd"] > m5_now["macd_signal"]
+               and 50 <= safe_float(m5_now["rsi"]) <= 72)
+    m5_bear = (m5_now["close"] < m5_now["ema20"] < m5_now["ema50"]
+               and m5_now["macd"] < m5_now["macd_signal"]
+               and 28 <= safe_float(m5_now["rsi"]) <= 50)
+    m1_bull = m1_now["close"] > m1_now["ema20"] and m1_now["macd"] > m1_now["macd_signal"]
+    m1_bear = m1_now["close"] < m1_now["ema20"] and m1_now["macd"] < m1_now["macd_signal"]
+
+    if h1_bull and not h4_bear and m15_bull and m5_bull and m1_bull:
+        side = "BUY"
+    elif h1_bear and not h4_bull and m15_bear and m5_bear and m1_bear:
+        side = "SELL"
     else:
-        side, raw_score, reasons = "SELL", ss, sr
-    score_int = int(round(raw_score))
-    if score_int < MIN_SCORE or abs(ls - ss) < 1.5:
         return None
-    if market == "spot" and side == "SELL":
+
+    score = 0.0
+    reasons = []
+    score += 2.0; reasons.append("1H: основной тренд совпадает с направлением")
+    if (side == "BUY" and h4_bull) or (side == "SELL" and h4_bear):
+        score += 1.0; reasons.append("4H: старший контекст подтверждает направление")
+    else:
+        reasons.append("4H: нет противоположного тренда")
+    score += 2.0; reasons.append("15м: цена и EMA20/50 подтверждают тренд")
+    score += 2.0; reasons.append("5м: импульс подтверждён EMA, MACD и RSI")
+    score += 1.0; reasons.append("1м: краткосрочный импульс совпадает с направлением")
+
+    # Структурный триггер: BOS/CHoCH либо sweep с возвратом за уровень.
+    prev_sh = safe_float(m15_prev.get("swing_high_prev"))
+    prev_sl = safe_float(m15_prev.get("swing_low_prev"))
+    close15 = safe_float(m15_now["close"])
+    high15 = safe_float(m15_now["high"])
+    low15 = safe_float(m15_now["low"])
+    range_high = safe_float(m15_now.get("range_high_20"))
+    range_low = safe_float(m15_now.get("range_low_20"))
+    structural = False
+    if side == "BUY":
+        if prev_sh > 0 and close15 > prev_sh:
+            score += 1.5; structural = True; reasons.append("15м: пробой структуры вверх (BOS)")
+        elif range_low > 0 and low15 < range_low and close15 > range_low:
+            score += 1.5; structural = True; reasons.append("15м: sweep вниз и возврат над уровнем")
+    else:
+        if prev_sl > 0 and close15 < prev_sl:
+            score += 1.5; structural = True; reasons.append("15м: пробой структуры вниз (BOS)")
+        elif range_high > 0 and high15 > range_high and close15 < range_high:
+            score += 1.5; structural = True; reasons.append("15м: sweep вверх и возврат под уровень")
+    if not structural:
         return None
-    sl_dist = max(1.5 * atr, price * 0.0025)
-    min_sl_dist = price * 0.002
-    max_sl_dist = max(3.5 * atr, price * 0.025)
-    if sl_dist < min_sl_dist or sl_dist > max_sl_dist:
+
+    vwap = safe_float(m15_now.get("vwap"), price)
+    if (side == "BUY" and close15 > vwap) or (side == "SELL" and close15 < vwap):
+        score += 1.0; reasons.append("15м: цена на правильной стороне VWAP")
+    else:
         return None
-    tp1_dist = sl_dist * TP1_R; tp2_dist = sl_dist * TP2_R
+
+    vol_ratio = safe_float(m15_now.get("vol_ratio"), 1.0)
+    if vol_ratio < MIN_VOLUME_RATIO:
+        return None
+    if vol_ratio >= 1.2:
+        score += 0.5; reasons.append(f"Объём выше среднего: x{vol_ratio:.2f}")
+
+    score_int = int(round(score))
+    if score < MIN_SCALPER_RAW_SCORE:
+        return None
+
+    sl_dist = max(1.35 * atr, price * 0.0015)
+    if sl_dist > max(3.0 * atr, price * 0.012):
+        return None
+    tp1_dist = sl_dist * TP1_R
+    tp2_dist = sl_dist * TP2_R
     if side == "BUY":
         sl, tp1, tp2 = price - sl_dist, price + tp1_dist, price + tp2_dist
-        entry_mode = "level" if (extension_atr > 1.8 or regime == "exhaustion") else "market"
-        zone_low = max(sl * 1.002, min(price, vwap_15)); zone_high = price
-        conf = "Дождаться удержания зоны и подтверждения на 5м/15м."
     else:
         sl, tp1, tp2 = price + sl_dist, price - tp1_dist, price - tp2_dist
-        entry_mode = "level" if (extension_atr > 1.8 or regime == "exhaustion") else "market"
-        zone_low = price; zone_high = min(sl * 0.998, max(price, vwap_15))
-        conf = "Дождаться реакции продавцов на 5м/15м."
     if min(sl, tp1, tp2) <= 0:
         return None
+
     gross_rr = abs(tp2 - price) / abs(price - sl)
-    if gross_rr < MIN_RR:
-        return None
     spread_pct = safe_float((quote or {}).get("spread_pct"), DEFAULT_SYNTHETIC_SPREAD_PCT)
-    fee_rate = MAKER_FEE_RATE if entry_mode == "level" else TAKER_FEE_RATE
-    fee_pct = (fee_rate * 2.0) * 100.0
+    fee_pct = (TAKER_FEE_RATE * 2.0) * 100.0
     slip_pct = DEFAULT_SLIPPAGE_PCT * 2.0
     cost_dist = price * ((spread_pct + fee_pct + slip_pct) / 100.0)
-    eff_risk_dist = max(abs(price - sl) + cost_dist * 0.5, 1e-9)
-    eff_reward_dist = max(abs(tp2 - price) - cost_dist, 0.0)
-    net_rr = eff_reward_dist / eff_risk_dist
-    if net_rr < MIN_RR:
+    effective_risk = max(abs(price - sl) + cost_dist * 0.5, 1e-9)
+    effective_reward = max(abs(tp2 - price) - cost_dist, 0.0)
+    net_rr = effective_reward / effective_risk
+    if gross_rr < MIN_RR or net_rr < MIN_NET_RR:
         return None
-    quality_score = round(min(100.0, raw_score * 11.0 + (10.0 if net_rr >= 2.0 else 0.0) - spread_pct * 20.0), 1)
+
+    quality_score = min(100.0, 60.0 + score * 4.0
+                        + (5.0 if net_rr >= 2.0 else 0.0)
+                        + (3.0 if vol_ratio >= 1.5 else 0.0)
+                        - spread_pct * 20.0)
+    quality_score = round(quality_score, 1)
+    if quality_score < MIN_QUALITY_SCORE:
+        return None
+
+    entry_mode = "level" if extension_atr > 1.25 else "market"
+    if side == "BUY":
+        zone_low, zone_high = max(sl * 1.001, min(price, vwap)), price
+        confirmation = "Вход только после удержания зоны покупателями на 5м."
+    else:
+        zone_low, zone_high = price, min(sl * 0.999, max(price, vwap))
+        confirmation = "Вход только после подтверждения продавцов на 5м."
+
     return {
-        "strategy_version": STRATEGY_B, "market": market, "symbol": symbol, "side": side,
+        "strategy_version": STRATEGY_B, "market": "swap", "symbol": symbol, "side": side,
         "entry": price, "sl": sl, "tp1": tp1, "tp2": tp2, "tp": tp2,
         "rr": gross_rr, "net_rr": net_rr, "score": score_int,
         "quality_score": quality_score, "market_regime": regime,
         "entry_mode": entry_mode,
         "entry_zone_low": min(zone_low, zone_high),
         "entry_zone_high": max(zone_low, zone_high),
-        "confirmation_rule": conf if entry_mode == "level" else "Рыночный вход с проверкой отклонения <= 0.5R.",
+        "confirmation_rule": confirmation if entry_mode == "level" else "Вход только пока 5м импульс сохраняется.",
         "spread_pct": spread_pct, "estimated_fee_pct": fee_pct,
         "estimated_slippage_pct": slip_pct, "reasons": reasons, "atr": atr,
-        "setup_key": f"B:{market}:{symbol}:{side}:{int(b['open_time'])}",
+        "setup_key": f"B:swap:{symbol}:{side}:{int(m15_now['open_time'])}",
     }
+
 
 
 # ============================================================
@@ -932,12 +820,12 @@ def build_signal_b(market, symbol, frames, quote=None):
 async def get_live_price(market: str, symbol: str) -> float | None:
     if http_session is None or http_session.closed:
         return None
-    if market == "spot":
-        endpoint = "/openApi/spot/v1/ticker/price"
-        quote_endpoint = "/openApi/spot/v1/ticker/bookTicker"
-    else:
-        endpoint = "/openApi/swap/v2/quote/price"
-        quote_endpoint = "/openApi/swap/v2/quote/ticker"
+    if market != "swap":
+        return None
+    # Удаляем старую котировку: нельзя использовать bid/ask из прошлого цикла.
+    latest_quotes.pop((market, symbol), None)
+    endpoint = "/openApi/swap/v2/quote/price"
+    quote_endpoint = "/openApi/swap/v2/quote/ticker"
     try:
         response = await api_get(http_session, endpoint, {"symbol": symbol})
         data = extract_data(response)
@@ -1001,7 +889,7 @@ async def fetch_live_market_snapshot(market: str, symbol: str) -> dict[str, Any]
 def enrich_signal_with_live_data(sig: dict[str, Any], snapshot: dict[str, Any] | None) -> dict[str, Any]:
     enriched = dict(sig)
     now_dt = utc_now()
-    enriched.setdefault("strategy_version", STRATEGY_A)
+    enriched.setdefault("strategy_version", STRATEGY_B)
     enriched.setdefault("entry_mode", "market")
     enriched.setdefault("market_regime", "standard")
     enriched.setdefault("quality_score", float(enriched.get("score", 0)) * 10.0)
@@ -1010,6 +898,15 @@ def enrich_signal_with_live_data(sig: dict[str, Any], snapshot: dict[str, Any] |
     enriched.setdefault("net_rr", safe_float(enriched.get("rr"), 0.0))
     enriched["price_updated_at"] = utc_text(now_dt)
     enriched["expires_at"] = utc_text(now_dt + timedelta(minutes=SIGNAL_TTL_MINUTES))
+
+    if not snapshot or safe_float(snapshot.get("price")) <= 0:
+        enriched["status"] = "CANCELLED"
+        enriched["cancel_reason"] = "Нет актуальной котировки BingX"
+        return enriched
+    if snapshot.get("is_synthetic_spread"):
+        enriched["status"] = "CANCELLED"
+        enriched["cancel_reason"] = "Нет реального bid/ask: нельзя надёжно оценить спред"
+        return enriched
 
     if snapshot and safe_float(snapshot.get("price")) > 0:
         live_p = safe_float(snapshot["price"])
@@ -1032,33 +929,46 @@ def enrich_signal_with_live_data(sig: dict[str, Any], snapshot: dict[str, Any] |
         risk_dist = abs(base_entry - sl)
         drift_r = (abs(live_p - base_entry) / risk_dist) if risk_dist > 0 else 0.0
 
-        if drift_r > MAX_ENTRY_DRIFT_R * 2.0 and enriched.get("entry_mode") == "market":
+        max_allowed_drift = MAX_ENTRY_DRIFT_R if enriched.get("entry_mode") == "market" else MAX_ENTRY_DRIFT_R * 2.0
+        if drift_r > max_allowed_drift:
             enriched["status"] = "CANCELLED"
-            enriched["cancel_reason"] = f"Цена ушла от сигнала ({drift_r:.2f}R)"
+            enriched["cancel_reason"] = f"Цена ушла от зоны сигнала ({drift_r:.2f}R)"
             log.info("Сигнал отменён (дрифт %.2fR): %s %s", drift_r, sig.get("market"), sig.get("symbol"))
             return enriched
 
         if enriched.get("entry_mode") == "market" and risk_dist > 0:
             exec_entry = ask if is_long_side(enriched["side"]) else bid
-            if exec_entry > 0:
-                enriched["entry"] = exec_entry
-                if is_long_side(enriched["side"]):
-                    enriched["sl"] = exec_entry - risk_dist
-                    enriched["tp1"] = exec_entry + risk_dist * TP1_R
-                    enriched["tp2"] = exec_entry + risk_dist * TP2_R
-                else:
-                    enriched["sl"] = exec_entry + risk_dist
-                    enriched["tp1"] = exec_entry - risk_dist * TP1_R
-                    enriched["tp2"] = exec_entry - risk_dist * TP2_R
-                enriched["tp"] = enriched["tp2"]
-                gross = abs(enriched["tp2"] - exec_entry) / abs(exec_entry - enriched["sl"])
-                enriched["rr"] = gross
-                fee_pct = safe_float(enriched.get("estimated_fee_pct"), 0.0)
-                slip_pct = safe_float(enriched.get("estimated_slippage_pct"), 0.0)
-                cost_dist = exec_entry * ((spread_pct + fee_pct + slip_pct) / 100.0)
-                eff_risk = max(abs(exec_entry - enriched["sl"]) + cost_dist * 0.5, 1e-9)
-                eff_rew = max(abs(enriched["tp2"] - exec_entry) - cost_dist, 0.0)
-                enriched["net_rr"] = eff_rew / eff_risk
+            if exec_entry <= 0:
+                enriched["status"] = "CANCELLED"
+                enriched["cancel_reason"] = "Некорректная цена bid/ask"
+                return enriched
+            enriched["entry"] = exec_entry
+            if is_long_side(enriched["side"]):
+                enriched["sl"] = exec_entry - risk_dist
+                enriched["tp1"] = exec_entry + risk_dist * TP1_R
+                enriched["tp2"] = exec_entry + risk_dist * TP2_R
+            else:
+                enriched["sl"] = exec_entry + risk_dist
+                enriched["tp1"] = exec_entry - risk_dist * TP1_R
+                enriched["tp2"] = exec_entry - risk_dist * TP2_R
+            enriched["tp"] = enriched["tp2"]
+            enriched["rr"] = abs(enriched["tp2"] - exec_entry) / abs(exec_entry - enriched["sl"])
+
+        calc_entry = safe_float(enriched.get("entry"), live_p)
+        fee_pct = safe_float(enriched.get("estimated_fee_pct"), 0.0)
+        slip_pct = safe_float(enriched.get("estimated_slippage_pct"), 0.0)
+        cost_dist = calc_entry * ((spread_pct + fee_pct + slip_pct) / 100.0)
+        eff_risk = max(abs(calc_entry - safe_float(enriched.get("sl"))) + cost_dist * 0.5, 1e-9)
+        eff_rew = max(abs(safe_float(enriched.get("tp2")) - calc_entry) - cost_dist, 0.0)
+        enriched["net_rr"] = eff_rew / eff_risk
+        base_score = safe_float(enriched.get("score"), 0.0)
+        enriched["quality_score"] = round(min(100.0, 60.0 + base_score * 4.0
+            + (5.0 if enriched["net_rr"] >= 2.0 else 0.0)
+            - spread_pct * 20.0), 1)
+        if enriched["net_rr"] < MIN_NET_RR or enriched["quality_score"] < MIN_QUALITY_SCORE:
+            enriched["status"] = "CANCELLED"
+            enriched["cancel_reason"] = "Качество или Net RR не прошли проверку по реальной котировке"
+            return enriched
     else:
         enriched["live_price"] = enriched["entry"]
         enriched["bid"] = enriched["entry"]
@@ -1099,7 +1009,7 @@ def save_signal(sig: dict[str, Any]) -> int | None:
               AND COALESCE(strategy_version, 'A')=?
               AND julianday(created_at) >= julianday('now', '-{SIGNAL_COOLDOWN_MINUTES} minutes')
             ORDER BY id DESC LIMIT 1""",
-            (sig["market"], sig["symbol"], sig["side"], sig.get("strategy_version", STRATEGY_A))).fetchone()
+            (sig["market"], sig["symbol"], sig["side"], sig.get("strategy_version", STRATEGY_B))).fetchone()
         if recent:
             return None
 
@@ -1109,7 +1019,7 @@ def save_signal(sig: dict[str, Any]) -> int | None:
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp2"],
             "rr": sig["rr"], "score": sig["score"], "reasons": reasons_text,
             "setup_key": sig["setup_key"], "status": sig.get("status", "ACTIVE"),
-            "strategy_version": sig.get("strategy_version", STRATEGY_A),
+            "strategy_version": STRATEGY_B,
             "live_price": sig.get("live_price", sig["entry"]),
             "bid": sig.get("bid"), "ask": sig.get("ask"),
             "spread_pct": sig.get("spread_pct"),
@@ -1160,61 +1070,14 @@ def expire_stale_signals() -> list[dict[str, Any]]:
 
 
 # ============================================================
-# 10. USER STATES + DB HELPERS
+# 10. USER REGISTRATION
 # ============================================================
 
-def set_user_dialog_state(user_id: int, state_type: str, ref_id: int | None = None) -> None:
-    user_states[user_id] = {"type": state_type, "ref_id": ref_id,
-                            "signal_id": ref_id, "trade_id": ref_id}
-    with db() as con:
-        con.execute("""INSERT INTO user_dialogs (user_id, state_type, ref_id, created_at)
-            VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET
-                state_type=excluded.state_type, ref_id=excluded.ref_id,
-                created_at=excluded.created_at""",
-            (user_id, state_type, ref_id, utc_text()))
 
-def clear_user_dialog_state(user_id: int) -> None:
-    user_states.pop(user_id, None)
-    with db() as con:
-        con.execute("DELETE FROM user_dialogs WHERE user_id=?", (user_id,))
 
-def get_user_dialog_state(user_id: int) -> dict[str, Any] | None:
-    if user_id in user_states:
-        return user_states[user_id]
-    with db() as con:
-        row = con.execute("SELECT state_type, ref_id FROM user_dialogs WHERE user_id=?", (user_id,)).fetchone()
-    if not row:
-        return None
-    st = {"type": row["state_type"], "ref_id": row["ref_id"],
-          "signal_id": row["ref_id"], "trade_id": row["ref_id"]}
-    user_states[user_id] = st
-    return st
 
-def get_user_strategy(user_id: int) -> str:
-    with db() as con:
-        row = con.execute("SELECT strategy_version FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
-    if not row:
-        return DEFAULT_STRATEGY
-    ver = str(row["strategy_version"] or DEFAULT_STRATEGY).upper()
-    return ver if ver in (STRATEGY_A, STRATEGY_B) else DEFAULT_STRATEGY
 
-def set_user_strategy(user_id: int, version: str) -> str:
-    ver = str(version).upper()
-    if ver not in (STRATEGY_A, STRATEGY_B):
-        raise ValueError("Неизвестная стратегия")
-    with db() as con:
-        con.execute("""INSERT INTO user_settings (user_id, risk_percent, leverage, notifications, strategy_version)
-            VALUES (?, ?, ?, 1, ?) ON CONFLICT(user_id) DO UPDATE SET strategy_version=excluded.strategy_version""",
-            (user_id, RISK_PERCENT, FUTURES_LEVERAGE, ver))
-    return ver
 
-def row_to_dict(row):
-    if row is None:
-        return None
-    try:
-        return dict(row)
-    except (TypeError, ValueError):
-        return None
 
 def register_user(user):
     if user is None:
@@ -1224,429 +1087,79 @@ def register_user(user):
                     (user.id, user.username or "", utc_text()))
         con.execute("""INSERT OR IGNORE INTO user_settings
             (user_id, risk_percent, leverage, notifications, strategy_version) VALUES (?, ?, ?, 1, ?)""",
-            (user.id, RISK_PERCENT, FUTURES_LEVERAGE, DEFAULT_STRATEGY))
+            (user.id, RISK_PERCENT, FUTURES_LEVERAGE, STRATEGY_B))
 
-def set_user_balance(user_id, market, balance):
-    market = str(market).lower()
-    if market not in ("spot", "swap"):
-        raise ValueError("Неизвестный рынок")
-    balance = safe_float(balance, 0)
-    if balance <= 0:
-        raise ValueError("Баланс должен быть > 0")
-    with db() as con:
-        con.execute("""INSERT INTO user_balances (user_id, market, balance, updated_at)
-            VALUES (?, ?, ?, ?) ON CONFLICT(user_id, market) DO UPDATE SET
-                balance=excluded.balance, updated_at=excluded.updated_at""",
-            (user_id, market, balance, utc_text()))
 
-def get_user_balance(user_id, market):
-    with db() as con:
-        row = con.execute("SELECT balance FROM user_balances WHERE user_id=? AND market=?",
-                          (user_id, str(market).lower())).fetchone()
-    return safe_float(row["balance"], 0.0) if row else 0.0
 
-def get_active_trades(user_id):
-    with db() as con:
-        rows = con.execute("""SELECT * FROM trades
-            WHERE user_id=? AND LOWER(COALESCE(status, '')) IN ('active', 'open')
-            ORDER BY opened_at DESC, id DESC""", (user_id,)).fetchall()
-    return [row_to_dict(r) for r in rows]
 
-def get_trade(trade_id, user_id=None):
-    with db() as con:
-        if user_id is None:
-            row = con.execute("SELECT * FROM trades WHERE id=?", (trade_id,)).fetchone()
-        else:
-            row = con.execute("SELECT * FROM trades WHERE id=? AND user_id=?", (trade_id, user_id)).fetchone()
-    return row_to_dict(row)
 
-def save_trade_event(trade_id, user_id, event_type, message="", price=None):
-    with db() as con:
-        con.execute("""INSERT INTO trade_events
-            (trade_id, user_id, event_type, message, price, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)""",
-            (trade_id, user_id, event_type, str(message),
-             safe_float(price, 0.0) if price is not None else None, utc_text()))
 
-def save_trade_execution(trade_id, user_id, exec_type, price, quantity,
-                         share_percent, fee_usdt=0.0, slippage_usdt=0.0,
-                         realized_pnl_usdt=0.0, executed_at=None):
-    with db() as con:
-        con.execute("""INSERT INTO trade_executions
-            (trade_id, user_id, exec_type, price, quantity, share_percent,
-             fee_usdt, slippage_usdt, realized_pnl_usdt, executed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (trade_id, user_id, exec_type, safe_float(price), safe_float(quantity),
-             safe_float(share_percent), safe_float(fee_usdt), safe_float(slippage_usdt),
-             safe_float(realized_pnl_usdt), executed_at or utc_text()))
 
 
 # ============================================================
-# 11. POSITION SIZE + DRIFT
+# 11. SIGNAL FORMATTING
 # ============================================================
 
-def calculate_position_size(balance, entry, stop_loss, market):
-    balance = safe_float(balance, 0); entry = safe_float(entry, 0)
-    stop_loss = safe_float(stop_loss, 0); market = str(market).lower()
-    if balance <= 0 or entry <= 0 or stop_loss <= 0:
-        raise ValueError("Некорректные баланс/цены")
-    distance = abs(entry - stop_loss)
-    if distance <= 0:
-        raise ValueError("Вход = SL")
-    risk_target = balance * (RISK_PERCENT / 100)
-    quantity = risk_target / distance
-    notional = quantity * entry
-    max_notional = balance if market == "spot" else balance * FUTURES_LEVERAGE
-    if notional > max_notional:
-        notional = max_notional
-        quantity = notional / entry
-    actual_risk = quantity * distance
-    margin_required = notional / FUTURES_LEVERAGE if market == "swap" else notional
-    return {
-        "quantity": quantity, "notional": notional,
-        "margin_required": margin_required, "risk_amount": actual_risk,
-        "risk_target": risk_target,
-        "risk_percent": (actual_risk / balance * 100) if balance > 0 else 0,
-    }
 
-def assess_entry_drift(signal_entry, signal_sl, tp2, actual_entry):
-    one_r = abs(signal_entry - signal_sl)
-    drift_abs = abs(actual_entry - signal_entry)
-    drift_r = (drift_abs / one_r) if one_r > 0 else 0.0
-    new_rr = (abs(tp2 - actual_entry) / one_r) if one_r > 0 else 0.0
-    exceeds = drift_r > MAX_ENTRY_DRIFT_R
-    unfavorable = exceeds and (new_rr < MIN_RR or drift_r > 1.0)
-    return {"drift_r": drift_r, "exceeds_0_5r": exceeds,
-            "unfavorable": unfavorable, "recalculated_rr": new_rr}
 
 
 # ============================================================
 # 12. TRADE CREATE / UPDATE / CLOSE
 # ============================================================
 
-def create_personal_trade(user_id, signal_id, actual_entry):
-    actual_entry = safe_float(actual_entry, 0)
-    if actual_entry <= 0:
-        return None, "Цена входа должна быть > 0.", None
 
-    with db() as conn:
-        signal_row = conn.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()
-        if not signal_row:
-            return None, "Сигнал не найден.", None
-        signal = row_to_dict(signal_row)
-        sig_status = str(signal.get("status") or "").upper()
-        if sig_status in ("EXPIRED", "CANCELLED"):
-            return None, f"Сигнал неактуален ({sig_status}).", None
-        if sig_status == "ENTERED":
-            return None, "По этому сигналу уже открыта сделка.", None
 
-        active_count = conn.execute("""SELECT COUNT(*) FROM trades
-            WHERE user_id=? AND LOWER(COALESCE(status, '')) IN ('active', 'open')""",
-            (user_id,)).fetchone()[0]
-        if active_count >= MAX_ACTIVE_TRADES:
-            return None, f"Лимит {MAX_ACTIVE_TRADES} активных сделок.", None
-
-        market = str(signal["market"]).lower()
-        side = str(signal["side"]).lower()
-        balance_row = conn.execute("SELECT balance FROM user_balances WHERE user_id=? AND market=?",
-                                   (user_id, market)).fetchone()
-        if not balance_row:
-            return None, "Сначала укажи баланс в «Настройках».", None
-        balance = safe_float(balance_row["balance"], 0)
-        if balance <= 0:
-            return None, "Некорректный баланс.", None
-
-        signal_entry = safe_float(signal["entry"], 0)
-        signal_sl = safe_float(signal["sl"], 0)
-        if signal_entry <= 0 or signal_sl <= 0:
-            return None, "В сигнале нет корректных цен.", None
-
-        stop_distance = abs(signal_entry - signal_sl)
-        if stop_distance <= 0:
-            return None, "Дистанция стопа = 0.", None
-
-        if is_long_side(side):
-            actual_sl = actual_entry - stop_distance
-            tp1 = actual_entry + stop_distance * TP1_R
-            tp2 = actual_entry + stop_distance * TP2_R
-        else:
-            actual_sl = actual_entry + stop_distance
-            tp1 = actual_entry - stop_distance * TP1_R
-            tp2 = actual_entry - stop_distance * TP2_R
-        if min(actual_sl, tp1, tp2) <= 0:
-            return None, "SL/TP в некорректной зоне.", None
-
-        drift_info = assess_entry_drift(signal_entry, signal_sl, tp2, actual_entry)
-        sizing = calculate_position_size(balance, actual_entry, actual_sl, market)
-        entry_fee = sizing["notional"] * TAKER_FEE_RATE
-        now = utc_text()
-
-        cursor = conn.execute("""INSERT INTO trades (
-            user_id, signal_id, market, symbol, side,
-            entry, actual_entry, signal_entry, entry_drift_r,
-            current_price, sl, tp1, tp2, initial_sl,
-            risk_amount, initial_risk_amount, current_risk_amount, current_risk_r,
-            position_size, notional, margin_required, balance_snapshot,
-            remaining_percent, tp1_hit, tp2_hit, total_fees_paid,
-            strategy_version, status, last_recommendation, opened_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, 1.0, ?, ?, ?, ?, 100, 0, 0, ?, ?, 'active', ?, ?, ?)""",
-            (user_id, signal_id, market, signal["symbol"], side,
-             actual_entry, actual_entry, signal_entry, drift_info["drift_r"],
-             actual_entry, actual_sl, tp1, tp2, actual_sl,
-             sizing["risk_amount"], sizing["risk_amount"], sizing["risk_amount"],
-             sizing["quantity"], sizing["notional"], sizing["margin_required"],
-             balance, entry_fee,
-             signal.get("strategy_version", STRATEGY_A),
-             "Сделка открыта", now, now))
-        trade_id = int(cursor.lastrowid)
-
-        conn.execute("UPDATE signals SET status='ENTERED', updated_at=? WHERE id=?", (now, signal_id))
-        conn.execute("""INSERT INTO trade_events
-            (trade_id, user_id, event_type, message, price, created_at)
-            VALUES (?, ?, 'opened', ?, ?, ?)""",
-            (trade_id, user_id, "Пользователь подтвердил вход", actual_entry, now))
-        conn.execute("""INSERT INTO trade_executions
-            (trade_id, user_id, exec_type, price, quantity, share_percent,
-             fee_usdt, slippage_usdt, realized_pnl_usdt, executed_at)
-            VALUES (?, ?, 'entry', ?, ?, 100.0, ?, 0.0, 0.0, ?)""",
-            (trade_id, user_id, actual_entry, sizing["quantity"], entry_fee, now))
-
-    log_signal_event(signal_id, "entered", sig_status, "ENTERED", actual_entry, "Открыта сделка пользователем")
-
-    warnings = []
-    if drift_info["exceeds_0_5r"]:
-        warnings.append(f"⚠️ Дрифт входа {drift_info['drift_r']:.2f}R (>0.5R). RR: {drift_info['recalculated_rr']:.2f}.")
-        if drift_info["unfavorable"]:
-            warnings.append("⛔ Вход невыгоден — рассмотри пропуск.")
-    return trade_id, None, ("\n".join(warnings) if warnings else None)
-
-def update_trade_field(trade_id, user_id, field, value):
-    allowed = {"actual_entry", "sl"}
-    if field not in allowed:
-        return False, "Поле нельзя менять."
-    value = safe_float(value, 0)
-    if value <= 0:
-        return False, "Цена должна быть > 0."
-    trade = get_trade(trade_id, user_id)
-    if not trade:
-        return False, "Сделка не найдена."
-    if normalize_trade_status(trade.get("status")) not in ("active", "open"):
-        return False, "Сделка не активна."
-
-    if field == "actual_entry" and (trade.get("tp1_hit") or trade.get("tp2_hit")):
-        return False, "Нельзя менять вход после частичного/полного закрытия."
-
-    market = str(trade["market"]).lower()
-    balance = safe_float(trade.get("balance_snapshot"), 0)
-    if balance <= 0:
-        balance = get_user_balance(user_id, market)
-
-    if field == "actual_entry":
-        old_entry = safe_float(trade["actual_entry"], 0)
-        old_sl = safe_float(trade["sl"], 0)
-        distance = abs(old_entry - old_sl)
-        if distance <= 0:
-            return False, "Не удалось определить дистанцию стопа."
-        if is_long_side(trade["side"]):
-            new_sl = value - distance
-            new_tp1 = value + distance * TP1_R
-            new_tp2 = value + distance * TP2_R
-        else:
-            new_sl = value + distance
-            new_tp1 = value - distance * TP1_R
-            new_tp2 = value - distance * TP2_R
-        if min(new_sl, new_tp1, new_tp2) <= 0:
-            return False, "Новые уровни некорректны."
-        sizing = calculate_position_size(balance, value, new_sl, market)
-        sig_entry = safe_float(trade.get("signal_entry"), old_entry)
-        drift_info = assess_entry_drift(sig_entry, new_sl, new_tp2, value)
-
-        with db() as conn:
-            conn.execute("""UPDATE trades SET
-                actual_entry=?, entry=?, current_price=?, sl=?, initial_sl=?,
-                tp1=?, tp2=?, entry_drift_r=?, risk_amount=?, initial_risk_amount=?,
-                current_risk_amount=?, current_risk_r=1.0, position_size=?,
-                notional=?, margin_required=?, updated_at=?
-                WHERE id=? AND user_id=?""",
-                (value, value, value, new_sl, new_sl, new_tp1, new_tp2,
-                 drift_info["drift_r"], sizing["risk_amount"], sizing["risk_amount"],
-                 sizing["risk_amount"], sizing["quantity"], sizing["notional"],
-                 sizing["margin_required"], utc_text(), trade_id, user_id))
-            conn.execute("""DELETE FROM trade_events WHERE trade_id=? AND user_id=?
-                AND event_type IN ('touch_tp1', 'touch_tp2', 'touch_sl')""",
-                (trade_id, user_id))
-        save_trade_event(trade_id, user_id, "entry_updated", "Изменён вход", value)
-        msg = "Цена входа пересчитана."
-        if drift_info["exceeds_0_5r"]:
-            msg += f"\n⚠️ Дрифт: {drift_info['drift_r']:.2f}R, RR: {drift_info['recalculated_rr']:.2f}."
-        return True, msg
-
-    if field == "sl":
-        entry = safe_float(trade["actual_entry"], 0)
-        if is_long_side(trade["side"]) and value >= entry:
-            return False, "Для LONG SL ниже входа."
-        if not is_long_side(trade["side"]) and value <= entry:
-            return False, "Для SHORT SL выше входа."
-        remaining_pct = safe_float(trade.get("remaining_percent"), 100.0)
-        rem_frac = max(0.0, min(1.0, remaining_pct / 100.0))
-        full_qty = safe_float(trade.get("position_size"), 0.0)
-        rem_qty = full_qty * rem_frac
-        new_current_risk = rem_qty * abs(entry - value)
-        base_one_r = safe_float(trade.get("initial_risk_amount"), 0.0) or safe_float(trade.get("risk_amount"), 0.0)
-        new_current_risk_r = (new_current_risk / base_one_r) if base_one_r > 0 else 0.0
-        with db() as conn:
-            conn.execute("""UPDATE trades SET sl=?, current_risk_amount=?,
-                current_risk_r=?, updated_at=? WHERE id=? AND user_id=?""",
-                (value, new_current_risk, new_current_risk_r, utc_text(), trade_id, user_id))
-        save_trade_event(trade_id, user_id, "sl_updated", "Изменён SL", value)
-        return True, (f"SL обновлён. Текущий риск: {new_current_risk:.4f} USDT ({new_current_risk_r:.2f}R). "
-                      "Объём и исходный 1R сохранены.")
-
-    return False, "Неизвестная операция"
-
-def close_trade_record(trade, exit_price, reason, exec_type: str = "manual_close"):
-    trade_id = trade["id"]; user_id = trade["user_id"]
-    entry = safe_float(trade["actual_entry"], 0)
-    initial_sl = safe_float(trade["initial_sl"], 0)
-    quantity = safe_float(trade["position_size"], 0)
-    if entry <= 0 or initial_sl <= 0 or quantity <= 0:
-        return False, "Недостаточно данных."
-    exit_price = safe_float(exit_price, 0)
-    if exit_price <= 0:
-        return False, "Некорректная цена выхода."
-
-    direction = 1 if is_long_side(trade["side"]) else -1
-    tp1_hit = bool(trade.get("tp1_hit"))
-    prev_fees = safe_float(trade.get("total_fees_paid"), 0.0)
-
-    if tp1_hit:
-        tp1 = safe_float(trade["tp1"], 0)
-        qty_tp1 = safe_float(trade.get("tp1_fill_qty"), quantity * (TP1_CLOSE_PERCENT / 100.0))
-        rem_qty = max(0.0, quantity - qty_tp1)
-        gross_tp1 = qty_tp1 * (tp1 - entry) * direction
-        gross_rem = rem_qty * (exit_price - entry) * direction
-        gross_realized = gross_tp1 + gross_rem
-        exit_fee = rem_qty * exit_price * TAKER_FEE_RATE
-        total_fees = prev_fees + exit_fee
-    else:
-        rem_qty = quantity
-        gross_realized = quantity * (exit_price - entry) * direction
-        exit_fee = quantity * exit_price * TAKER_FEE_RATE
-        total_fees = prev_fees + exit_fee
-
-    net_realized = gross_realized - total_fees
-    initial_risk = safe_float(trade.get("initial_risk_amount"), 0.0) or safe_float(trade.get("risk_amount"), 0.0)
-    if initial_risk <= 0:
-        initial_risk = quantity * abs(entry - initial_sl)
-    pnl_r = net_realized / initial_risk if initial_risk > 0 else 0.0
-    base = quantity * entry
-    pnl_percent = (net_realized / base * 100.0) if base > 0 else 0.0
-    result = "win" if net_realized > 0 else ("loss" if net_realized < 0 else "be")
-
-    now = utc_text()
-    with db() as con:
-        con.execute("""UPDATE trades SET status='closed', closed_at=?,
-            current_price=?, total_fees_paid=?, updated_at=? WHERE id=? AND user_id=?""",
-            (now, exit_price, total_fees, now, trade_id, user_id))
-        con.execute("""INSERT INTO trade_history (
-            trade_id, user_id, market, symbol, side, entry, exit_price, result,
-            pnl_percent, pnl_r, net_pnl_usdt, initial_risk_amount,
-            total_fees_paid, total_slippage_cost, strategy_version,
-            close_reason, opened_at, closed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (trade_id, user_id, trade["market"], trade["symbol"], trade["side"],
-             entry, exit_price, result, pnl_percent, pnl_r, net_realized,
-             initial_risk, total_fees, safe_float(trade.get("total_slippage_cost"), 0.0),
-             trade.get("strategy_version", STRATEGY_A), reason,
-             trade.get("opened_at"), now))
-        con.execute("""INSERT INTO trade_events
-            (trade_id, user_id, event_type, message, price, created_at)
-            VALUES (?, ?, 'closed', ?, ?, ?)""",
-            (trade_id, user_id, f"Сделка закрыта ({reason})", exit_price, now))
-
-    save_trade_execution(trade_id, user_id, exec_type, exit_price, rem_qty, 100.0,
-                         exit_fee, 0.0, net_realized, now)
-
-    return True, (f"✅ Сделка закрыта.\nРезультат: {result.upper()}\n"
-                  f"PnL: {net_realized:+.4f} USDT ({pnl_percent:+.2f}%, {pnl_r:+.2f}R)\n"
-                  f"Комиссии: {total_fees:.4f} USDT")
 
 
 # ============================================================
 # 13. TEXT FORMATTERS
 # ============================================================
 
-def trade_text(trade):
-    init_risk = safe_float(trade.get("initial_risk_amount"), safe_float(trade.get("risk_amount"), 0))
-    curr_risk = safe_float(trade.get("current_risk_amount"), init_risk)
-    st = normalize_trade_status(trade.get("status"))
-    st_ru = "активна" if st == "active" else "закрыта"
-    return (
-        f"📊 <b>{html.escape(str(trade['symbol']))}</b> "
-        f"[Стратегия {html.escape(str(trade.get('strategy_version', 'A')))}]\n"
-        f"Рынок: {market_name(trade['market'])}\n"
-        f"Направление: {side_name(trade['side'])}\n"
-        f"Статус: {st_ru}\n\n"
-        f"Цена входа: <code>{format_price(trade.get('actual_entry'))}</code>\n"
-        f"Текущая цена: <code>{format_price(trade.get('current_price'))}</code>\n"
-        f"Стоп-лосс: <code>{format_price(trade.get('sl'))}</code>\n"
-        f"TP1: <code>{format_price(trade.get('tp1'))}</code>\n"
-        f"TP2: <code>{format_price(trade.get('tp2'))}</code>\n\n"
-        f"Исходный риск (1R): {init_risk:.4f} USDT\n"
-        f"Текущий риск остатка: {curr_risk:.4f} USDT\n"
-        f"Количество: {safe_float(trade.get('position_size')):.8f}\n"
-        f"Объём: {safe_float(trade.get('notional')):.2f} USDT\n"
-        f"Маржа: {safe_float(trade.get('margin_required')):.2f} USDT\n"
-        f"Комиссии: {safe_float(trade.get('total_fees_paid')):.4f} USDT\n"
-        f"Остаток: {safe_float(trade.get('remaining_percent'), 100):.0f}%\n\n"
-        f"TP1: {'✅' if trade.get('tp1_hit') else '—'} | "
-        f"TP2: {'✅' if trade.get('tp2_hit') else '—'}\n\n"
-        f"<i>{html.escape(str(trade.get('last_recommendation') or 'Пока нет'))}</i>"
-    )
 
 def signal_text(signal):
     tp1 = safe_float(signal.get("tp1"), 0)
     tp2 = safe_float(signal.get("tp2"), signal.get("tp", 0))
-    live_p = safe_float(signal.get("live_price"), signal["entry"])
-    spread_pct = safe_float(signal.get("spread_pct"), DEFAULT_SYNTHETIC_SPREAD_PCT)
-    entry_mode = signal.get("entry_mode", "market")
-    mode_label = "Вход от уровня" if entry_mode == "level" else "Рыночный вход"
-    raw_reasons = signal.get("reasons", "")
-    if isinstance(raw_reasons, (list, tuple)):
-        reasons_text = "\n".join(f"• {html.escape(str(r))}" for r in raw_reasons if r)
-    else:
-        parts = [p.strip() for p in str(raw_reasons).split(";") if p.strip()]
-        reasons_text = "\n".join(f"• {html.escape(p)}" for p in parts) if parts else "—"
-
-    extra = [
-        f"Стратегия: <b>{html.escape(str(signal.get('strategy_version', 'A')))}</b>",
-        f"Режим: <b>{mode_label}</b>",
-        f"Цена: <code>{format_price(live_p)}</code> (спред ~{spread_pct:.3f}%)",
-    ]
-    if entry_mode == "level":
-        zl = safe_float(signal.get("entry_zone_low"), signal["entry"])
-        zh = safe_float(signal.get("entry_zone_high"), signal["entry"])
-        extra.append(f"Зона: <code>{format_price(zl)} — {format_price(zh)}</code>")
-        if signal.get("confirmation_rule"):
-            extra.append(f"Подтверждение: {html.escape(signal['confirmation_rule'])}")
-    if signal.get("expires_at"):
-        extra.append(f"Действителен до: <code>{format_moscow_from_utc(signal['expires_at'])} МСК</code>")
-
+    live_price = safe_float(signal.get("live_price"), signal["entry"])
+    spread = safe_float(signal.get("spread_pct"), 0.0)
+    quality = safe_float(signal.get("quality_score"), 0.0)
+    reasons = signal.get("reasons", [])
+    if not isinstance(reasons, (list, tuple)):
+        reasons = [part.strip() for part in str(reasons).split(";") if part.strip()]
+    reasons_text = "\n".join(f"• {html.escape(str(item))}" for item in reasons if item) or "—"
+    side = "🟢 LONG" if is_long_side(signal["side"]) else "🔴 SHORT"
+    mode = "Вход от зоны" if signal.get("entry_mode") == "level" else "Рыночный вход"
+    validity = format_moscow_from_utc(signal.get("expires_at")) if signal.get("expires_at") else "—"
+    zone_block = ""
+    if signal.get("entry_mode") == "level":
+        zone_low = safe_float(signal.get("entry_zone_low"), signal["entry"])
+        zone_high = safe_float(signal.get("entry_zone_high"), signal["entry"])
+        zone_block = (
+            f"<b>ЗОНА ВХОДА:</b> <code>{format_price(zone_low)} — {format_price(zone_high)}</code>\n"
+            f"<b>Подтверждение:</b> {html.escape(str(signal.get('confirmation_rule') or 'Дождаться подтверждения на 5м.'))}\n"
+        )
     return (
-        f"🚨 <b>НОВЫЙ СИГНАЛ</b>\n\n"
-        f"Монета: <b>{html.escape(str(signal['symbol']))}</b>\n"
-        f"Рынок: {market_name(signal['market'])}\n"
-        f"Направление: {side_name(signal['side'])}\n"
-        + "\n".join(extra) + "\n\n"
-        f"Вход: <code>{format_price(signal['entry'])}</code>\n"
-        f"SL: <code>{format_price(signal['sl'])}</code>\n"
-        f"TP1: <code>{format_price(tp1)}</code> ({TP1_R}R) — {TP1_CLOSE_PERCENT:.0f}%\n"
-        f"TP2: <code>{format_price(tp2)}</code> ({TP2_R}R) — {TP2_CLOSE_PERCENT:.0f}%\n\n"
-        f"Оценка: {signal.get('score', 0)}\n"
-        f"RR до TP2: {signal.get('rr', 0):.2f}\n\n"
-        f"Причины:\n{reasons_text}"
+        "🚨 <b>FUTURES SCALP — СИГНАЛ</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{html.escape(str(signal['symbol']))}</b>  |  <b>{side}</b>\n"
+        f"<b>Качество сетапа:</b> <code>{quality:.0f}/100</code>\n"
+        f"<b>Рынок:</b> USDT-M Futures  |  <b>ТФ:</b> 1m / 5m / 15m / 1h\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"<b>ВХОД:</b> <code>{format_price(signal['entry'])}</code>\n"
+        f"{zone_block}"
+        f"<b>SL:</b> <code>{format_price(signal['sl'])}</code>\n"
+        f"<b>TP1:</b> <code>{format_price(tp1)}</code>  ({TP1_R}R)\n"
+        f"<b>TP2:</b> <code>{format_price(tp2)}</code>  ({TP2_R}R)\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"<b>RR:</b> {safe_float(signal.get('rr')):.2f}  |  <b>Net RR:</b> {safe_float(signal.get('net_rr')):.2f}\n"
+        f"<b>Спред:</b> {spread:.3f}%  |  <b>Текущая цена:</b> <code>{format_price(live_price)}</code>\n"
+        f"<b>Вход:</b> {mode}\n"
+        f"<b>Сигнал действителен до:</b> {validity} МСК\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Почему выбран:</b>\n{reasons_text}\n\n"
+        "<i>Оценка 0–100 — внутренний балл фильтра, не вероятность выигрыша. "
+        "Бот не открывает ордера и не отслеживает позицию после сигнала. Проверяй уровни на бирже.</i>"
     )
+
 
 
 # ============================================================
@@ -1655,30 +1168,13 @@ def signal_text(signal):
 
 def main_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🔎 Анализ рынка")],
-        [KeyboardButton(text="📊 Мои сделки"), KeyboardButton(text="📚 История")],
-        [KeyboardButton(text="📈 Статистика"), KeyboardButton(text="⚙️ Настройки")],
-        [KeyboardButton(text="🖥 Статус системы")],
+        [KeyboardButton(text="🔎 Сканировать Futures")],
+        [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="🖥 Статус системы")],
     ], resize_keyboard=True)
 
-def signal_keyboard(signal_id):
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Я вошёл в сделку", callback_data=f"enter:{signal_id}")
-    ]])
 
-def trade_keyboard(trade_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"trade_refresh:{trade_id}")],
-        [InlineKeyboardButton(text="✏️ Исправить вход", callback_data=f"trade_edit_entry:{trade_id}")],
-        [InlineKeyboardButton(text="🛑 Обновить SL", callback_data=f"trade_edit_sl:{trade_id}")],
-        [InlineKeyboardButton(text="Закрыть сделку", callback_data=f"trade_close:{trade_id}")],
-    ])
 
-def confirm_keyboard(action, trade_id):
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Да", callback_data=f"{action}_confirm:{trade_id}"),
-        InlineKeyboardButton(text="Отмена", callback_data=f"{action}_cancel:{trade_id}"),
-    ]])
+
 
 
 # ============================================================
@@ -1686,6 +1182,8 @@ def confirm_keyboard(action, trade_id):
 # ============================================================
 
 async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEGY):
+    # В новой версии анализируем только USDT-M Futures и только стратегию B.
+    market = "swap"
     key = (market, symbol)
     if key in _unavailable_symbols:
         return None
@@ -1693,21 +1191,19 @@ async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEG
     if key in _insufficient_history and now_ts < _insufficient_history[key]:
         return None
 
-    intervals = ("5m", "15m", "1h", "4h")
     candles = {}
-    for interval in intervals:
+    for interval in ("1m", "5m", "15m", "1h", "4h"):
         try:
             data = await get_klines(market, symbol, interval, KLINE_LIMIT)
         except MarketError as exc:
-            text = str(exc).lower()
+            message = str(exc).lower()
             if ("100204" in str(exc) or "109425" in str(exc)
-                    or "symbol is not found" in text or "not exist" in text):
+                    or "symbol is not found" in message or "not exist" in message):
                 _unavailable_symbols.add(key)
-                log.warning("Символ %s %s недоступен", market, symbol)
+                log.warning("Фьючерсный контракт %s недоступен", symbol)
                 return None
-            if "недостаточно закрытых свечей" in text:
+            if "недостаточно закрытых свечей" in message:
                 _insufficient_history[key] = now_ts + 6 * 3600
-                log.info("Мало истории %s %s — пауза 6ч", market, symbol)
                 return None
             raise
         if data is None or len(data) < MIN_CANDLE_ROWS:
@@ -1716,75 +1212,60 @@ async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEG
         try:
             save_closed_candles(market, symbol, interval, data)
         except Exception:
-            log.exception("Не сохранились свечи %s %s %s", market, symbol, interval)
+            log.exception("Не сохранились свечи %s %s", symbol, interval)
 
-    try:
-        ver = str(strategy_version or DEFAULT_STRATEGY).upper()
-        if ver == STRATEGY_B:
-            quote = latest_quotes.get(key)
-            signal = build_signal_b(market, symbol, candles, quote=quote)
-        else:
-            signal = build_signal_a_v92(market, symbol, candles)
-    except Exception:
-        log.exception("Ошибка анализа %s %s", market, symbol)
-        return None
-
+    signal = build_signal_b(market, symbol, candles, quote=None)
     if not signal:
         return None
-    try:
-        snapshot = await fetch_live_market_snapshot(market, symbol)
-    except Exception:
-        snapshot = None
+    snapshot = await fetch_live_market_snapshot(market, symbol)
+    if not snapshot:
+        return None
     return enrich_signal_with_live_data(signal, snapshot)
+
 
 async def scan_market(strategy_version=DEFAULT_STRATEGY):
     async with _scan_lock:
         found = []
         system_status["scan_count"] = int(system_status.get("scan_count", 0)) + 1
         system_status["last_scan"] = utc_text()
+        expire_stale_signals()
 
-        for market in MARKETS:
-            for symbol in SYMBOLS:
-                key = (market, symbol)
-                if key in _unavailable_symbols:
+        for symbol in SYMBOLS:
+            key = ("swap", symbol)
+            if key in _unavailable_symbols:
+                continue
+            try:
+                signal = await analyze_market_symbol("swap", symbol, STRATEGY_B)
+                if not signal:
                     continue
-                try:
-                    signal = await analyze_market_symbol(market, symbol, strategy_version)
-                    if not signal:
-                        continue
-                    signal_id = save_signal(signal)
-                    if signal_id:
-                        signal["id"] = signal_id
-                        found.append(signal)
-                        if len(found) >= MAX_SIGNALS_PER_CYCLE:
-                            break
-                except MarketError as exc:
-                    text = str(exc)
-                    if "100410" in text or "100429" in text:
-                        log.debug("Rate limit %s %s", market, symbol)
-                    else:
-                        log.warning("Ошибка %s %s: %s", market, symbol, exc)
-                except Exception:
-                    log.exception("Ошибка сканирования %s %s", market, symbol)
-            if len(found) >= MAX_SIGNALS_PER_CYCLE:
-                break
+                signal_id = save_signal(signal)
+                if signal_id:
+                    signal["id"] = signal_id
+                    found.append(signal)
+                    if len(found) >= MAX_SIGNALS_PER_CYCLE:
+                        break
+            except MarketError as exc:
+                message = str(exc)
+                if "100410" in message or "100429" in message:
+                    log.debug("Rate limit %s: %s", symbol, message)
+                else:
+                    log.warning("Ошибка сканирования %s: %s", symbol, exc)
+            except Exception:
+                log.exception("Ошибка сканирования %s", symbol)
 
         system_status["signals_count"] = int(system_status.get("signals_count", 0)) + len(found)
         return found
+
 
 async def broadcast_signal(signal):
     with db() as con:
         users = con.execute("SELECT user_id FROM users WHERE is_active=1").fetchall()
     for row in users:
-        uid = row["user_id"]
-        if get_user_strategy(uid) != str(signal.get("strategy_version", STRATEGY_A)).upper():
-            continue
         try:
-            await bot.send_message(uid, signal_text(signal),
-                                   reply_markup=signal_keyboard(signal["id"]),
-                                   parse_mode="HTML")
+            await bot.send_message(row["user_id"], signal_text(signal), parse_mode="HTML")
         except Exception:
-            log.exception("Не отправлен сигнал %s", uid)
+            log.exception("Не отправлен сигнал пользователю %s", row["user_id"])
+
 
 
 # ============================================================
@@ -1794,350 +1275,88 @@ async def broadcast_signal(signal):
 @router.message(CommandStart())
 async def start_command(message: Message):
     register_user(message.from_user)
-    clear_user_dialog_state(message.from_user.id)
     await message.answer(
-        "Привет! Trading Bot v9.3.\n\n"
-        "Бот анализирует публичные данные BingX и шлёт сигналы.\n\n"
-        "⚠️ Это аналитика, не исполненная сделка. Сопровождение — только после "
-        "подтверждения входа и ввода фактической цены.\n\n"
-        "Выбери раздел в меню.",
-        reply_markup=main_keyboard(),
-    )
+        f"<b>Trading Bot v{BOT_VERSION} — Futures Scalping</b>\n\n"
+        "Бот анализирует только USDT-M Futures на BingX.\n"
+        "Он отправляет редкие сигналы, только если совпали тренд 1H/15m, "
+        "импульс 5m и 1m, структура рынка, объём и фильтры издержек.\n\n"
+        "После отправки сигнала бот не сопровождает сделку, не двигает TP/SL "
+        "и не отправляет уведомления о достижении уровней. Реальные ордера отключены.\n\n"
+        "Если подходящего сетапа нет — бот ничего не отправляет.",
+        reply_markup=main_keyboard(), parse_mode="HTML")
+
 
 @router.message(Command("cancel"))
 async def cancel_command(message: Message):
-    clear_user_dialog_state(message.from_user.id)
-    await message.answer("Действие отменено.", reply_markup=main_keyboard())
+    await message.answer("Нет активных диалогов. Используй меню.", reply_markup=main_keyboard())
 
-@router.message(F.text == "🔎 Анализ рынка")
+
+@router.message(F.text == "🔎 Сканировать Futures")
 async def scan_market_callback(message: Message):
     register_user(message.from_user)
-    clear_user_dialog_state(message.from_user.id)
-    ver = get_user_strategy(message.from_user.id)
-    status = await message.answer(f"⏳ Анализ рынка (стратегия {ver})...")
+    status = await message.answer("⏳ Проверяю USDT-M Futures. Отправлю только сильные сетапы...")
     try:
-        expire_stale_signals()
-        signals = await scan_market(strategy_version=ver)
+        signals = await scan_market(strategy_version=STRATEGY_B)
         if not signals:
-            await status.edit_text("Пока нет новых сигналов.")
+            await status.edit_text("Сильных подтверждённых сетапов сейчас нет. Это нормально: бот не будет отправлять слабые прогнозы.")
             return
-        await status.edit_text(f"✅ Найдено сигналов: {len(signals)}.")
-        for sig in signals:
-            await message.answer(signal_text(sig),
-                                 reply_markup=signal_keyboard(sig["id"]),
-                                 parse_mode="HTML")
+        await status.edit_text(f"✅ Найдено сильных сетапов: {len(signals)}.")
+        for signal in signals:
+            await message.answer(signal_text(signal), parse_mode="HTML")
     except Exception:
         log.exception("Ошибка ручного сканирования")
-        await status.edit_text("❌ Не удалось завершить анализ.")
+        await status.edit_text("❌ Не удалось завершить анализ. Подробности записаны в лог.")
 
-@router.callback_query(F.data.startswith("enter:"))
-async def enter_trade_callback(callback: CallbackQuery):
-    register_user(callback.from_user)
-    try:
-        signal_id = int(callback.data.split(":")[1])
-    except (ValueError, IndexError):
-        await callback.answer("Некорректный сигнал.", show_alert=True)
-        return
 
-    with db() as conn:
-        signal = conn.execute("SELECT id, market, symbol, status, expires_at FROM signals WHERE id=?",
-                              (signal_id,)).fetchone()
-    if not signal:
-        await callback.answer("Сигнал не найден.", show_alert=True)
-        return
-    sig_status = str(signal["status"] or "").upper()
-    if sig_status == "ENTERED":
-        await callback.answer("По этому сигналу уже открыта сделка.", show_alert=True)
-        return
-    exp_dt = parse_utc_text(signal["expires_at"])
-    if sig_status in ("EXPIRED", "CANCELLED") or (exp_dt and utc_now() >= exp_dt):
-        await callback.answer("Сигнал просрочен или отменён.", show_alert=True)
-        return
-    if len(get_active_trades(callback.from_user.id)) >= MAX_ACTIVE_TRADES:
-        await callback.answer(f"Лимит {MAX_ACTIVE_TRADES} активных сделок.", show_alert=True)
-        return
-    market = str(signal["market"]).lower()
-    if get_user_balance(callback.from_user.id, market) <= 0:
-        await callback.message.answer(f"Сначала укажи баланс {market_name(market)} в «Настройках».")
-        await callback.answer()
-        return
 
-    set_user_dialog_state(callback.from_user.id, "waiting_entry", signal_id)
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    await callback.message.answer(
-        f"Ты подтвердил вход в {signal['symbol']}.\n\n"
-        "Введи фактическую цену входа (например: 67250.5).\n\n"
-        "Бот НЕ открывает сделку на бирже — только сопровождает."
-    )
-    await callback.answer()
 
-@router.callback_query(F.data.startswith("trade_refresh:"))
-async def trade_refresh_callback(callback: CallbackQuery):
-    try:
-        trade_id = int(callback.data.split(":")[1])
-    except (ValueError, IndexError):
-        await callback.answer("Неверный ID.", show_alert=True)
-        return
-    trade = get_trade(trade_id, callback.from_user.id)
-    if not trade:
-        await callback.answer("Сделка не найдена.", show_alert=True)
-        return
-    await callback.message.answer(trade_text(trade),
-                                  reply_markup=trade_keyboard(trade_id),
-                                  parse_mode="HTML")
-    await callback.answer("Обновлено.")
 
-@router.callback_query(F.data.startswith("trade_edit_entry:"))
-async def trade_edit_entry_callback(callback: CallbackQuery):
-    try:
-        trade_id = int(callback.data.split(":")[1])
-    except (ValueError, IndexError):
-        await callback.answer("Неверный ID.", show_alert=True)
-        return
-    trade = get_trade(trade_id, callback.from_user.id)
-    if not trade:
-        await callback.answer("Сделка не найдена.", show_alert=True)
-        return
-    set_user_dialog_state(callback.from_user.id, "waiting_new_entry", trade_id)
-    await callback.message.answer("Введи новую цену входа. SL/TP пересчитаются.")
-    await callback.answer()
 
-@router.callback_query(F.data.startswith("trade_edit_sl:"))
-async def trade_edit_sl_callback(callback: CallbackQuery):
-    try:
-        trade_id = int(callback.data.split(":")[1])
-    except (ValueError, IndexError):
-        await callback.answer("Неверный ID.", show_alert=True)
-        return
-    trade = get_trade(trade_id, callback.from_user.id)
-    if not trade:
-        await callback.answer("Сделка не найдена.", show_alert=True)
-        return
-    set_user_dialog_state(callback.from_user.id, "waiting_sl", trade_id)
-    await callback.message.answer("Введи новый SL. Объём и 1R сохранятся.")
-    await callback.answer()
 
-@router.callback_query(F.data.startswith("trade_close:"))
-async def trade_close_callback(callback: CallbackQuery):
-    try:
-        trade_id = int(callback.data.split(":")[1])
-    except (ValueError, IndexError):
-        await callback.answer("Неверный ID.", show_alert=True)
-        return
-    trade = get_trade(trade_id, callback.from_user.id)
-    if not trade:
-        await callback.answer("Сделка не найдена.", show_alert=True)
-        return
-    set_user_dialog_state(callback.from_user.id, "waiting_close_price", trade_id)
-    await callback.message.answer(
-        "Введи фактическую цену выхода.\n"
-        "Для отмены — /cancel."
-    )
-    await callback.answer()
 
-@router.callback_query(F.data.startswith("tp1_confirm:"))
-async def tp1_confirm_callback(callback: CallbackQuery):
-    try:
-        trade_id = int(callback.data.split(":")[1])
-    except (ValueError, IndexError):
-        await callback.answer("Неверный ID.", show_alert=True)
-        return
-    trade = get_trade(trade_id, callback.from_user.id)
-    if not trade or trade.get("tp1_hit"):
-        await callback.answer("Уже подтверждено или сделка не найдена.", show_alert=True)
-        return
-    tp1_price = safe_float(trade["tp1"], 0)
-    qty_full = safe_float(trade["position_size"], 0)
-    qty_tp1 = qty_full * (TP1_CLOSE_PERCENT / 100.0)
-    fee = qty_tp1 * tp1_price * TAKER_FEE_RATE
-    remaining = 100.0 - TP1_CLOSE_PERCENT
-    with db() as conn:
-        conn.execute("""UPDATE trades SET tp1_hit=1, tp1_fill_price=?, tp1_fill_qty=?,
-            tp1_fill_fee=?, tp1_closed_at=?, remaining_percent=?,
-            total_fees_paid=COALESCE(total_fees_paid, 0) + ?,
-            updated_at=? WHERE id=? AND user_id=?""",
-            (tp1_price, qty_tp1, fee, utc_text(), remaining, fee, utc_text(),
-             trade_id, callback.from_user.id))
-    save_trade_event(trade_id, callback.from_user.id, "tp1_confirmed", "Подтверждён TP1", tp1_price)
-    save_trade_execution(trade_id, callback.from_user.id, "tp1_close", tp1_price,
-                         qty_tp1, TP1_CLOSE_PERCENT, fee, 0.0, 0.0)
-    await callback.message.answer(f"✅ TP1 подтверждён. Закрыто {TP1_CLOSE_PERCENT:.0f}%.")
-    await callback.answer()
 
-@router.callback_query(F.data.startswith("tp2_confirm:"))
-async def tp2_confirm_callback(callback: CallbackQuery):
-    try:
-        trade_id = int(callback.data.split(":")[1])
-    except (ValueError, IndexError):
-        await callback.answer("Неверный ID.", show_alert=True)
-        return
-    trade = get_trade(trade_id, callback.from_user.id)
-    if not trade:
-        await callback.answer("Сделка не найдена.", show_alert=True)
-        return
-    ok, msg = close_trade_record(trade, trade["tp2"], "TP2 достигнут", exec_type="tp2_close")
-    await callback.message.answer(msg if ok else f"❌ {msg}")
-    await callback.answer()
 
-@router.callback_query(F.data.startswith("sl_confirm:"))
-async def sl_confirm_callback(callback: CallbackQuery):
-    try:
-        trade_id = int(callback.data.split(":")[1])
-    except (ValueError, IndexError):
-        await callback.answer("Неверный ID.", show_alert=True)
-        return
-    trade = get_trade(trade_id, callback.from_user.id)
-    if not trade:
-        await callback.answer("Сделка не найдена.", show_alert=True)
-        return
-    ok, msg = close_trade_record(trade, trade["sl"], "Стоп-лосс", exec_type="sl_close")
-    await callback.message.answer(msg if ok else f"❌ {msg}")
-    await callback.answer()
 
-@router.callback_query(F.data.startswith("sl_keep:"))
-async def sl_keep_callback(callback: CallbackQuery):
-    await callback.answer("Сделка оставлена активной.", show_alert=True)
 
-@router.message(F.text == "📊 Мои сделки")
-async def my_trades_handler(message: Message):
-    register_user(message.from_user)
-    clear_user_dialog_state(message.from_user.id)
-    trades = get_active_trades(message.from_user.id)
-    if not trades:
-        await message.answer("📊 Активных сделок нет.")
-        return
-    await message.answer(f"📊 Активных сделок: {len(trades)} / {MAX_ACTIVE_TRADES}")
-    for tr in trades:
-        await message.answer(trade_text(tr), reply_markup=trade_keyboard(tr["id"]), parse_mode="HTML")
 
-@router.message(F.text == "📚 История")
-async def history_handler(message: Message):
-    register_user(message.from_user)
-    clear_user_dialog_state(message.from_user.id)
-    with db() as con:
-        rows = con.execute("""SELECT * FROM trade_history WHERE user_id=?
-            ORDER BY closed_at DESC LIMIT 20""", (message.from_user.id,)).fetchall()
-    if not rows:
-        await message.answer("📚 История пуста.")
-        return
-    lines = ["📚 <b>Последние закрытые сделки</b>\n"]
-    for r in rows:
-        lines.append(
-            f"\n<b>{r['market']} | {r['symbol']}</b>\n"
-            f"{side_name(r['side'])} | {r['result']}\n"
-            f"Вход: {format_price(r['entry'])} → выход: {format_price(r['exit_price'])}\n"
-            f"PnL: {safe_float(r['pnl_percent']):.2f}% / {safe_float(r['pnl_r']):.2f}R"
-        )
-    await message.answer("\n".join(lines), parse_mode="HTML")
-
-@router.message(F.text == "📈 Статистика")
-async def statistics_handler(message: Message):
-    register_user(message.from_user)
-    clear_user_dialog_state(message.from_user.id)
-    with db() as con:
-        total = con.execute("SELECT COUNT(*) AS c FROM trade_history WHERE user_id=?",
-                            (message.from_user.id,)).fetchone()["c"]
-        wins = con.execute("SELECT COUNT(*) AS c FROM trade_history WHERE user_id=? AND result='win'",
-                           (message.from_user.id,)).fetchone()["c"]
-        losses = con.execute("SELECT COUNT(*) AS c FROM trade_history WHERE user_id=? AND result='loss'",
-                             (message.from_user.id,)).fetchone()["c"]
-        agg = con.execute("""SELECT COALESCE(SUM(pnl_percent),0) AS p,
-            COALESCE(SUM(pnl_r),0) AS r FROM trade_history WHERE user_id=?""",
-            (message.from_user.id,)).fetchone()
-    active = len(get_active_trades(message.from_user.id))
-    winrate = wins / total * 100 if total else 0
-    await message.answer(
-        "📈 <b>Статистика</b>\n\n"
-        f"Закрытых: {total}\nПрибыльных: {wins}\nУбыточных: {losses}\n"
-        f"Winrate: {winrate:.1f}%\n"
-        f"Сумма PnL: {safe_float(agg['p']):.2f}% / {safe_float(agg['r']):.2f}R\n"
-        f"Активных: {active}/{MAX_ACTIVE_TRADES}",
-        parse_mode="HTML",
-    )
 
 @router.message(F.text == "⚙️ Настройки")
 async def settings_handler(message: Message):
     register_user(message.from_user)
-    clear_user_dialog_state(message.from_user.id)
-    spot = get_user_balance(message.from_user.id, "spot")
-    swap = get_user_balance(message.from_user.id, "swap")
-    ver = get_user_strategy(message.from_user.id)
     await message.answer(
-        "⚙️ <b>Настройки</b>\n\n"
-        f"Стратегия: <b>{ver}</b>\n"
-        f"Риск: {RISK_PERCENT}%\nПлечо: {FUTURES_LEVERAGE}x\n"
-        f"TP1: {TP1_R}R — {TP1_CLOSE_PERCENT:.0f}%\n"
-        f"TP2: {TP2_R}R — {TP2_CLOSE_PERCENT:.0f}%\n\n"
-        f"Spot: {spot:.2f} USDT\nFutures: {swap:.2f} USDT\n\n"
-        "Команды:\n"
-        "<code>/spotbalance 1000</code>\n"
-        "<code>/swapbalance 500</code>\n"
-        "<code>/strategy A</code> или <code>/strategy B</code>",
-        parse_mode="HTML",
-    )
+        "⚙️ <b>Параметры стратегии</b>\n\n"
+        "Рынок: <b>USDT-M Futures</b>\n"
+        "Стратегия: <b>строгий Scalping B</b>\n"
+        f"Расчётный риск: <b>{RISK_PERCENT:.1f}%</b>\n"
+        f"Плечо для расчётов: <b>{FUTURES_LEVERAGE}x</b>\n"
+        f"TP1: <b>{TP1_R}R</b>  |  TP2: <b>{TP2_R}R</b>\n"
+        f"Минимальное качество: <b>{MIN_QUALITY_SCORE}/100</b>\n"
+        f"Минимальный Net RR: <b>{MIN_NET_RR:.2f}</b>\n"
+        f"Цикл сканирования: примерно каждые {MARKET_SCAN_INTERVAL_SEC // 60} мин после завершения предыдущего цикла.\n\n"
+        "Риск и плечо показываются как ориентиры для ручного расчёта. "
+        "Бот не размещает ордера и не управляет открытыми позициями.",
+        parse_mode="HTML")
 
-@router.message(Command("strategy"))
-async def set_strategy_handler(message: Message):
-    register_user(message.from_user)
-    parts = (message.text or "").split()
-    if len(parts) != 2 or parts[1].upper() not in (STRATEGY_A, STRATEGY_B):
-        await message.answer("Формат: /strategy A или /strategy B")
-        return
-    chosen = set_user_strategy(message.from_user.id, parts[1].upper())
-    await message.answer(f"✅ Стратегия: <b>{chosen}</b>", parse_mode="HTML")
 
-@router.message(Command("spotbalance"))
-async def spot_balance_handler(message: Message):
-    register_user(message.from_user)
-    parts = (message.text or "").split()
-    if len(parts) != 2:
-        await message.answer("Формат: /spotbalance 1000")
-        return
-    try:
-        balance = float(parts[1].replace(",", "."))
-        set_user_balance(message.from_user.id, "spot", balance)
-    except (ValueError, TypeError):
-        await message.answer("Некорректный баланс.")
-        return
-    await message.answer(f"✅ Spot: {balance:.2f} USDT")
 
-@router.message(Command("swapbalance"))
-async def swap_balance_handler(message: Message):
-    register_user(message.from_user)
-    parts = (message.text or "").split()
-    if len(parts) != 2:
-        await message.answer("Формат: /swapbalance 500")
-        return
-    try:
-        balance = float(parts[1].replace(",", "."))
-        set_user_balance(message.from_user.id, "swap", balance)
-    except (ValueError, TypeError):
-        await message.answer("Некорректный баланс.")
-        return
-    await message.answer(f"✅ Futures: {balance:.2f} USDT")
+
 
 @router.message(F.text == "🖥 Статус системы")
 async def system_status_handler(message: Message):
     register_user(message.from_user)
-    clear_user_dialog_state(message.from_user.id)
-    active = len(get_active_trades(message.from_user.id))
-    ver = get_user_strategy(message.from_user.id)
     await message.answer(
         f"🖥 <b>Trading Bot v{BOT_VERSION}</b>\n\n"
-        f"Режим: публичный анализ BingX\n"
-        f"Реальные ордера: <b>отключены</b>\n"
-        f"Стратегия: {ver}\n"
-        f"API: {system_status.get('api_status', '—')}\n"
+        "Режим: <b>USDT-M Futures Scalping</b>\n"
+        "Стратегия: <b>B — строгий фильтр</b>\n"
+        "Реальные ордера: <b>отключены</b>\n"
+        "Сопровождение сделок: <b>удалено</b>\n"
+        f"API BingX: {html.escape(str(system_status.get('api_status', '—')))}\n"
         f"Сканов: {system_status.get('scan_count', 0)}\n"
-        f"Сигналов: {system_status.get('signals_count', 0)}\n"
+        f"Отправлено сигналов: {system_status.get('signals_count', 0)}\n"
         f"Последний скан: {system_status.get('last_scan') or '—'}\n"
-        f"Твои сделки: {active}/{MAX_ACTIVE_TRADES}\n"
-        f"Символов недоступно: {len(_unavailable_symbols)}",
-        parse_mode="HTML",
-    )
+        f"Недоступных контрактов: {len(_unavailable_symbols)}",
+        parse_mode="HTML")
+
 
 @router.message(Command("diag_db"))
 async def diag_db_handler(message: Message):
@@ -2162,14 +1381,11 @@ async def diag_db_handler(message: Message):
             report["counts"] = counts
             report["signals_active"] = con.execute(
                 "SELECT COUNT(*) FROM signals WHERE status IN ('ACTIVE','WAITING_LEVEL')").fetchone()[0]
-            report["trades_active"] = con.execute(
-                "SELECT COUNT(*) FROM trades WHERE LOWER(status)='active'").fetchone()[0]
         text = (
             f"🧪 <b>diag_db</b>\n\n"
             f"integrity: {report['integrity']}\n"
             f"fk_violations: {report['fk_violations']}\n"
             f"active_signals: {report['signals_active']}\n"
-            f"active_trades: {report['trades_active']}\n\n"
             f"counts: {report['counts']}"
         )
         await message.answer(text, parse_mode="HTML")
@@ -2178,223 +1394,32 @@ async def diag_db_handler(message: Message):
         await message.answer(f"❌ Ошибка: {e}")
 
 # ВАЖНО: этот хендлер должен быть ПОСЛЕДНИМ среди F.text
-def _parse_price_input(raw_text: str | None) -> float | None:
-    if not raw_text:
-        return None
-    cleaned = raw_text.strip().replace("\u00a0", "").replace(" ", "").replace(",", ".")
-    if not cleaned:
-        return None
-    try:
-        val = float(cleaned)
-    except ValueError:
-        return None
-    if not math.isfinite(val):
-        return None
-    return val
 
-@router.message(
-    F.text,
-    lambda message: message.from_user is not None
-    and get_user_dialog_state(message.from_user.id) is not None,
-)
-async def handle_user_text(message: Message):
-    user_id = message.from_user.id
-    state = get_user_dialog_state(user_id)
-    if not state:
-        return
-    raw = (message.text or "").strip().lower()
-    if raw in ("отмена", "cancel", "/cancel"):
-        clear_user_dialog_state(user_id)
-        await message.answer("Отменено.", reply_markup=main_keyboard())
-        return
-
-    value = _parse_price_input(message.text)
-    if value is None:
-        await message.answer("Не распознал число. Пример: 67250.5")
-        return
-    if value <= 0:
-        await message.answer("Цена должна быть > 0.")
-        return
-
-    st = state.get("type")
-    ref = state.get("ref_id")
-
-    if st == "waiting_entry":
-        if ref is None:
-            clear_user_dialog_state(user_id)
-            await message.answer("Не удалось определить сигнал. Нажми кнопку снова.")
-            return
-        trade_id, err, warn = create_personal_trade(user_id, int(ref), value)
-        if err:
-            await message.answer(err)
-            return
-        clear_user_dialog_state(user_id)
-        trade = get_trade(trade_id, user_id)
-        prefix = "✅ Сделка добавлена."
-        if warn:
-            prefix = f"{prefix}\n\n{warn}"
-        await message.answer(f"{prefix}\n\n{trade_text(trade)}",
-                             reply_markup=trade_keyboard(trade_id),
-                             parse_mode="HTML")
-        return
-
-    if st == "waiting_new_entry":
-        if ref is None:
-            clear_user_dialog_state(user_id)
-            await message.answer("Сделка не определена.")
-            return
-        ok, msg = update_trade_field(int(ref), user_id, "actual_entry", value)
-        if ok:
-            clear_user_dialog_state(user_id)
-            trade = get_trade(int(ref), user_id)
-            await message.answer(f"{msg}\n\n{trade_text(trade)}",
-                                 reply_markup=trade_keyboard(int(ref)),
-                                 parse_mode="HTML")
-        else:
-            await message.answer(msg)
-        return
-
-    if st == "waiting_sl":
-        if ref is None:
-            clear_user_dialog_state(user_id)
-            await message.answer("Сделка не определена.")
-            return
-        ok, msg = update_trade_field(int(ref), user_id, "sl", value)
-        if ok:
-            clear_user_dialog_state(user_id)
-            trade = get_trade(int(ref), user_id)
-            await message.answer(f"{msg}\n\n{trade_text(trade)}",
-                                 reply_markup=trade_keyboard(int(ref)),
-                                 parse_mode="HTML")
-        else:
-            await message.answer(msg)
-        return
-
-    if st == "waiting_close_price":
-        if ref is None:
-            clear_user_dialog_state(user_id)
-            await message.answer("Сделка не определена.")
-            return
-        trade = get_trade(int(ref), user_id)
-        if not trade:
-            clear_user_dialog_state(user_id)
-            await message.answer("Сделка не найдена.")
-            return
-        ok, msg = close_trade_record(trade, value, "Ручное закрытие", exec_type="manual_close")
-        clear_user_dialog_state(user_id)
-        await message.answer(msg if ok else f"❌ {msg}")
-        return
 
 
 # ============================================================
-# 17. MONITORING (NO AUTO-EXECUTION)
+# 17. BACKGROUND FUTURES SCANNING
 # ============================================================
 
-def trade_event_exists(trade_id, event_type):
-    with db() as con:
-        row = con.execute("SELECT id FROM trade_events WHERE trade_id=? AND event_type=? LIMIT 1",
-                          (trade_id, event_type)).fetchone()
-    return row is not None
 
-async def notify_trade_touch(trade, event_type, price):
-    trade_id = trade["id"]
-    user_id = trade["user_id"]
-    if trade_event_exists(trade_id, event_type):
-        return
 
-    if event_type == "touch_tp1":
-        text = (f"🎯 <b>{trade['symbol']}: TP1</b>\n"
-                f"Цена: {format_price(price)} | TP1: {format_price(trade['tp1'])}\n\n"
-                "Если реально закрыл 70% — подтверди.")
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Подтверждаю TP1", callback_data=f"tp1_confirm:{trade_id}")
-        ]])
-    elif event_type == "touch_tp2":
-        text = (f"🎯 <b>{trade['symbol']}: TP2</b>\n"
-                f"Цена: {format_price(price)} | TP2: {format_price(trade['tp2'])}\n\n"
-                "Если закрыл остаток — подтверди.")
-        kb = confirm_keyboard("tp2", trade_id)
-    else:
-        text = (f"⚠️ <b>{trade['symbol']}: SL</b>\n"
-                f"Цена: {format_price(price)} | SL: {format_price(trade['sl'])}\n\n"
-                "Проверь биржу и подтверди закрытие.")
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Закрыл по SL", callback_data=f"sl_confirm:{trade_id}"),
-            InlineKeyboardButton(text="Оставить", callback_data=f"sl_keep:{trade_id}"),
-        ]])
 
-    try:
-        await bot.send_message(user_id, text, reply_markup=kb, parse_mode="HTML")
-        save_trade_event(trade_id, user_id, event_type, "Касание уровня", price)
-    except Exception:
-        log.exception("Не отправлено уведомление %s", trade_id)
-
-async def monitor_one_trade(trade):
-    market = str(trade["market"]).lower()
-    price = await get_live_price(market, trade["symbol"])
-    if price is None:
-        return
-    with db() as con:
-        con.execute("UPDATE trades SET current_price=?, updated_at=? WHERE id=? AND user_id=?",
-                    (price, utc_text(), trade["id"], trade["user_id"]))
-    sl = safe_float(trade["sl"], 0); tp1 = safe_float(trade["tp1"], 0); tp2 = safe_float(trade["tp2"], 0)
-    long = is_long_side(trade["side"])
-    if long:
-        if sl > 0 and price <= sl:
-            await notify_trade_touch(trade, "touch_sl", price); return
-        if tp2 > 0 and price >= tp2:
-            if not trade.get("tp1_hit") and tp1 > 0:
-                await notify_trade_touch(trade, "touch_tp1", tp1)
-            await notify_trade_touch(trade, "touch_tp2", price); return
-        if tp1 > 0 and price >= tp1 and not trade.get("tp1_hit"):
-            await notify_trade_touch(trade, "touch_tp1", price)
-    else:
-        if sl > 0 and price >= sl:
-            await notify_trade_touch(trade, "touch_sl", price); return
-        if tp2 > 0 and price <= tp2:
-            if not trade.get("tp1_hit") and tp1 > 0:
-                await notify_trade_touch(trade, "touch_tp1", tp1)
-            await notify_trade_touch(trade, "touch_tp2", price); return
-        if tp1 > 0 and price <= tp1 and not trade.get("tp1_hit"):
-            await notify_trade_touch(trade, "touch_tp1", price)
-
-async def background_monitor():
-    log.info("Мониторинг сделок запущен")
-    while True:
-        try:
-            expire_stale_signals()
-            with db() as con:
-                rows = con.execute("""SELECT * FROM trades
-                    WHERE LOWER(COALESCE(status, '')) IN ('active', 'open')
-                    ORDER BY opened_at, id""").fetchall()
-            for row in rows:
-                try:
-                    await monitor_one_trade(row_to_dict(row))
-                except Exception:
-                    log.exception("Ошибка монитора сделки")
-        except Exception:
-            log.exception("Ошибка фонового мониторинга")
-        await asyncio.sleep(TRADE_MONITOR_INTERVAL_SEC)
 
 async def background_scan():
-    log.info("Фоновый скан запущен (интервал %ss)", MARKET_SCAN_INTERVAL_SEC)
-    await asyncio.sleep(60)
+    log.info("Фоновый Futures Scalping скан запущен (интервал %ss)", MARKET_SCAN_INTERVAL_SEC)
+    await asyncio.sleep(30)
     while True:
         try:
             with db() as con:
-                users = con.execute("SELECT user_id, strategy_version FROM user_settings").fetchall()
-            if users:
-                strategies = {str(u["strategy_version"] or DEFAULT_STRATEGY).upper() for u in users}
-                for ver in strategies:
-                    if ver not in (STRATEGY_A, STRATEGY_B):
-                        continue
-                    found = await scan_market(strategy_version=ver)
-                    if found:
-                        for sig in found:
-                            await broadcast_signal(sig)
+                users_count = con.execute("SELECT COUNT(*) FROM users WHERE is_active=1").fetchone()[0]
+            if users_count:
+                found = await scan_market(strategy_version=STRATEGY_B)
+                for signal in found:
+                    await broadcast_signal(signal)
         except Exception:
-            log.exception("Ошибка фонового скана")
+            log.exception("Ошибка фонового Futures-скана")
         await asyncio.sleep(MARKET_SCAN_INTERVAL_SEC)
+
 
 
 # ============================================================
@@ -2424,12 +1449,12 @@ async def main_async() -> None:
     global bot
     dp.include_router(router)
     await on_startup()
-    background_tasks.append(asyncio.create_task(background_monitor()))
     background_tasks.append(asyncio.create_task(background_scan()))
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         await on_shutdown()
+
 
 def main() -> None:
     try:
