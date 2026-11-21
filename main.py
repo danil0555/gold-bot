@@ -1767,8 +1767,9 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
         system_status["last_scan_checked"] = 0
         system_status["last_scan_planned"] = len(SYMBOLS)
         system_status["last_scan_summary"] = "Сканирование выполняется"
-        log.info("SCAN #%s START market=USDT-M Futures planned=%s strategies=B,C,D,E",
-                 scan_no, len(SYMBOLS))
+        active_strategies = "B,C,D,E" if ENABLE_ADDON_STRATEGIES else "B"
+        log.info("SCAN #%s START market=USDT-M Futures planned=%s strategies=%s",
+                 scan_no, len(SYMBOLS), active_strategies)
         expire_stale_signals()
 
         for symbol in SYMBOLS:
