@@ -1970,7 +1970,7 @@ async def settings_handler(message: Message):
     await message.answer(
         "⚙️ <b>Параметры стратегии</b>\n\n"
         "Рынок: <b>USDT-M Futures</b>\n"
-        "Стратегии: <b>B (исходная), C (пробой/ретест), D (импульс), E (разворот перегрева)</b>\n"
+        f"Стратегия B: <b>активна</b> | C/D/E: <b>{'включены' if ENABLE_ADDON_STRATEGIES else 'выключены'}</b>\n"
         f"Расчётный риск: <b>{RISK_PERCENT:.1f}%</b>\n"
         f"Плечо для расчётов: <b>{FUTURES_LEVERAGE}x</b>\n"
         f"TP1: <b>{TP1_R}R</b>  |  TP2: <b>{TP2_R}R</b>\n"
@@ -1991,7 +1991,7 @@ async def system_status_handler(message: Message):
     await message.answer(
         f"🖥 <b>Trading Bot v{BOT_VERSION}</b>\n\n"
         "Режим: <b>USDT-M Futures Scalping</b>\n"
-        "Стратегии: <b>B + C/D/E (независимые модули)</b>\n"
+        f"Стратегия B: <b>активна</b> | C/D/E: <b>{'активны' if ENABLE_ADDON_STRATEGIES else 'выключены по умолчанию'}</b>\n"
         "Реальные ордера: <b>отключены</b>\n"
         "Сопровождение сделок: <b>удалено</b>\n"
         f"API BingX: {html.escape(str(system_status.get('api_status', '—')))}\n"
