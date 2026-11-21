@@ -14,6 +14,7 @@ on:
 jobs:
   syntax:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -30,4 +31,4 @@ jobs:
       - name: Run read-only BingX historical backtest (7 days)
         if: github.event_name == 'push'
         run: python scripts/backtest_addons.py --days 7 --symbols BTC-USDT,ETH-USDT,SOL-USDT
-        timeout-minutes: 10
+        timeout-minutes: 20
