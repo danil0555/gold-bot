@@ -1,5 +1,6 @@
 import ast
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,22 @@ def trending_frames():
     m15 = candles(np.linspace(80.0, 100.0, 100), spread=0.8)
     m1 = candles(np.linspace(95.0, 100.0, 100), spread=0.15)
     return {"1m": m1, "5m": m5, "15m": m15}
+
+
+def test_addon_strategies_are_disabled_by_default_and_can_be_explicitly_enabled(monkeypatch):
+    source = ast.parse(Path("main.py").read_text(encoding="utf-8"))
+    assignment = next(
+        node for node in source.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "ENABLE_ADDON_STRATEGIES"
+                for target in node.targets)
+    )
+    monkeypatch.delenv("ENABLE_ADDON_STRATEGIES", raising=False)
+    value = eval(compile(ast.Expression(assignment.value), "main.py", "eval"), {"os": os})
+    assert value is False
+    monkeypatch.setenv("ENABLE_ADDON_STRATEGIES", "true")
+    value = eval(compile(ast.Expression(assignment.value), "main.py", "eval"), {"os": os})
+    assert value is True
 
 
 def test_addon_risk_levels_and_rr_are_consistent():
