@@ -4,15 +4,6 @@ on:
   push:
     branches: [research/strategy-b-historical-backtest]
   workflow_dispatch:
-    inputs:
-      days:
-        description: Evaluation period in days
-        required: true
-        default: "30"
-      warmup_days:
-        description: Indicator warm-up period (must be at least 35)
-        required: true
-        default: "60"
 
 jobs:
   strategy-b-backtest:
@@ -32,8 +23,5 @@ jobs:
       - name: Run deterministic tests
         run: python -m pytest -q tests/test_strategy_b_backtest.py tests/test_addon_strategies.py
       - name: Run 30-day Strategy B historical simulation
-        env:
-          DAYS: \${{ github.event.inputs.days || '30' }}
-          WARMUP_DAYS: \${{ github.event.inputs.warmup_days || '60' }}
-        run: python -m scripts.backtest_strategy_b --days "$DAYS" --warmup-days "$WARMUP_DAYS" --symbols BTC-USDT,ETH-USDT,SOL-USDT
+        run: python -m scripts.backtest_strategy_b --days 30 --warmup-days 60 --symbols BTC-USDT,ETH-USDT,SOL-USDT
         timeout-minutes: 40
