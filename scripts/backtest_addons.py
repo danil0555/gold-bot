@@ -67,7 +67,7 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
             time.sleep(wait)
         query = urllib.parse.urlencode({
             "symbol": symbol, "interval": interval, "startTime": cursor,
-            "endTime": end_ms, "limit": 1440,
+            "endTime": end_ms, "limit": 1000,
         })
         req = urllib.request.Request(
             BASE + PATH + "?" + query,
@@ -106,7 +106,7 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
         rows.extend(parsed)
         newest = max(row[0] for row in parsed)
         next_cursor = newest + step
-        if next_cursor <= cursor or len(parsed) < 1440 or next_cursor >= end_ms:
+        if next_cursor <= cursor or len(parsed) < 1000 or next_cursor >= end_ms:
             break
         cursor = next_cursor
         time.sleep(1.05)  # documented public kline endpoint limit: 1 request/sec
@@ -184,7 +184,7 @@ def run(args):
     ns = load_builders()
     now = int(time.time() * 1000)
     eval_start = now - args.days * 86_400_000
-    fetch_start = eval_start - 5 * 86_400_000  # warm-up for indicators/EMA context
+    fetch_start = eval_start - 2 * 86_400_000  # warm-up covers EMA50/ADX context
     totals = {name: defaultdict(float) for name in STRATEGIES}
     rows_out = []
     for symbol in args.symbols.split(","):
@@ -196,6 +196,15 @@ def run(args):
             tf: fetch_interval(symbol, tf, fetch_start, now)
             for tf in ("1m", "5m", "15m")
         }
+        expected_minutes = (args.days + 2) * 24 * 60
+        for tf, frame in frames.items():
+            interval_minutes = INTERVAL_MS[tf] // 60_000
+            minimum_rows = int(expected_minutes / interval_minutes * 0.95)
+            if len(frame) < minimum_rows:
+                raise RuntimeError(
+                    f"Incomplete BingX history for {symbol} {tf}: "
+                    f"{len(frame)} candles, expected at least {minimum_rows}"
+                )
         m1 = frames["1m"]
         eligible = m1.index[m1["close_time"] >= eval_start]
         if len(eligible) == 0:
