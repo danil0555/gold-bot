@@ -1031,6 +1031,12 @@ STRATEGY_D = "D_IMPULSE"
 STRATEGY_E = "E_OVERHEAT_REVERSAL"
 ADDON_STRATEGIES = (STRATEGY_C, STRATEGY_D, STRATEGY_E)
 
+# Historical 7-day validation was negative for C/D/E. Keep them dormant by
+# default until a longer out-of-sample validation supports enabling them.
+ENABLE_ADDON_STRATEGIES = os.getenv("ENABLE_ADDON_STRATEGIES", "false").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
 
 def _addon_reject(diagnostics: dict[str, Any] | None, reason: str):
     if diagnostics is not None:
@@ -1817,7 +1823,12 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
                 log.exception("SCAN #%s %s INTERNAL_ERROR", scan_no, symbol)
 
         # C/D/E получают те же свечи — второй раз REST-данные не запрашиваются.
-        for symbol, frames in addon_frames.items():
+        # Эти модули выключены по умолчанию: 7-дневная проверка показала
+        # отрицательный результат для всех трёх стратегий.
+        if not ENABLE_ADDON_STRATEGIES:
+            log.info("SCAN #%s ADDON_STRATEGIES_DISABLED: "
+                     "set ENABLE_ADDON_STRATEGIES=true only after further validation", scan_no)
+        for symbol, frames in (addon_frames.items() if ENABLE_ADDON_STRATEGIES else ()):
             if ("swap", symbol) in _unavailable_symbols:
                 continue
             try:
