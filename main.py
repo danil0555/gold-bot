@@ -52,7 +52,7 @@ if not BOT_TOKEN:
     raise RuntimeError("Не найден BOT_TOKEN. Добавь токен в файл .env")
 
 BOT_NAME = "Trading Bot"
-BOT_VERSION = "10.1"
+BOT_VERSION = "10.2.1"
 
 BASE = "https://open-api.bingx.com"
 
@@ -155,7 +155,10 @@ candle_cache: dict[tuple[str, str, str], pd.DataFrame] = {}
 ws_1m_frames: dict[str, pd.DataFrame] = {}
 ws_current_minute: dict[str, dict[str, Any]] = {}
 ws_seen_trade_ids: dict[str, tuple[deque, set[str]]] = {}
-ws_status = {"connected": False, "last_message": None, "reconnects": 0}
+ws_status = {
+    "connected": False, "last_message": None, "reconnects": 0,
+    "trades_received": 0, "candles_closed": 0, "last_trade_symbol": None,
+}
 latest_prices: dict[tuple[str, str], float] = {}
 latest_quotes: dict[tuple[str, str], dict[str, Any]] = {}
 _unavailable_symbols: set[tuple[str, str]] = set()
@@ -641,6 +644,7 @@ def _append_closed_ws_candle(symbol: str, candle: dict[str, Any]) -> None:
                     .tail(WS_CANDLE_BUFFER_LIMIT)
                     .reset_index(drop=True))
     ws_1m_frames[symbol] = merged
+    ws_status["candles_closed"] = int(ws_status.get("candles_closed", 0)) + 1
     ws_status["last_message"] = utc_text()
 
 
@@ -658,6 +662,8 @@ def _update_ws_trade(symbol: str, trade: dict[str, Any]) -> None:
         if trade_id in seen:
             return
         seen.add(trade_id)
+        ws_status["trades_received"] = int(ws_status.get("trades_received", 0)) + 1
+        ws_status["last_trade_symbol"] = symbol
         queue.append(trade_id)
         while len(queue) > 5000:
             old_id = queue.popleft()
@@ -1296,9 +1302,17 @@ def enrich_signal_with_live_data(sig: dict[str, Any], snapshot: dict[str, Any] |
         eff_rew = max(abs(safe_float(enriched.get("tp2")) - calc_entry) - cost_dist, 0.0)
         enriched["net_rr"] = eff_rew / eff_risk
         base_score = safe_float(enriched.get("score"), 0.0)
-        enriched["quality_score"] = round(min(100.0, 60.0 + base_score * 4.0
-            + (5.0 if enriched["net_rr"] >= 2.0 else 0.0)
-            - spread_pct * 20.0), 1)
+        strategy_name = str(enriched.get("strategy_version", STRATEGY_B))
+        if strategy_name in ADDON_STRATEGIES:
+            # Для C/D/E используем ту же формулу качества, что и при создании
+            # кандидата в _make_addon_signal. Формула B ниже остаётся неизменной.
+            enriched["quality_score"] = round(min(
+                100.0, 62.0 + base_score * 5.0 - spread_pct * 10.0
+            ), 1)
+        else:
+            enriched["quality_score"] = round(min(100.0, 60.0 + base_score * 4.0
+                + (5.0 if enriched["net_rr"] >= 2.0 else 0.0)
+                - spread_pct * 20.0), 1)
         if enriched["net_rr"] < MIN_NET_RR or enriched["quality_score"] < MIN_QUALITY_SCORE:
             enriched["status"] = "CANCELLED"
             enriched["cancel_reason"] = "Качество или Net RR не прошли проверку по реальной котировке"
@@ -1517,8 +1531,10 @@ def main_keyboard():
 # 15. ANALYSIS + SCAN
 # ============================================================
 
-async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEGY, diagnostics=None):
-    # Стратегия B остаётся неизменной; новые модули запускаются отдельно после её скана.
+async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEGY,
+                                diagnostics=None, frames_out=None):
+    # Стратегия B сохраняет прежние пять таймфреймов и прежние фильтры.
+    # frames_out передаёт уже загруженные данные независимым C/D/E без повторных REST-запросов.
     market = "swap"
     key = (market, symbol)
 
@@ -1530,38 +1546,47 @@ async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEG
 
     if key in _unavailable_symbols:
         return stop("контракт ранее отмечен как недоступный")
-    now_ts = time.monotonic()
-    if key in _insufficient_history and now_ts < _insufficient_history[key]:
-        return stop("недостаточно закрытых свечей; действует временный cooldown")
 
     candles = {}
+    errors = {}
     for interval in ("1m", "5m", "15m", "1h", "4h"):
         try:
             data = await get_klines(market, symbol, interval, KLINE_LIMIT)
+            if data is None or len(data) < MIN_CANDLE_ROWS:
+                actual = 0 if data is None else len(data)
+                errors[interval] = f"{interval}: получено {actual} свечей, требуется {MIN_CANDLE_ROWS}"
+                continue
+            candles[interval] = data
+            try:
+                save_closed_candles(market, symbol, interval, data)
+            except Exception:
+                log.exception("Не сохранились свечи %s %s", symbol, interval)
         except MarketError as exc:
             message = str(exc).lower()
             if ("100204" in str(exc) or "109425" in str(exc)
                     or "symbol is not found" in message or "not exist" in message):
                 _unavailable_symbols.add(key)
                 log.warning("Фьючерсный контракт %s недоступен: %s", symbol, exc)
+                if frames_out is not None:
+                    frames_out.update(candles)
                 return stop(f"контракт недоступен: {exc}")
-            if "недостаточно закрытых свечей" in message:
-                _insufficient_history[key] = now_ts + 6 * 3600
-                return stop(f"{interval}: недостаточно закрытых свечей; повтор через 6 часов")
-            if isinstance(exc, asyncio.TimeoutError) or "timeout" in message:
-                return stop(f"тайм-аут API на {interval}: {exc}", "api_error")
-            return stop(f"ошибка API на {interval}: {exc}", "api_error")
+            errors[interval] = f"ошибка API на {interval}: {exc}"
         except asyncio.TimeoutError as exc:
-            return stop(f"тайм-аут API на {interval}: {exc}", "api_error")
+            errors[interval] = f"тайм-аут API на {interval}: {exc}"
 
-        if data is None or len(data) < MIN_CANDLE_ROWS:
-            actual = 0 if data is None else len(data)
-            return stop(f"{interval}: получено {actual} свечей, требуется {MIN_CANDLE_ROWS}")
-        candles[interval] = data
-        try:
-            save_closed_candles(market, symbol, interval, data)
-        except Exception:
-            log.exception("Не сохранились свечи %s %s", symbol, interval)
+    if "1m" in candles:
+        live_frame = ws_1m_frames.get(symbol)
+        if live_frame is not None and len(live_frame) >= MIN_CANDLE_ROWS:
+            candles["1m"] = live_frame.copy()
+
+    if frames_out is not None:
+        frames_out.update(candles)
+
+    required = ("1m", "5m", "15m", "1h", "4h")
+    missing = [tf for tf in required if tf not in candles]
+    if missing:
+        reason = errors.get(missing[0], f"нет данных таймфрейма {missing[0]}")
+        return stop(reason, "api_error" if ("ошибка API" in reason or "тайм-аут" in reason) else "market_data")
 
     if diagnostics is not None:
         diagnostics["stage"] = "strategy_filter"
@@ -1586,46 +1611,54 @@ async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEG
     return final_signal
 
 
-
-async def analyze_addon_strategies(symbol: str) -> list[dict[str, Any]]:
-    """Получает общий набор свечей и независимо проверяет C/D/E."""
+async def analyze_addon_strategies(symbol: str, frames: dict[str, pd.DataFrame],
+                                  diagnostics: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Проверяет C/D/E на свечах, уже загруженных основным проходом."""
     if ("swap", symbol) in _unavailable_symbols:
         return []
-    frames: dict[str, pd.DataFrame] = {}
-    for interval in ("1m", "5m", "15m"):
-        data = await get_klines("swap", symbol, interval, KLINE_LIMIT)
-        if data is None or len(data) < MIN_CANDLE_ROWS:
-            return []
-        frames[interval] = data
-    live_frame = ws_1m_frames.get(symbol)
-    if live_frame is not None and len(live_frame) >= MIN_CANDLE_ROWS:
-        frames["1m"] = live_frame.copy()
     builders = (
-        build_signal_c_breakout_retest,
-        build_signal_d_impulse,
-        build_signal_e_overheat_reversal,
+        (STRATEGY_C, build_signal_c_breakout_retest),
+        (STRATEGY_D, build_signal_d_impulse),
+        (STRATEGY_E, build_signal_e_overheat_reversal),
     )
     results = []
-    for builder in builders:
+    for strategy_name, builder in builders:
+        if diagnostics is not None:
+            diagnostics[strategy_name]["checked"] += 1
         try:
             candidate = builder(symbol, frames)
             if not candidate:
+                if diagnostics is not None:
+                    diagnostics[strategy_name]["rejected"] += 1
                 continue
+            if diagnostics is not None:
+                diagnostics[strategy_name]["candidate"] += 1
             snapshot = await fetch_live_market_snapshot("swap", symbol)
             if not snapshot:
+                if diagnostics is not None:
+                    diagnostics[strategy_name]["rejected"] += 1
+                log.info("ADDON_REJECT %s %s: нет актуальной котировки", strategy_name, symbol)
                 continue
             final_candidate = enrich_signal_with_live_data(candidate, snapshot)
             if final_candidate.get("status") == "CANCELLED":
+                if diagnostics is not None:
+                    diagnostics[strategy_name]["rejected"] += 1
+                log.info("ADDON_REJECT %s %s: %s", strategy_name, symbol,
+                         final_candidate.get("cancel_reason") or "live validation")
                 continue
             results.append(final_candidate)
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("Ошибка дополнительной стратегии %s для %s", builder.__name__, symbol)
+            if diagnostics is not None:
+                diagnostics[strategy_name]["errors"] += 1
+            log.exception("Ошибка дополнительной стратегии %s для %s", strategy_name, symbol)
     if not results:
         return []
     directions = {str(item.get("side")) for item in results}
     if len(directions) > 1:
+        if diagnostics is not None:
+            diagnostics["conflicts"] += 1
         log.info("ADDON_CONFLICT %s: стратегии C/D/E дали разные направления; сигнал пропущен", symbol)
         return []
     results.sort(key=lambda item: (
@@ -1634,6 +1667,7 @@ async def analyze_addon_strategies(symbol: str) -> list[dict[str, Any]]:
         safe_float(item.get("score")),
     ), reverse=True)
     return results[:1]
+
 
 
 async def scan_market(strategy_version=DEFAULT_STRATEGY):
@@ -1645,7 +1679,14 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
         skipped_unavailable = 0
         reason_counts: dict[str, int] = {}
         stage_counts: dict[str, int] = {}
+        addon_stats: dict[str, Any] = {
+            name: {"checked": 0, "candidate": 0, "rejected": 0, "errors": 0}
+            for name in ADDON_STRATEGIES
+        }
+        addon_stats["conflicts"] = 0
+        addon_frames: dict[str, dict[str, pd.DataFrame]] = {}
         system_status["scan_count"] = int(system_status.get("scan_count", 0)) + 1
+        scan_no = system_status["scan_count"]
         system_status["last_scan"] = scan_started_utc
         system_status["last_scan_started"] = scan_started_utc
         system_status["last_scan_finished"] = None
@@ -1653,7 +1694,8 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
         system_status["last_scan_checked"] = 0
         system_status["last_scan_planned"] = len(SYMBOLS)
         system_status["last_scan_summary"] = "Сканирование выполняется"
-        log.info("SCAN #%s START market=USDT-M Futures planned=%s strategies=B,C,D,E", system_status["scan_count"], len(SYMBOLS))
+        log.info("SCAN #%s START market=USDT-M Futures planned=%s strategies=B,C,D,E",
+                 scan_no, len(SYMBOLS))
         expire_stale_signals()
 
         for symbol in SYMBOLS:
@@ -1662,73 +1704,78 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
                 skipped_unavailable += 1
                 reason = "контракт ранее отмечен как недоступный"
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
-                log.info("SCAN #%s %s SKIP: %s", system_status["scan_count"], symbol, reason)
+                log.info("SCAN #%s %s SKIP: %s", scan_no, symbol, reason)
                 continue
 
             checked += 1
             diag: dict[str, str] = {"stage": "starting", "reason": "анализ не завершён"}
+            shared_frames: dict[str, pd.DataFrame] = {}
             try:
-                signal = await analyze_market_symbol("swap", symbol, STRATEGY_B, diagnostics=diag)
+                signal = await analyze_market_symbol(
+                    "swap", symbol, STRATEGY_B, diagnostics=diag, frames_out=shared_frames
+                )
+                addon_frames[symbol] = shared_frames
                 if not signal:
                     reason = diag.get("reason", "сигнал не сформирован")
                     stage = diag.get("stage", "unknown")
                     reason_counts[reason] = reason_counts.get(reason, 0) + 1
                     stage_counts[stage] = stage_counts.get(stage, 0) + 1
-                    log.info("SCAN #%s %s REJECT stage=%s reason=%s", system_status["scan_count"], symbol, stage, reason)
-                    continue
-
-                signal_id = save_signal(signal)
-                if signal_id:
-                    signal["id"] = signal_id
-                    found.append(signal)
-                    log.info("SCAN #%s %s ACCEPT side=%s quality=%.1f net_rr=%.2f", system_status["scan_count"], symbol, signal.get("side"), safe_float(signal.get("quality_score")), safe_float(signal.get("net_rr")))
-                    if len(found) >= MAX_SIGNALS_PER_CYCLE:
-                        log.info("SCAN #%s reached MAX_SIGNALS_PER_CYCLE=%s; remaining symbols not checked", system_status["scan_count"], MAX_SIGNALS_PER_CYCLE)
-                        break
+                    log.info("SCAN #%s %s B_REJECT stage=%s reason=%s",
+                             scan_no, symbol, stage, reason)
                 else:
-                    reason = "сигнал прошёл анализ, но не был сохранён в БД (возможно, дубликат/cooldown)"
-                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
-                    log.info("SCAN #%s %s NOT_SAVED: %s", system_status["scan_count"], symbol, reason)
+                    signal_id = save_signal(signal)
+                    if signal_id:
+                        signal["id"] = signal_id
+                        found.append(signal)
+                        log.info("SCAN #%s %s B_ACCEPT side=%s quality=%.1f net_rr=%.2f",
+                                 scan_no, symbol, signal.get("side"),
+                                 safe_float(signal.get("quality_score")), safe_float(signal.get("net_rr")))
+                        if len(found) >= MAX_SIGNALS_PER_CYCLE:
+                            log.info("SCAN #%s reached MAX_SIGNALS_PER_CYCLE=%s; remaining symbols not checked",
+                                     scan_no, MAX_SIGNALS_PER_CYCLE)
+                            break
+                    else:
+                        reason = "B: сигнал прошёл анализ, но не сохранён (дубликат/cooldown)"
+                        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                        log.info("SCAN #%s %s B_NOT_SAVED: %s", scan_no, symbol, reason)
             except asyncio.CancelledError:
                 raise
             except MarketError as exc:
                 reason = f"ошибка BingX/API: {exc}"
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
-                log.warning("SCAN #%s %s API_ERROR: %s", system_status["scan_count"], symbol, exc)
+                log.warning("SCAN #%s %s API_ERROR: %s", scan_no, symbol, exc)
             except Exception as exc:
                 reason = f"внутренняя ошибка: {type(exc).__name__}: {exc}"
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
-                log.exception("SCAN #%s %s INTERNAL_ERROR", system_status["scan_count"], symbol)
+                log.exception("SCAN #%s %s INTERNAL_ERROR", scan_no, symbol)
 
-        # Дополнительные стратегии работают независимо от B и не меняют её фильтры.
-        if len(found) < MAX_SIGNALS_PER_CYCLE:
-            for symbol in SYMBOLS:
-                if ("swap", symbol) in _unavailable_symbols:
-                    continue
-                try:
-                    addon_signals = await analyze_addon_strategies(symbol)
-                    for addon_signal in addon_signals:
-                        existing_same_symbol = [item for item in found if item.get("symbol") == symbol]
-                        if existing_same_symbol:
-                            log.info("ADDON_SKIP %s: по этой монете уже принят сигнал в текущем цикле", symbol)
-                            continue
-                        signal_id = save_signal(addon_signal)
-                        if signal_id:
-                            addon_signal["id"] = signal_id
-                            found.append(addon_signal)
-                            log.info("SCAN #%s %s ACCEPT strategy=%s side=%s quality=%.1f net_rr=%.2f",
-                                     system_status["scan_count"], symbol,
-                                     addon_signal.get("strategy_version"), addon_signal.get("side"),
-                                     safe_float(addon_signal.get("quality_score")),
-                                     safe_float(addon_signal.get("net_rr")))
-                            if len(found) >= MAX_SIGNALS_PER_CYCLE:
-                                break
-                    if len(found) >= MAX_SIGNALS_PER_CYCLE:
-                        break
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    log.exception("Ошибка дополнительных стратегий для %s: %s", symbol, exc)
+        # C/D/E получают те же свечи — второй раз REST-данные не запрашиваются.
+        for symbol, frames in addon_frames.items():
+            if len(found) >= MAX_SIGNALS_PER_CYCLE:
+                break
+            if ("swap", symbol) in _unavailable_symbols:
+                continue
+            try:
+                addon_signals = await analyze_addon_strategies(symbol, frames, addon_stats)
+                for addon_signal in addon_signals:
+                    if any(item.get("symbol") == symbol for item in found):
+                        log.info("ADDON_SKIP %s: по этой монете уже принят сигнал в текущем цикле", symbol)
+                        continue
+                    signal_id = save_signal(addon_signal)
+                    if signal_id:
+                        addon_signal["id"] = signal_id
+                        found.append(addon_signal)
+                        log.info("SCAN #%s %s ACCEPT strategy=%s side=%s quality=%.1f net_rr=%.2f",
+                                 scan_no, symbol, addon_signal.get("strategy_version"),
+                                 addon_signal.get("side"), safe_float(addon_signal.get("quality_score")),
+                                 safe_float(addon_signal.get("net_rr")))
+                    else:
+                        log.info("SCAN #%s %s ADDON_NOT_SAVED strategy=%s (duplicate/cooldown)",
+                                 scan_no, symbol, addon_signal.get("strategy_version"))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("Ошибка дополнительных стратегий для %s: %s", symbol, exc)
 
         duration = time.monotonic() - scan_started
         finished_utc = utc_text()
@@ -1737,16 +1784,26 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
         system_status["last_scan_duration_sec"] = round(duration, 2)
         system_status["last_scan_checked"] = checked
         system_status["last_scan_skipped_unavailable"] = skipped_unavailable
+        system_status["last_addon_stats"] = addon_stats
         summary = (f"checked={checked}/{len(SYMBOLS)}; unavailable_skipped={skipped_unavailable}; "
                    f"accepted={len(found)}; duration={duration:.1f}s")
         system_status["last_scan_summary"] = summary
-        log.info("SCAN #%s FINISH started=%s finished=%s %s", system_status["scan_count"], scan_started_utc, finished_utc, summary)
+        log.info("SCAN #%s FINISH started=%s finished=%s %s",
+                 scan_no, scan_started_utc, finished_utc, summary)
+        for strategy_name in ADDON_STRATEGIES:
+            stats = addon_stats[strategy_name]
+            log.info("SCAN #%s ADDON_STATS %s: checked=%s candidates=%s rejected=%s errors=%s",
+                     scan_no, strategy_name, stats["checked"], stats["candidate"],
+                     stats["rejected"], stats["errors"])
+        log.info("SCAN #%s ADDON_CONFLICTS: %s", scan_no, addon_stats["conflicts"])
         if reason_counts:
             top_reasons = sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))[:12]
-            log.info("SCAN #%s REJECTION_COUNTS: %s", system_status["scan_count"], " | ".join(f"{count}x {reason}" for reason, count in top_reasons))
+            log.info("SCAN #%s REJECTION_COUNTS: %s", scan_no,
+                     " | ".join(f"{count}x {reason}" for reason, count in top_reasons))
         if stage_counts:
-            log.info("SCAN #%s STAGE_COUNTS: %s", system_status["scan_count"], stage_counts)
+            log.info("SCAN #%s STAGE_COUNTS: %s", scan_no, stage_counts)
         return found
+
 
 
 async def broadcast_signal(signal):
@@ -1860,7 +1917,9 @@ async def system_status_handler(message: Message):
         f"Недоступных контрактов: {len(_unavailable_symbols)}\n"
         f"WebSocket 1m: {'подключён' if ws_status.get('connected') else 'ожидание/переподключение'}\n"
         f"Последнее WS-сообщение: {ws_status.get('last_message') or '—'}\n"
-        f"Переподключений WS: {ws_status.get('reconnects', 0)}",
+        f"Переподключений WS: {ws_status.get('reconnects', 0)}\n"
+        f"Получено сделок WS: {ws_status.get('trades_received', 0)}\n"
+        f"Закрыто 1m свечей WS: {ws_status.get('candles_closed', 0)}",
         parse_mode="HTML")
 
 
@@ -1892,13 +1951,13 @@ async def strategy_stats_handler(message: Message):
         for row in rows:
             strategy = str(row["strategy"])
             parts.append(
-                f"<b>{html.escape(labels.get(strategy, strategy))}</b>\\n"
-                f"Всего: <code>{row['total']}</code> | Активных/ожидающих: <code>{row['active'] or 0}</code>\\n"
+                f"<b>{html.escape(labels.get(strategy, strategy))}</b>\n"
+                f"Всего: <code>{row['total']}</code> | Активных/ожидающих: <code>{row['active'] or 0}</code>\n"
                 f"Последний сигнал: {html.escape(str(row['latest'] or '—'))}"
             )
         parts.extend(["", "<i>Это счётчик созданных сигналов, а не доходность. "
                       "Бот пока не фиксирует фактический результат сделок автоматически.</i>"])
-        await message.answer("\\n".join(parts), parse_mode="HTML")
+        await message.answer("\n".join(parts), parse_mode="HTML")
     except Exception:
         log.exception("Ошибка статистики стратегий")
         await message.answer("Не удалось получить статистику. Подробности записаны в лог.")
