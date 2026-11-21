@@ -268,6 +268,17 @@ def test_backtest_excludes_the_current_forming_candle():
     assert closed["close_time"].tolist() == [59_999]
 
 
+def test_backtest_stop_gap_fills_worse_than_the_stop_trigger():
+    candles = _simulation_frame([
+        (100.0, 100.2, 99.8, 100.0),
+        (98.5, 99.0, 98.0, 98.3),
+    ])
+    result = simulate_trade(_simulation_signal(), candles, 0)
+    assert result["status"] == "sl"
+    # The stop trigger is around 99, but a gap opens well below it.
+    assert result["gross_r"] < -1.4
+
+
 def test_backtest_skips_entry_when_next_open_exceeds_live_drift_limit():
     candles = _simulation_frame([
         (100.0, 100.2, 99.8, 100.0),
