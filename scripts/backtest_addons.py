@@ -134,7 +134,20 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
             preview = json.dumps(payload, ensure_ascii=False)[:1200]
             raise RuntimeError(f"Unexpected kline format for {symbol} {interval}: {preview}")
         rows.extend(parsed)
-        cursor = window_end
+        # BingX applies a smaller effective page cap on some intervals (notably
+        # 5m) even when limit=1000. If the returned page ends well before the
+        # requested window, continue immediately after its last candle instead
+        # of jumping over the unreturned portion.
+        if parsed and len(parsed) >= 190 and parsed[-1][0] + step < window_end:
+            next_cursor = parsed[-1][0] + step
+            if next_cursor <= cursor:
+                raise RuntimeError(
+                    f"Non-advancing BingX pagination for {symbol} {interval}: "
+                    f"cursor={cursor}, last={parsed[-1][0]}"
+                )
+            cursor = next_cursor
+        else:
+            cursor = window_end
     df = pd.DataFrame(rows, columns=[
         "open_time", "open", "high", "low", "close", "volume", "close_time"
     ])
