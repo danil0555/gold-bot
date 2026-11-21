@@ -11,8 +11,13 @@ import math
 import html
 import shutil
 import hashlib
+import gzip
+import zlib
+from collections import deque
+import uuid
 import asyncio
 import logging
+import json
 import sqlite3
 
 from pathlib import Path
@@ -47,7 +52,7 @@ if not BOT_TOKEN:
     raise RuntimeError("Не найден BOT_TOKEN. Добавь токен в файл .env")
 
 BOT_NAME = "Trading Bot"
-BOT_VERSION = "10.0"
+BOT_VERSION = "10.1"
 
 BASE = "https://open-api.bingx.com"
 
@@ -99,7 +104,10 @@ MAX_SIGNALS_PER_CYCLE = 3
 KLINE_LIMIT = 300
 MIN_CANDLE_ROWS = 205
 
-MARKET_SCAN_INTERVAL_SEC = 60  # пауза между завершёнными циклами; API-запросы ограничены rate limiter
+MARKET_SCAN_INTERVAL_SEC = 60  # пауза между завершёнными циклами
+BINGX_SWAP_WS_URL = "wss://open-api-swap.bingx.com/swap-market"
+WS_RECONNECT_MAX_SEC = 60
+WS_CANDLE_BUFFER_LIMIT = 300
 
 SIGNAL_COOLDOWN_MINUTES = 30
 SIGNAL_TTL_MINUTES = 8
@@ -142,6 +150,12 @@ _last_api_request = 0.0
 _api_cooldown_until = 0.0
 
 candle_cache: dict[tuple[str, str, str], pd.DataFrame] = {}
+# Отдельный буфер закрытых 1m свечей из публичного WebSocket BingX.
+# Стратегия B остаётся на исходном REST-пути и не меняет свои фильтры.
+ws_1m_frames: dict[str, pd.DataFrame] = {}
+ws_current_minute: dict[str, dict[str, Any]] = {}
+ws_seen_trade_ids: dict[str, tuple[deque, set[str]]] = {}
+ws_status = {"connected": False, "last_message": None, "reconnects": 0}
 latest_prices: dict[tuple[str, str], float] = {}
 latest_quotes: dict[tuple[str, str], dict[str, Any]] = {}
 _unavailable_symbols: set[tuple[str, str]] = set()
@@ -582,6 +596,167 @@ def save_closed_candles(market: str, symbol: str, interval: str, df: pd.DataFram
             (market, symbol, interval, market, symbol, interval))
 
 
+
+
+# ============================================================
+# 8A. BINGX PUBLIC 1M KLINE WEBSOCKET (READ-ONLY)
+# ============================================================
+
+def _decode_bingx_ws_message(raw: bytes | str) -> str:
+    if isinstance(raw, str):
+        return raw
+    try:
+        return gzip.decompress(raw).decode("utf-8")
+    except (OSError, EOFError, zlib.error):
+        # Некоторые промежуточные прокси могут передать raw-deflate.
+        try:
+            return zlib.decompress(raw, 16 + zlib.MAX_WBITS).decode("utf-8")
+        except zlib.error:
+            return raw.decode("utf-8", errors="replace")
+
+
+
+def _append_closed_ws_candle(symbol: str, candle: dict[str, Any]) -> None:
+    """Сохраняет минуту, собранную из реальных сделок, в ограниченный буфер."""
+    open_time = int(candle["open_time"])
+    row = {
+        "open_time": open_time, "open": safe_float(candle["open"]),
+        "high": safe_float(candle["high"]), "low": safe_float(candle["low"]),
+        "close": safe_float(candle["close"]), "volume": safe_float(candle["volume"]),
+        "close_time": open_time + 59_999,
+    }
+    if min(row["open"], row["high"], row["low"], row["close"]) <= 0:
+        return
+    base = candle_cache.get(("swap", symbol, "1m"))
+    frame = ws_1m_frames.get(symbol)
+    pieces = []
+    if base is not None and not base.empty:
+        pieces.append(base)
+    if frame is not None and not frame.empty:
+        pieces.append(frame)
+    pieces.append(pd.DataFrame([row]))
+    merged = pd.concat(pieces, ignore_index=True)
+    merged = (merged.drop_duplicates("open_time", keep="last")
+                    .sort_values("open_time")
+                    .tail(WS_CANDLE_BUFFER_LIMIT)
+                    .reset_index(drop=True))
+    ws_1m_frames[symbol] = merged
+    ws_status["last_message"] = utc_text()
+
+
+def _update_ws_trade(symbol: str, trade: dict[str, Any]) -> None:
+    """Агрегирует BingX trade prints в настоящие 1m OHLCV; без синтетических свечей."""
+    try:
+        trade_id = str(trade.get("t") or "")
+        ts = int(trade.get("T") or 0)
+        price = safe_float(trade.get("p"))
+        qty = safe_float(trade.get("q"))
+        if not trade_id or ts <= 0 or price <= 0 or qty <= 0:
+            return
+
+        queue, seen = ws_seen_trade_ids.setdefault(symbol, (deque(), set()))
+        if trade_id in seen:
+            return
+        seen.add(trade_id)
+        queue.append(trade_id)
+        while len(queue) > 5000:
+            old_id = queue.popleft()
+            seen.discard(old_id)
+
+        minute = (ts // 60_000) * 60_000
+        current = ws_current_minute.get(symbol)
+        if current is None:
+            ws_current_minute[symbol] = {
+                "open_time": minute, "open": price, "high": price,
+                "low": price, "close": price, "volume": qty,
+            }
+            return
+
+        current_minute = int(current["open_time"])
+        if minute < current_minute:
+            # Поздняя/переупорядоченная сделка: не переписываем закрытую свечу.
+            return
+        if minute == current_minute:
+            current["high"] = max(safe_float(current["high"]), price)
+            current["low"] = min(safe_float(current["low"]), price)
+            current["close"] = price
+            current["volume"] = safe_float(current["volume"]) + qty
+            return
+
+        # Переход в следующую минуту закрывает предыдущую реальными сделками.
+        if now_ms() >= current_minute + 60_000:
+            _append_closed_ws_candle(symbol, current)
+        ws_current_minute[symbol] = {
+            "open_time": minute, "open": price, "high": price,
+            "low": price, "close": price, "volume": qty,
+        }
+    except Exception:
+        log.exception("Ошибка агрегации WebSocket trade для %s", symbol)
+
+
+async def bingx_kline_websocket_loop() -> None:
+    """Публичный read-only trade stream USDT-M Futures; 1m свечи строятся из сделок."""
+    delay = 2
+    while True:
+        try:
+            if http_session is None or http_session.closed:
+                await asyncio.sleep(2)
+                continue
+            async with http_session.ws_connect(
+                BINGX_SWAP_WS_URL, heartbeat=None, autoping=False,
+                receive_timeout=75, max_msg_size=4 * 1024 * 1024
+            ) as ws:
+                ws_status["connected"] = True
+                delay = 2
+                log.info("BingX WebSocket подключён; trade-подписок: %s", len(SYMBOLS))
+                for symbol in SYMBOLS:
+                    await ws.send_json({
+                        "id": str(uuid.uuid4()),
+                        "reqType": "sub",
+                        "dataType": f"{symbol}@trade",
+                    })
+                async for message in ws:
+                    if message.type == aiohttp.WSMsgType.BINARY:
+                        raw = message.data
+                    elif message.type == aiohttp.WSMsgType.TEXT:
+                        raw = message.data
+                    elif message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
+                        raise ConnectionError("BingX WebSocket закрыт")
+                    elif message.type == aiohttp.WSMsgType.ERROR:
+                        raise ConnectionError(f"WebSocket error: {ws.exception()}")
+                    else:
+                        continue
+                    decoded = _decode_bingx_ws_message(raw).strip()
+                    if decoded == "Ping" or decoded.lower() == "ping":
+                        await ws.send_str("Pong")
+                        continue
+                    try:
+                        payload = json.loads(decoded)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    data = payload.get("data")
+                    if not isinstance(data, list):
+                        continue
+                    data_type = str(payload.get("dataType", ""))
+                    channel_symbol = data_type.split("@", 1)[0] if "@" in data_type else ""
+                    for trade in data:
+                        if isinstance(trade, dict):
+                            sym = str(trade.get("s") or channel_symbol)
+                            if sym in SYMBOLS:
+                                _update_ws_trade(sym, trade)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            ws_status["connected"] = False
+            ws_status["reconnects"] = int(ws_status.get("reconnects", 0)) + 1
+            log.warning("BingX WebSocket отключён: %s; повтор через %ss", exc, delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, WS_RECONNECT_MAX_SEC)
+        finally:
+            ws_status["connected"] = False
+
+
+
 # ============================================================
 # 8. INDICATORS + STRATEGIES
 # ============================================================
@@ -840,6 +1015,138 @@ def build_signal_b(market, symbol, frames, quote=None, diagnostics=None):
 
 
 
+
+# ============================================================
+# 8B. INDEPENDENT ADD-ON STRATEGIES (DO NOT MODIFY STRATEGY B)
+# ============================================================
+
+STRATEGY_C = "C_BREAKOUT_RETEST"
+STRATEGY_D = "D_IMPULSE"
+STRATEGY_E = "E_OVERHEAT_REVERSAL"
+ADDON_STRATEGIES = (STRATEGY_C, STRATEGY_D, STRATEGY_E)
+
+
+def _make_addon_signal(strategy: str, symbol: str, side: str, entry: float,
+                       atr: float, score: int, regime: str, reasons: list[str],
+                       setup_stamp: int) -> dict[str, Any] | None:
+    if entry <= 0 or atr <= 0:
+        return None
+    risk_dist = max(1.25 * atr, entry * 0.0015)
+    sl_dist = risk_dist
+    if side == "BUY":
+        sl, tp1, tp2 = entry - sl_dist, entry + sl_dist * TP1_R, entry + sl_dist * TP2_R
+    else:
+        sl, tp1, tp2 = entry + sl_dist, entry - sl_dist * TP1_R, entry - sl_dist * TP2_R
+    if min(sl, tp1, tp2) <= 0:
+        return None
+    gross_rr = abs(tp2 - entry) / abs(entry - sl)
+    fee_pct = TAKER_FEE_RATE * 200.0
+    slip_pct = DEFAULT_SLIPPAGE_PCT * 2.0
+    estimated_spread = DEFAULT_SYNTHETIC_SPREAD_PCT
+    cost = entry * ((estimated_spread + fee_pct + slip_pct) / 100.0)
+    net_rr = max(abs(tp2 - entry) - cost, 0.0) / max(abs(entry - sl) + cost * 0.5, 1e-9)
+    quality = round(min(100.0, 62 + score * 5 - estimated_spread * 10), 1)
+    if gross_rr < MIN_RR or net_rr < MIN_NET_RR or quality < MIN_QUALITY_SCORE:
+        return None
+    return {
+        "strategy_version": strategy, "market": "swap", "symbol": symbol, "side": side,
+        "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp": tp2,
+        "rr": gross_rr, "net_rr": net_rr, "score": score,
+        "quality_score": quality, "market_regime": regime,
+        "entry_mode": "market", "entry_zone_low": None, "entry_zone_high": None,
+        "confirmation_rule": "Сетап сформирован независимым модулем; проверь котировку перед входом.",
+        "spread_pct": estimated_spread, "estimated_fee_pct": fee_pct,
+        "estimated_slippage_pct": slip_pct, "reasons": reasons, "atr": atr,
+        "setup_key": f"{strategy}:swap:{symbol}:{side}:{setup_stamp}",
+    }
+
+
+def build_signal_c_breakout_retest(symbol: str, frames: dict[str, pd.DataFrame]) -> dict[str, Any] | None:
+    """Пробой диапазона 20 свечей с удержанием уровня на закрытых 5m."""
+    if any(tf not in frames or len(frames[tf]) < 60 for tf in ("5m", "15m")):
+        return None
+    m5 = enrich_scalper_series(frames["5m"])
+    m15 = enrich_scalper_series(frames["15m"])
+    cur, prev = m5.iloc[-1], m5.iloc[-2]
+    ctx = m15.iloc[-1]
+    price, atr = safe_float(cur["close"]), safe_float(cur["atr"])
+    hi, lo = safe_float(prev["range_high_20"]), safe_float(prev["range_low_20"])
+    if price <= 0 or atr <= 0:
+        return None
+    vol = safe_float(cur["vol_ratio"], 1.0)
+    adx = safe_float(ctx["adx"])
+    side = None
+    reasons = []
+    if hi > 0 and safe_float(cur["low"]) <= hi * 1.002 and price > hi and vol >= 1.15 and adx >= 15:
+        side = "BUY"
+        reasons = ["5м: цена закрылась выше диапазона 20 свечей", "5м: ретест уровня удержан", f"Объём x{vol:.2f}"]
+    elif lo > 0 and safe_float(cur["high"]) >= lo * 0.998 and price < lo and vol >= 1.15 and adx >= 15:
+        side = "SELL"
+        reasons = ["5м: цена закрылась ниже диапазона 20 свечей", "5м: ретест уровня удержан", f"Объём x{vol:.2f}"]
+    if not side:
+        return None
+    if side == "BUY" and safe_float(ctx["close"]) < safe_float(ctx["ema50"]):
+        return None
+    if side == "SELL" and safe_float(ctx["close"]) > safe_float(ctx["ema50"]):
+        return None
+    return _make_addon_signal(STRATEGY_C, symbol, side, price, atr, 6, "breakout", reasons, int(cur["open_time"]))
+
+
+def build_signal_d_impulse(symbol: str, frames: dict[str, pd.DataFrame]) -> dict[str, Any] | None:
+    """Импульсный сетап: расширение тела/объёма на 1m + согласование 5m."""
+    if any(tf not in frames or len(frames[tf]) < 60 for tf in ("1m", "5m")):
+        return None
+    m1 = enrich_scalper_series(frames["1m"])
+    m5 = enrich_scalper_series(frames["5m"])
+    cur, prev = m1.iloc[-1], m1.iloc[-2]
+    ctx = m5.iloc[-1]
+    price, atr = safe_float(cur["close"]), safe_float(cur["atr"])
+    body = abs(safe_float(cur["close"]) - safe_float(cur["open"]))
+    vol = safe_float(cur["vol_ratio"], 1.0)
+    if price <= 0 or atr <= 0 or body < atr * 1.15 or vol < 1.8:
+        return None
+    if safe_float(ctx["adx"]) < 15:
+        return None
+    if price > safe_float(cur["open"]) and safe_float(ctx["close"]) > safe_float(ctx["ema20"]) > safe_float(ctx["ema50"]):
+        side = "BUY"
+    elif price < safe_float(cur["open"]) and safe_float(ctx["close"]) < safe_float(ctx["ema20"]) < safe_float(ctx["ema50"]):
+        side = "SELL"
+    else:
+        return None
+    # Не входить в продолжение уже чрезмерно растянутого импульса.
+    if abs(price - safe_float(ctx["ema20"])) > safe_float(ctx["atr"]) * 2.0:
+        return None
+    reasons = [f"1м: импульсное тело {body / atr:.2f} ATR", f"1м: объём x{vol:.2f}", "5м: EMA20/EMA50 подтверждают направление"]
+    return _make_addon_signal(STRATEGY_D, symbol, side, price, atr, 6, "impulse", reasons, int(cur["open_time"]))
+
+
+def build_signal_e_overheat_reversal(symbol: str, frames: dict[str, pd.DataFrame]) -> dict[str, Any] | None:
+    """Контртренд только после экстремума RSI и закрытия обратно внутрь диапазона."""
+    if any(tf not in frames or len(frames[tf]) < 60 for tf in ("1m", "5m")):
+        return None
+    m1 = enrich_scalper_series(frames["1m"])
+    m5 = enrich_scalper_series(frames["5m"])
+    cur, prev = m1.iloc[-1], m1.iloc[-2]
+    ctx = m5.iloc[-1]
+    price, atr = safe_float(cur["close"]), safe_float(cur["atr"])
+    rsi_now, rsi_prev = safe_float(cur["rsi"]), safe_float(prev["rsi"])
+    vol = safe_float(cur["vol_ratio"], 1.0)
+    if price <= 0 or atr <= 0 or vol < 1.2:
+        return None
+    # RSI возвращается из зоны экстремума; тело текущей свечи должно сменить направление.
+    if rsi_prev >= 82 and rsi_now < 75 and price < safe_float(cur["open"]) and price < safe_float(ctx["close"]):
+        side = "SELL"
+    elif rsi_prev <= 18 and rsi_now > 25 and price > safe_float(cur["open"]) and price > safe_float(ctx["close"]):
+        side = "BUY"
+    else:
+        return None
+    if abs(price - safe_float(ctx["ema20"])) < safe_float(ctx["atr"]) * 0.6:
+        return None
+    reasons = [f"1м: RSI вернулся из экстремума ({rsi_prev:.1f} → {rsi_now:.1f})", f"Объём x{vol:.2f}", "5м: подтверждён возврат цены"]
+    return _make_addon_signal(STRATEGY_E, symbol, side, price, atr, 6, "overheat_reversal", reasons, int(cur["open_time"]))
+
+
+
 # ============================================================
 # 9. LIVE QUOTE + SIGNAL STORAGE
 # ============================================================
@@ -1046,7 +1353,7 @@ def save_signal(sig: dict[str, Any]) -> int | None:
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp2"],
             "rr": sig["rr"], "score": sig["score"], "reasons": reasons_text,
             "setup_key": sig["setup_key"], "status": sig.get("status", "ACTIVE"),
-            "strategy_version": STRATEGY_B,
+            "strategy_version": sig.get("strategy_version", STRATEGY_B),
             "live_price": sig.get("live_price", sig["entry"]),
             "bid": sig.get("bid"), "ask": sig.get("ask"),
             "spread_pct": sig.get("spread_pct"),
@@ -1168,6 +1475,7 @@ def signal_text(signal):
         "🚨 <b>FUTURES SCALP — СИГНАЛ</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"<b>{html.escape(str(signal['symbol']))}</b>  |  <b>{side}</b>\n"
+        f"<b>Стратегия:</b> {html.escape(str(signal.get('strategy_version', STRATEGY_B)))}\n"
         f"<b>Качество сетапа:</b> <code>{quality:.0f}/100</code>\n"
         f"<b>Рынок:</b> USDT-M Futures  |  <b>ТФ:</b> 1m / 5m / 15m / 1h\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -1196,6 +1504,7 @@ def signal_text(signal):
 def main_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔎 Сканировать Futures")],
+        [KeyboardButton(text="📊 Статистика стратегий")],
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="🖥 Статус системы")],
     ], resize_keyboard=True)
 
@@ -1209,7 +1518,7 @@ def main_keyboard():
 # ============================================================
 
 async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEGY, diagnostics=None):
-    # В новой версии анализируем только USDT-M Futures и только стратегию B.
+    # Стратегия B остаётся неизменной; новые модули запускаются отдельно после её скана.
     market = "swap"
     key = (market, symbol)
 
@@ -1277,6 +1586,56 @@ async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEG
     return final_signal
 
 
+
+async def analyze_addon_strategies(symbol: str) -> list[dict[str, Any]]:
+    """Получает общий набор свечей и независимо проверяет C/D/E."""
+    if ("swap", symbol) in _unavailable_symbols:
+        return []
+    frames: dict[str, pd.DataFrame] = {}
+    for interval in ("1m", "5m", "15m"):
+        data = await get_klines("swap", symbol, interval, KLINE_LIMIT)
+        if data is None or len(data) < MIN_CANDLE_ROWS:
+            return []
+        frames[interval] = data
+    live_frame = ws_1m_frames.get(symbol)
+    if live_frame is not None and len(live_frame) >= MIN_CANDLE_ROWS:
+        frames["1m"] = live_frame.copy()
+    builders = (
+        build_signal_c_breakout_retest,
+        build_signal_d_impulse,
+        build_signal_e_overheat_reversal,
+    )
+    results = []
+    for builder in builders:
+        try:
+            candidate = builder(symbol, frames)
+            if not candidate:
+                continue
+            snapshot = await fetch_live_market_snapshot("swap", symbol)
+            if not snapshot:
+                continue
+            final_candidate = enrich_signal_with_live_data(candidate, snapshot)
+            if final_candidate.get("status") == "CANCELLED":
+                continue
+            results.append(final_candidate)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Ошибка дополнительной стратегии %s для %s", builder.__name__, symbol)
+    if not results:
+        return []
+    directions = {str(item.get("side")) for item in results}
+    if len(directions) > 1:
+        log.info("ADDON_CONFLICT %s: стратегии C/D/E дали разные направления; сигнал пропущен", symbol)
+        return []
+    results.sort(key=lambda item: (
+        safe_float(item.get("quality_score")),
+        safe_float(item.get("net_rr")),
+        safe_float(item.get("score")),
+    ), reverse=True)
+    return results[:1]
+
+
 async def scan_market(strategy_version=DEFAULT_STRATEGY):
     async with _scan_lock:
         scan_started = time.monotonic()
@@ -1294,7 +1653,7 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
         system_status["last_scan_checked"] = 0
         system_status["last_scan_planned"] = len(SYMBOLS)
         system_status["last_scan_summary"] = "Сканирование выполняется"
-        log.info("SCAN #%s START market=USDT-M Futures planned=%s strategy=B", system_status["scan_count"], len(SYMBOLS))
+        log.info("SCAN #%s START market=USDT-M Futures planned=%s strategies=B,C,D,E", system_status["scan_count"], len(SYMBOLS))
         expire_stale_signals()
 
         for symbol in SYMBOLS:
@@ -1340,6 +1699,36 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
                 reason = f"внутренняя ошибка: {type(exc).__name__}: {exc}"
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
                 log.exception("SCAN #%s %s INTERNAL_ERROR", system_status["scan_count"], symbol)
+
+        # Дополнительные стратегии работают независимо от B и не меняют её фильтры.
+        if len(found) < MAX_SIGNALS_PER_CYCLE:
+            for symbol in SYMBOLS:
+                if ("swap", symbol) in _unavailable_symbols:
+                    continue
+                try:
+                    addon_signals = await analyze_addon_strategies(symbol)
+                    for addon_signal in addon_signals:
+                        existing_same_symbol = [item for item in found if item.get("symbol") == symbol]
+                        if existing_same_symbol:
+                            log.info("ADDON_SKIP %s: по этой монете уже принят сигнал в текущем цикле", symbol)
+                            continue
+                        signal_id = save_signal(addon_signal)
+                        if signal_id:
+                            addon_signal["id"] = signal_id
+                            found.append(addon_signal)
+                            log.info("SCAN #%s %s ACCEPT strategy=%s side=%s quality=%.1f net_rr=%.2f",
+                                     system_status["scan_count"], symbol,
+                                     addon_signal.get("strategy_version"), addon_signal.get("side"),
+                                     safe_float(addon_signal.get("quality_score")),
+                                     safe_float(addon_signal.get("net_rr")))
+                            if len(found) >= MAX_SIGNALS_PER_CYCLE:
+                                break
+                    if len(found) >= MAX_SIGNALS_PER_CYCLE:
+                        break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.exception("Ошибка дополнительных стратегий для %s: %s", symbol, exc)
 
         duration = time.monotonic() - scan_started
         finished_utc = utc_text()
@@ -1437,7 +1826,7 @@ async def settings_handler(message: Message):
     await message.answer(
         "⚙️ <b>Параметры стратегии</b>\n\n"
         "Рынок: <b>USDT-M Futures</b>\n"
-        "Стратегия: <b>строгий Scalping B</b>\n"
+        "Стратегии: <b>B (исходная), C (пробой/ретест), D (импульс), E (разворот перегрева)</b>\n"
         f"Расчётный риск: <b>{RISK_PERCENT:.1f}%</b>\n"
         f"Плечо для расчётов: <b>{FUTURES_LEVERAGE}x</b>\n"
         f"TP1: <b>{TP1_R}R</b>  |  TP2: <b>{TP2_R}R</b>\n"
@@ -1458,7 +1847,7 @@ async def system_status_handler(message: Message):
     await message.answer(
         f"🖥 <b>Trading Bot v{BOT_VERSION}</b>\n\n"
         "Режим: <b>USDT-M Futures Scalping</b>\n"
-        "Стратегия: <b>B — строгий фильтр</b>\n"
+        "Стратегии: <b>B + C/D/E (независимые модули)</b>\n"
         "Реальные ордера: <b>отключены</b>\n"
         "Сопровождение сделок: <b>удалено</b>\n"
         f"API BingX: {html.escape(str(system_status.get('api_status', '—')))}\n"
@@ -1468,8 +1857,52 @@ async def system_status_handler(message: Message):
         f"Последний цикл: {html.escape(str(system_status.get('last_scan_summary') or '—'))}\n"
         f"Проверено пар: {system_status.get('last_scan_checked', 0)}/{system_status.get('last_scan_planned', len(SYMBOLS))}\n"
         f"Длительность: {system_status.get('last_scan_duration_sec') if system_status.get('last_scan_duration_sec') is not None else '—'} сек.\n"
-        f"Недоступных контрактов: {len(_unavailable_symbols)}",
+        f"Недоступных контрактов: {len(_unavailable_symbols)}\n"
+        f"WebSocket 1m: {'подключён' if ws_status.get('connected') else 'ожидание/переподключение'}\n"
+        f"Последнее WS-сообщение: {ws_status.get('last_message') or '—'}\n"
+        f"Переподключений WS: {ws_status.get('reconnects', 0)}",
         parse_mode="HTML")
+
+
+@router.message(Command("stats"))
+@router.message(F.text == "📊 Статистика стратегий")
+async def strategy_stats_handler(message: Message):
+    register_user(message.from_user)
+    try:
+        with db() as con:
+            rows = con.execute("""
+                SELECT COALESCE(strategy_version, 'B') AS strategy,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN UPPER(COALESCE(status,'')) IN ('ACTIVE','WAITING_LEVEL','NEW') THEN 1 ELSE 0 END) AS active,
+                       MAX(created_at) AS latest
+                FROM signals
+                GROUP BY COALESCE(strategy_version, 'B')
+                ORDER BY strategy
+            """).fetchall()
+        if not rows:
+            await message.answer("Статистика пока пустая: сигналов ещё нет.")
+            return
+        labels = {
+            "B": "B — исходная многотаймфреймовая",
+            STRATEGY_C: "C — пробой и ретест",
+            STRATEGY_D: "D — импульс",
+            STRATEGY_E: "E — разворот перегрева",
+        }
+        parts = ["📊 <b>Сигналы по стратегиям</b>", ""]
+        for row in rows:
+            strategy = str(row["strategy"])
+            parts.append(
+                f"<b>{html.escape(labels.get(strategy, strategy))}</b>\\n"
+                f"Всего: <code>{row['total']}</code> | Активных/ожидающих: <code>{row['active'] or 0}</code>\\n"
+                f"Последний сигнал: {html.escape(str(row['latest'] or '—'))}"
+            )
+        parts.extend(["", "<i>Это счётчик созданных сигналов, а не доходность. "
+                      "Бот пока не фиксирует фактический результат сделок автоматически.</i>"])
+        await message.answer("\\n".join(parts), parse_mode="HTML")
+    except Exception:
+        log.exception("Ошибка статистики стратегий")
+        await message.answer("Не удалось получить статистику. Подробности записаны в лог.")
+
 
 
 @router.message(Command("diag_db"))
@@ -1547,7 +1980,7 @@ async def on_startup() -> None:
     http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
     bot = Bot(token=BOT_TOKEN)
     system_status["started"] = True
-    log.info("Bot v%s запущен", BOT_VERSION)
+    log.info("Bot v%s запущен; реальные ордера отключены; WS trade read-only, 1m свечи агрегируются из сделок", BOT_VERSION)
 
 async def on_shutdown() -> None:
     for task in background_tasks:
@@ -1565,6 +1998,7 @@ async def main_async() -> None:
     global bot
     dp.include_router(router)
     await on_startup()
+    background_tasks.append(asyncio.create_task(bingx_kline_websocket_loop()))
     background_tasks.append(asyncio.create_task(background_scan()))
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
