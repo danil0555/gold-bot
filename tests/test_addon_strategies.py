@@ -271,7 +271,8 @@ def test_backtest_excludes_the_current_forming_candle():
 def test_backtest_stop_gap_fills_worse_than_the_stop_trigger():
     candles = _simulation_frame([
         (100.0, 100.2, 99.8, 100.0),
-        (98.5, 99.0, 98.0, 98.3),
+        (100.0, 100.2, 99.8, 100.0),  # entry at the next open
+        (98.5, 99.0, 98.0, 98.3),     # later gap through the stop
     ])
     result = simulate_trade(_simulation_signal(), candles, 0)
     assert result["status"] == "sl"
