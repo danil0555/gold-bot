@@ -52,7 +52,7 @@ if not BOT_TOKEN:
     raise RuntimeError("Не найден BOT_TOKEN. Добавь токен в файл .env")
 
 BOT_NAME = "Trading Bot"
-BOT_VERSION = "10.2.1"
+BOT_VERSION = "10.2.2"
 
 BASE = "https://open-api.bingx.com"
 
