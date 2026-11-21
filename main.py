@@ -1605,7 +1605,26 @@ async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEG
     if "1m" in candles:
         live_frame = ws_1m_frames.get(symbol)
         if live_frame is not None and len(live_frame) >= MIN_CANDLE_ROWS:
-            candles["1m"] = live_frame.copy()
+            # Trade streams do not emit empty minutes. Never feed stale or gapped
+            # trade-built candles into indicators; REST klines remain the fallback.
+            ws_times = pd.to_numeric(live_frame["open_time"], errors="coerce").dropna()
+            ws_close_times = pd.to_numeric(live_frame["close_time"], errors="coerce").dropna()
+            ws_fresh = (
+                len(ws_times) >= 5 and len(ws_close_times) >= 1
+                and 0 <= now_ms() - int(ws_close_times.iloc[-1]) <= 90_000
+            )
+            ws_recent_times = ws_times.iloc[-5:].astype("int64")
+            ws_contiguous = (
+                len(ws_recent_times) == 5
+                and bool((ws_recent_times.diff().dropna() == 60_000).all())
+            )
+            if ws_fresh and ws_contiguous:
+                candles["1m"] = live_frame.copy()
+            else:
+                log.debug(
+                    "WS_1M_FALLBACK %s: fresh=%s contiguous=%s; using BingX REST klines",
+                    symbol, ws_fresh, ws_contiguous
+                )
 
     if frames_out is not None:
         frames_out.update(candles)
