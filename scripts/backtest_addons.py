@@ -193,8 +193,16 @@ def simulate_trade(signal, minute_frame, signal_index):
 
         # Conservative ordering: if stop and a target overlap, assume stop first.
         if stop_hit:
+            # A stop-market order can fill worse than its trigger after a gap.
+            # Model the opening gap adversely instead of assuming the SL price.
+            stop_fill_level = sl
+            bar_open = float(bar["open"])
+            if side == "BUY" and bar_open < sl:
+                stop_fill_level = bar_open
+            elif side == "SELL" and bar_open > sl:
+                stop_fill_level = bar_open
             exit_kind = "tp1_then_sl" if tp1_hit else "sl"
-            exit_levels = ([tp1, sl] if tp1_hit else [sl])
+            exit_levels = ([tp1, stop_fill_level] if tp1_hit else [stop_fill_level])
             exit_index = j
             break
         if not tp1_hit and first_hit:
