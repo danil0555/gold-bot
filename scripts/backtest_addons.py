@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from datetime import datetime, timezone
 
 import numpy as np
@@ -229,29 +229,20 @@ def run(args):
     totals = {name: defaultdict(float) for name in STRATEGIES}
     rows_out = []
     original_enrich = ns["enrich_scalper_series"]
+    def cached_enrich(frame):
+        # The backtest precomputes indicators causally over the full fetched
+        # history. Builders receive only rows closed by the evaluation time.
+        required = {"ema20", "ema50", "rsi", "atr", "adx", "vol_ma20",
+                    "range_high_20", "range_low_20"}
+        if required.issubset(frame.columns):
+            return frame
+        return original_enrich(frame)
+
+    ns["enrich_scalper_series"] = cached_enrich
     for symbol in args.symbols.split(","):
         symbol = symbol.strip().upper()
         if not symbol:
             continue
-        indicator_cache = OrderedDict()
-
-        def cached_enrich(frame):
-            if frame.empty or "open_time" not in frame.columns:
-                return original_enrich(frame)
-            step_ms = int(frame["open_time"].iloc[1] - frame["open_time"].iloc[0]) if len(frame) > 1 else 0
-            key = (step_ms, int(frame["open_time"].iloc[0]),
-                   int(frame["open_time"].iloc[-1]), len(frame))
-            cached = indicator_cache.get(key)
-            if cached is not None:
-                indicator_cache.move_to_end(key)
-                return cached
-            enriched = original_enrich(frame)
-            indicator_cache[key] = enriched
-            if len(indicator_cache) > 12:
-                indicator_cache.popitem(last=False)
-            return enriched
-
-        ns["enrich_scalper_series"] = cached_enrich
         print(f"FETCH {symbol}", flush=True)
         frames = {}
         for tf in ("1m", "5m", "15m"):
@@ -268,6 +259,9 @@ def run(args):
                     f"Incomplete BingX history for {symbol} {tf}: "
                     f"{len(frame)} candles, expected at least {minimum_rows}"
                 )
+            # Compute indicators once for the whole causal history instead of
+            # recalculating them on every rolling 300-candle slice.
+            frames[tf] = original_enrich(frame)
         m1 = frames["1m"]
         eligible = m1.index[m1["close_time"] >= eval_start]
         if len(eligible) == 0:
