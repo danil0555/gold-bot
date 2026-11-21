@@ -151,6 +151,13 @@ def filter_closed_candles(frame, current_ms):
     return frame.loc[pd.to_numeric(frame["close_time"], errors="coerce") < int(current_ms) - 2_000].copy().reset_index(drop=True)
 
 
+def closed_window(frame, close_times, stamp, limit=300):
+    """Return the last closed candles up to stamp without rescanning all history."""
+    end = int(np.searchsorted(close_times, int(stamp), side="right"))
+    start = max(0, end - int(limit))
+    return frame.iloc[start:end]
+
+
 def simulate_trade(signal, minute_frame, signal_index):
     """Simulate fills with spread/slippage applied once per execution side."""
     if signal_index + 1 >= len(minute_frame):
@@ -262,6 +269,10 @@ def run(args):
             # Compute indicators once for the whole causal history instead of
             # recalculating them on every rolling 300-candle slice.
             frames[tf] = original_enrich(frame)
+        close_time_arrays = {
+            tf: frame["close_time"].to_numpy(dtype=np.int64)
+            for tf, frame in frames.items()
+        }
         m1 = frames["1m"]
         eligible = m1.index[m1["close_time"] >= eval_start]
         if len(eligible) == 0:
@@ -278,7 +289,7 @@ def run(args):
                       f"E={int(totals['E_OVERHEAT_REVERSAL']['signals'])}", flush=True)
             stamp = int(m1.iloc[i]["close_time"])
             available = {
-                tf: frame.loc[frame["close_time"] <= stamp].tail(300).reset_index(drop=True)
+                tf: closed_window(frame, close_time_arrays[tf], stamp, 300)
                 for tf, frame in frames.items()
             }
             if any(len(available[tf]) < 60 for tf in available):
