@@ -25,3 +25,48 @@ def test_strategy_b_backtest_metrics_are_net_of_costs():
     assert result["profit_factor"] == round(2.5 / 1.2, 3)
     assert result["unresolved"] == 1
     assert result["skipped_entry_drift"] == 1
+
+
+
+def test_bingx_pagination_continues_after_interval_page_cap(monkeypatch):
+    import json
+    from contextlib import contextmanager
+    from urllib.parse import parse_qs, urlparse
+
+    from scripts import backtest_addons as market_data
+
+    step = 300_000
+    requested_windows = []
+
+    @contextmanager
+    def fake_urlopen(request, timeout=25):
+        query = parse_qs(urlparse(request.full_url).query)
+        cursor = int(query["startTime"][0])
+        end = int(query["endTime"][0])
+        requested_windows.append((cursor, end))
+        # Simulate BingX returning only 400 candles despite a wider request.
+        rows = []
+        for open_time in range(cursor, min(end, cursor + 400 * step), step):
+            rows.append({
+                "openTime": open_time,
+                "open": "100", "high": "101", "low": "99",
+                "close": "100", "volume": "10",
+                "closeTime": open_time + step - 1,
+            })
+        class Response:
+            def read(self):
+                return json.dumps({"code": 0, "data": rows}).encode()
+        yield Response()
+
+    monkeypatch.setattr(market_data.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(market_data.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(market_data.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(market_data, "LAST_API_REQUEST", 100.0)
+
+    frame = market_data.fetch_interval("BTC-USDT", "5m", 0, 800 * step)
+
+    assert len(frame) == 800
+    assert frame["open_time"].iloc[0] == 0
+    assert frame["open_time"].iloc[-1] == 799 * step
+    assert len(requested_windows) == 2
+    assert requested_windows[1][0] == 400 * step
