@@ -175,3 +175,50 @@ def test_websocket_1m_frame_requires_full_continuity_and_freshness():
 
     incomplete = frame.iloc[:-1].copy()
     assert not S["_is_usable_ws_1m_frame"](incomplete, last_close + 30_000, 101)
+
+
+from scripts.backtest_addons import simulate_trade
+
+
+def _simulation_frame(rows):
+    return pd.DataFrame(rows, columns=["open", "high", "low", "close"])
+
+
+def _simulation_signal():
+    return {"side": "BUY", "entry": 100.0, "sl": 99.0}
+
+
+def test_backtest_tp2_uses_weighted_targets_and_positive_net_result():
+    candles = _simulation_frame([
+        (100.0, 100.5, 99.5, 100.0),
+        (100.0, 104.0, 99.5, 103.0),
+    ])
+    result = simulate_trade(_simulation_signal(), candles, 0)
+    assert result["status"] == "tp2"
+    assert result["gross_r"] > 2.0
+    assert result["fee_r"] > 0
+    assert result["net_r"] < result["gross_r"]
+
+
+def test_backtest_tp1_then_stop_books_partial_profit_and_remaining_loss():
+    candles = _simulation_frame([
+        (100.0, 100.5, 99.5, 100.0),
+        (100.0, 102.0, 99.5, 101.5),
+        (101.0, 101.2, 98.5, 99.0),
+    ])
+    result = simulate_trade(_simulation_signal(), candles, 0)
+    assert result["status"] == "tp1_then_sl"
+    assert result["gross_r"] > 0
+    assert result["fee_r"] > 0
+    assert result["net_r"] < result["gross_r"]
+
+
+def test_backtest_stop_before_tp1_is_a_loss():
+    candles = _simulation_frame([
+        (100.0, 100.5, 99.5, 100.0),
+        (100.0, 100.5, 98.5, 99.0),
+    ])
+    result = simulate_trade(_simulation_signal(), candles, 0)
+    assert result["status"] == "sl"
+    assert result["gross_r"] < 0
+    assert result["net_r"] < result["gross_r"]
