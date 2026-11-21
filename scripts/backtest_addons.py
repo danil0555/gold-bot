@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 
 import numpy as np
@@ -224,10 +224,30 @@ def run(args):
     fetch_start = eval_start - 2 * 86_400_000  # warm-up covers EMA50/ADX context
     totals = {name: defaultdict(float) for name in STRATEGIES}
     rows_out = []
+    original_enrich = ns["enrich_scalper_series"]
     for symbol in args.symbols.split(","):
         symbol = symbol.strip().upper()
         if not symbol:
             continue
+        indicator_cache = OrderedDict()
+
+        def cached_enrich(frame):
+            if frame.empty or "open_time" not in frame.columns:
+                return original_enrich(frame)
+            step_ms = int(frame["open_time"].iloc[1] - frame["open_time"].iloc[0]) if len(frame) > 1 else 0
+            key = (step_ms, int(frame["open_time"].iloc[0]),
+                   int(frame["open_time"].iloc[-1]), len(frame))
+            cached = indicator_cache.get(key)
+            if cached is not None:
+                indicator_cache.move_to_end(key)
+                return cached
+            enriched = original_enrich(frame)
+            indicator_cache[key] = enriched
+            if len(indicator_cache) > 12:
+                indicator_cache.popitem(last=False)
+            return enriched
+
+        ns["enrich_scalper_series"] = cached_enrich
         print(f"FETCH {symbol}", flush=True)
         frames = {
             tf: filter_closed_candles(fetch_interval(symbol, tf, fetch_start, now), now)
@@ -249,7 +269,13 @@ def run(args):
         start_i = int(eligible[0])
         busy_until = {name: -1 for name in STRATEGIES}
         last_c5 = None
+        total_steps = max(1, len(m1) - 1 - start_i)
         for i in range(start_i, len(m1) - 1):
+            if (i - start_i) % 1000 == 0:
+                print(f"PROGRESS {symbol} {i-start_i}/{total_steps} "
+                      f"C={int(totals['C_BREAKOUT_RETEST']['signals'])} "
+                      f"D={int(totals['D_IMPULSE']['signals'])} "
+                      f"E={int(totals['E_OVERHEAT_REVERSAL']['signals'])}", flush=True)
             stamp = int(m1.iloc[i]["close_time"])
             available = {
                 tf: frame.loc[frame["close_time"] <= stamp].tail(300).reset_index(drop=True)
