@@ -30,6 +30,7 @@ STRATEGIES = {
 TAKER_FEE_RATE = 0.0005
 SLIPPAGE_PCT = 0.03
 SPREAD_PCT = 0.04
+MAX_ENTRY_DRIFT_R = 0.5
 LAST_API_REQUEST = 0.0
 
 
@@ -158,6 +159,9 @@ def simulate_trade(signal, minute_frame, signal_index):
     # A market order pays half the quoted spread plus adverse slippage on entry.
     adverse = (SPREAD_PCT / 2.0 + SLIPPAGE_PCT) / 100.0
     raw_entry = float(minute_frame.iloc[signal_index + 1]["open"])
+    drift_r = abs(raw_entry - float(signal["entry"])) / risk
+    if drift_r > MAX_ENTRY_DRIFT_R:
+        return {"status": "skipped_drift", "exit_index": signal_index + 1}
     entry = raw_entry * (1 + adverse if side == "BUY" else 1 - adverse)
     if side == "BUY":
         sl, tp1, tp2 = entry - risk, entry + 1.8 * risk, entry + 3.0 * risk
@@ -270,10 +274,12 @@ def run(args):
                 outcome = simulate_trade(signal, m1, i)
                 if outcome is None:
                     continue
-                busy_until[strategy] = int(outcome["exit_index"])
                 stat = totals[strategy]
                 stat["signals"] += 1
                 stat[outcome["status"]] += 1
+                if outcome["status"] == "skipped_drift":
+                    continue
+                busy_until[strategy] = int(outcome["exit_index"])
                 if outcome["status"] != "unresolved":
                     stat["net_r_sum"] += outcome["net_r"]
                     stat["gross_r_sum"] += outcome["gross_r"]
@@ -299,6 +305,7 @@ def run(args):
             "signals": int(stat["signals"]), "closed": closed,
             "tp2": int(stat["tp2"]), "tp1_then_sl": int(stat["tp1_then_sl"]),
             "sl": int(stat["sl"]), "unresolved": int(stat["unresolved"]),
+            "skipped_drift": int(stat["skipped_drift"]),
             "gross_r_total": round(stat["gross_r_sum"], 3),
             "fees_r_total": round(stat["fee_r_sum"], 3),
             "net_r_total": round(stat["net_r_sum"], 3),
