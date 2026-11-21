@@ -234,6 +234,11 @@ def run(args):
                 skipped_cooldown[symbol] += 1
                 continue
 
+            # Live validation permits up to 0.5R drift for market entries and
+            # up to 1.0R for level entries.
+            market_data.MAX_ENTRY_DRIFT_R = (
+                1.0 if signal.get("entry_mode") == "level" else 0.5
+            )
             outcome = market_data.simulate_trade(signal, minute, i)
             if outcome is None:
                 continue
@@ -277,7 +282,9 @@ def run(args):
             "spread_pct": 0.04,
             "slippage_pct_per_side": 0.03,
             "taker_fee_pct_per_side": 0.05,
-            "max_entry_drift_r": 0.5,
+            "max_entry_drift_r": {
+                "market": 0.5, "level": 1.0
+            },
         },
         "data_coverage": coverage_report,
         "evaluations_by_symbol": dict(evaluations),
