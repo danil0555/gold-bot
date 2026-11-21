@@ -1,4 +1,4 @@
-============================================================
+# ============================================================
 # TRADING BOT v10.0 — USDT-M FUTURES SCALPING
 # Strict multi-timeframe signal filter; no personal trade monitoring
 # REAL EXCHANGE ORDER PLACEMENT IS STRICTLY DISABLED.
