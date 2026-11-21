@@ -23,7 +23,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check numpy pandas pytest
       - name: Run deterministic addon strategy tests
         run: python -m pytest -q tests/test_addon_strategies.py
-      - name: Run read-only BingX historical backtest (3 days)
+      - name: Run read-only BingX historical backtest (7 days)
         if: github.event_name == 'push'
-        run: python scripts/backtest_addons.py --days 3 --symbols BTC-USDT,ETH-USDT,SOL-USDT
+        run: python scripts/backtest_addons.py --days 7 --symbols BTC-USDT,ETH-USDT,SOL-USDT
         timeout-minutes: 10
