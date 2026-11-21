@@ -1,5 +1,9 @@
 name: Python validation
 
+concurrency:
+  group: addon-validation-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: [fix/addon-strategies-diagnostics-20261121]
