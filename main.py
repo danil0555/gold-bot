@@ -1769,9 +1769,9 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
                                  scan_no, symbol, signal.get("side"),
                                  safe_float(signal.get("quality_score")), safe_float(signal.get("net_rr")))
                         if len(found) >= MAX_SIGNALS_PER_CYCLE:
-                            log.info("SCAN #%s reached MAX_SIGNALS_PER_CYCLE=%s; remaining symbols not checked",
+                            log.info("SCAN #%s reached MAX_SIGNALS_PER_CYCLE=%s; B signals capped, "
+                                     "continuing market-data collection for independent C/D/E checks",
                                      scan_no, MAX_SIGNALS_PER_CYCLE)
-                            break
                     else:
                         reason = "B: сигнал прошёл анализ, но не сохранён (дубликат/cooldown)"
                         reason_counts[reason] = reason_counts.get(reason, 0) + 1
@@ -1789,8 +1789,6 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
 
         # C/D/E получают те же свечи — второй раз REST-данные не запрашиваются.
         for symbol, frames in addon_frames.items():
-            if len(found) >= MAX_SIGNALS_PER_CYCLE:
-                break
             if ("swap", symbol) in _unavailable_symbols:
                 continue
             try:
@@ -1798,6 +1796,10 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
                 for addon_signal in addon_signals:
                     if any(item.get("symbol") == symbol for item in found):
                         log.info("ADDON_SKIP %s: по этой монете уже принят сигнал в текущем цикле", symbol)
+                        continue
+                    if len(found) >= MAX_SIGNALS_PER_CYCLE:
+                        log.info("ADDON_CAP_REACHED %s strategy=%s: сигнал проверен, но общий лимит цикла уже достигнут",
+                                 symbol, addon_signal.get("strategy_version"))
                         continue
                     signal_id = save_signal(addon_signal)
                     if signal_id:
