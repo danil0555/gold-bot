@@ -65,7 +65,7 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
     # limit=1000, so a single long-range request is not reliable for paging.
     while cursor < end_ms:
         window_end = min(cursor + step * 800, end_ms)
-        wait = 1.05 - (time.monotonic() - LAST_API_REQUEST)
+        wait = 1.75 - (time.monotonic() - LAST_API_REQUEST)
         if wait > 0:
             time.sleep(wait)
         query = urllib.parse.urlencode({
@@ -76,10 +76,30 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
             BASE + PATH + "?" + query,
             headers={"User-Agent": "gold-bot-readonly-backtest/1.0"},
         )
-        with urllib.request.urlopen(req, timeout=25) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        LAST_API_REQUEST = time.monotonic()
-        if payload.get("code", 0) not in (0, "0", None):
+        payload = None
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(req, timeout=25) as response:
+                    raw = response.read().decode("utf-8")
+                LAST_API_REQUEST = time.monotonic()
+                payload = json.loads(raw)
+            except urllib.error.HTTPError as exc:
+                LAST_API_REQUEST = time.monotonic()
+                if exc.code not in (418, 429, 500, 502, 503, 504) or attempt == 3:
+                    raise
+                delay = 5 * (2 ** attempt)
+                print(f"RETRY BingX HTTP {exc.code} {symbol} {interval} in {delay}s", flush=True)
+                time.sleep(delay)
+                continue
+            code = payload.get("code", 0)
+            if code in (0, "0", None):
+                break
+            if str(code) not in ("100410", "100429", "100500") or attempt == 3:
+                raise RuntimeError(f"BingX {symbol} {interval}: {payload}")
+            delay = 5 * (2 ** attempt)
+            print(f"RETRY BingX code={code} {symbol} {interval} in {delay}s", flush=True)
+            time.sleep(delay)
+        if payload is None or payload.get("code", 0) not in (0, "0", None):
             raise RuntimeError(f"BingX {symbol} {interval}: {payload}")
         batch = payload.get("data") or []
         if isinstance(batch, dict):
