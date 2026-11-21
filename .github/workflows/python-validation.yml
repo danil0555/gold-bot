@@ -1,6 +1,8 @@
 name: Python validation
 
 on:
+  push:
+    branches: [fix/addon-strategies-diagnostics-20261121]
   pull_request:
     branches: [main]
   workflow_dispatch:
