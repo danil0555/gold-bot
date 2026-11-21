@@ -19,3 +19,7 @@ jobs:
           python-version: "3.13"
       - name: Compile Python sources
         run: python -m compileall -q .
+      - name: Install strategy test dependencies
+        run: python -m pip install --disable-pip-version-check numpy pandas pytest
+      - name: Run deterministic addon strategy tests
+        run: python -m pytest -q tests/test_addon_strategies.py
