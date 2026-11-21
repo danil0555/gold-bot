@@ -647,18 +647,24 @@ def _detect_market_regime(m15_row, m15_prev, atr, price):
         return "trend"
     return "range"
 
-def build_signal_b(market, symbol, frames, quote=None):
+def build_signal_b(market, symbol, frames, quote=None, diagnostics=None):
     """Строгий многотаймфреймовый сетап для USDT-M Futures scalping.
 
     Это rule-based фильтр, а не статистическая вероятность выигрыша.
     Сигнал допускается только при согласовании 1H/15m/5m и наличии
     структурного триггера (BOS/CHoCH или sweep).
     """
-    if str(market).lower() != "swap":
+    def reject(reason):
+        if diagnostics is not None:
+            diagnostics["reason"] = reason
+            diagnostics["stage"] = "strategy_filter"
         return None
+
+    if str(market).lower() != "swap":
+        return reject("неверный тип рынка")
     required = ("1m", "5m", "15m", "1h", "4h")
     if any(tf not in frames or frames[tf] is None or len(frames[tf]) < MIN_CANDLE_ROWS for tf in required):
-        return None
+        return reject("недостаточно свечей на одном или нескольких таймфреймах")
 
     m1 = enrich_scalper_series(frames["1m"])
     m5 = enrich_scalper_series(frames["5m"])
@@ -672,18 +678,18 @@ def build_signal_b(market, symbol, frames, quote=None):
     price = safe_float(m15_now["close"])
     atr = safe_float(m15_now["atr"])
     if price <= 0 or atr <= 0:
-        return None
+        return reject("ATR отсутствует или некорректен")
 
     atr_pct = atr / price * 100.0
     if atr_pct < MIN_ATR_PCT or atr_pct > MAX_ATR_PCT:
-        return None
+        return reject("ATR% вне допустимого диапазона")
     if safe_float(m15_now["adx"]) < MIN_SCALPER_ADX:
-        return None
+        return reject("ADX ниже минимального порога")
 
     regime = _detect_market_regime(m15_now, m15_prev, atr, price)
     extension_atr = abs(price - safe_float(m15_now["ema20"])) / atr
     if extension_atr > MAX_EXTENSION_ATR or regime == "exhaustion":
-        return None
+        return reject("цена слишком далеко от EMA20 или режим exhaustion")
 
     # Контекст: 1H обязан задавать направление, 4H не должен ему противоречить.
     h1_bull = h1_now["close"] > h1_now["ema200"] and h1_now["ema20"] > h1_now["ema50"]
@@ -707,7 +713,7 @@ def build_signal_b(market, symbol, frames, quote=None):
     elif h1_bear and not h4_bull and m15_bear and m5_bear and m1_bear:
         side = "SELL"
     else:
-        return None
+        return reject("нет согласования тренда 1H/4H и импульса 15m/5m/1m")
 
     score = 0.0
     reasons = []
@@ -740,27 +746,27 @@ def build_signal_b(market, symbol, frames, quote=None):
         elif range_high > 0 and high15 > range_high and close15 < range_high:
             score += 1.5; structural = True; reasons.append("15м: sweep вверх и возврат под уровень")
     if not structural:
-        return None
+        return reject("нет подтверждения структуры BOS/sweep")
 
     vwap = safe_float(m15_now.get("vwap"), price)
     if (side == "BUY" and close15 > vwap) or (side == "SELL" and close15 < vwap):
         score += 1.0; reasons.append("15м: цена на правильной стороне VWAP")
     else:
-        return None
+        return reject("цена не на нужной стороне VWAP")
 
     vol_ratio = safe_float(m15_now.get("vol_ratio"), 1.0)
     if vol_ratio < MIN_VOLUME_RATIO:
-        return None
+        return reject("объём ниже минимального порога")
     if vol_ratio >= 1.2:
         score += 0.5; reasons.append(f"Объём выше среднего: x{vol_ratio:.2f}")
 
     score_int = int(round(score))
     if score < MIN_SCALPER_RAW_SCORE:
-        return None
+        return reject("сырой балл стратегии ниже минимального")
 
     sl_dist = max(1.35 * atr, price * 0.0015)
     if sl_dist > max(3.0 * atr, price * 0.012):
-        return None
+        return reject("недопустимая дистанция Stop Loss")
     tp1_dist = sl_dist * TP1_R
     tp2_dist = sl_dist * TP2_R
     if side == "BUY":
@@ -768,7 +774,7 @@ def build_signal_b(market, symbol, frames, quote=None):
     else:
         sl, tp1, tp2 = price + sl_dist, price - tp1_dist, price - tp2_dist
     if min(sl, tp1, tp2) <= 0:
-        return None
+        return reject("расчётные уровни SL/TP некорректны")
 
     gross_rr = abs(tp2 - price) / abs(price - sl)
     spread_pct = safe_float((quote or {}).get("spread_pct"), DEFAULT_SYNTHETIC_SPREAD_PCT)
@@ -779,7 +785,7 @@ def build_signal_b(market, symbol, frames, quote=None):
     effective_reward = max(abs(tp2 - price) - cost_dist, 0.0)
     net_rr = effective_reward / effective_risk
     if gross_rr < MIN_RR or net_rr < MIN_NET_RR:
-        return None
+        return reject("Gross RR или предварительный Net RR ниже порога")
 
     quality_score = min(100.0, 60.0 + score * 4.0
                         + (5.0 if net_rr >= 2.0 else 0.0)
@@ -787,7 +793,7 @@ def build_signal_b(market, symbol, frames, quote=None):
                         - spread_pct * 20.0)
     quality_score = round(quality_score, 1)
     if quality_score < MIN_QUALITY_SCORE:
-        return None
+        return reject("качество сетапа ниже минимального порога")
 
     entry_mode = "level" if extension_atr > 1.25 else "market"
     if side == "BUY":
@@ -1181,15 +1187,22 @@ def main_keyboard():
 # 15. ANALYSIS + SCAN
 # ============================================================
 
-async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEGY):
+async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEGY, diagnostics=None):
     # В новой версии анализируем только USDT-M Futures и только стратегию B.
     market = "swap"
     key = (market, symbol)
-    if key in _unavailable_symbols:
+
+    def stop(reason, stage="market_data"):
+        if diagnostics is not None:
+            diagnostics["reason"] = reason
+            diagnostics["stage"] = stage
         return None
+
+    if key in _unavailable_symbols:
+        return stop("контракт ранее отмечен как недоступный")
     now_ts = time.monotonic()
     if key in _insufficient_history and now_ts < _insufficient_history[key]:
-        return None
+        return stop("недостаточно закрытых свечей; действует временный cooldown")
 
     candles = {}
     for interval in ("1m", "5m", "15m", "1h", "4h"):
@@ -1200,71 +1213,146 @@ async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEG
             if ("100204" in str(exc) or "109425" in str(exc)
                     or "symbol is not found" in message or "not exist" in message):
                 _unavailable_symbols.add(key)
-                log.warning("Фьючерсный контракт %s недоступен", symbol)
-                return None
+                log.warning("Фьючерсный контракт %s недоступен: %s", symbol, exc)
+                return stop(f"контракт недоступен: {exc}")
             if "недостаточно закрытых свечей" in message:
                 _insufficient_history[key] = now_ts + 6 * 3600
-                return None
-            raise
+                return stop(f"{interval}: недостаточно закрытых свечей; повтор через 6 часов")
+            if isinstance(exc, asyncio.TimeoutError) or "timeout" in message:
+                return stop(f"тайм-аут API на {interval}: {exc}", "api_error")
+            return stop(f"ошибка API на {interval}: {exc}", "api_error")
+        except asyncio.TimeoutError as exc:
+            return stop(f"тайм-аут API на {interval}: {exc}", "api_error")
+
         if data is None or len(data) < MIN_CANDLE_ROWS:
-            return None
+            actual = 0 if data is None else len(data)
+            return stop(f"{interval}: получено {actual} свечей, требуется {MIN_CANDLE_ROWS}")
         candles[interval] = data
         try:
             save_closed_candles(market, symbol, interval, data)
         except Exception:
             log.exception("Не сохранились свечи %s %s", symbol, interval)
 
-    signal = build_signal_b(market, symbol, candles, quote=None)
+    if diagnostics is not None:
+        diagnostics["stage"] = "strategy_filter"
+    signal = build_signal_b(market, symbol, candles, quote=None, diagnostics=diagnostics)
     if not signal:
+        if diagnostics is not None and not diagnostics.get("reason"):
+            diagnostics["reason"] = "сетап не прошёл фильтры стратегии"
         return None
+
+    if diagnostics is not None:
+        diagnostics["stage"] = "live_quote"
     snapshot = await fetch_live_market_snapshot(market, symbol)
     if not snapshot:
-        return None
-    return enrich_signal_with_live_data(signal, snapshot)
+        return stop("не удалось получить актуальную рыночную котировку", "live_quote")
+
+    final_signal = enrich_signal_with_live_data(signal, snapshot)
+    if final_signal.get("status") == "CANCELLED":
+        return stop(final_signal.get("cancel_reason") or "сигнал отменён проверкой котировки", "live_validation")
+    if diagnostics is not None:
+        diagnostics["stage"] = "accepted"
+        diagnostics["reason"] = "сигнал прошёл все проверки"
+    return final_signal
 
 
 async def scan_market(strategy_version=DEFAULT_STRATEGY):
     async with _scan_lock:
+        scan_started = time.monotonic()
+        scan_started_utc = utc_text()
         found = []
+        checked = 0
+        skipped_unavailable = 0
+        reason_counts: dict[str, int] = {}
+        stage_counts: dict[str, int] = {}
         system_status["scan_count"] = int(system_status.get("scan_count", 0)) + 1
-        system_status["last_scan"] = utc_text()
+        system_status["last_scan"] = scan_started_utc
+        system_status["last_scan_started"] = scan_started_utc
+        system_status["last_scan_finished"] = None
+        system_status["last_scan_duration_sec"] = None
+        system_status["last_scan_checked"] = 0
+        system_status["last_scan_planned"] = len(SYMBOLS)
+        system_status["last_scan_summary"] = "Сканирование выполняется"
+        log.info("SCAN #%s START market=USDT-M Futures planned=%s strategy=B", system_status["scan_count"], len(SYMBOLS))
         expire_stale_signals()
 
         for symbol in SYMBOLS:
             key = ("swap", symbol)
             if key in _unavailable_symbols:
+                skipped_unavailable += 1
+                reason = "контракт ранее отмечен как недоступный"
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                log.info("SCAN #%s %s SKIP: %s", system_status["scan_count"], symbol, reason)
                 continue
+
+            checked += 1
+            diag: dict[str, str] = {"stage": "starting", "reason": "анализ не завершён"}
             try:
-                signal = await analyze_market_symbol("swap", symbol, STRATEGY_B)
+                signal = await analyze_market_symbol("swap", symbol, STRATEGY_B, diagnostics=diag)
                 if not signal:
+                    reason = diag.get("reason", "сигнал не сформирован")
+                    stage = diag.get("stage", "unknown")
+                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                    stage_counts[stage] = stage_counts.get(stage, 0) + 1
+                    log.info("SCAN #%s %s REJECT stage=%s reason=%s", system_status["scan_count"], symbol, stage, reason)
                     continue
+
                 signal_id = save_signal(signal)
                 if signal_id:
                     signal["id"] = signal_id
                     found.append(signal)
+                    log.info("SCAN #%s %s ACCEPT side=%s quality=%.1f net_rr=%.2f", system_status["scan_count"], symbol, signal.get("side"), safe_float(signal.get("quality_score")), safe_float(signal.get("net_rr")))
                     if len(found) >= MAX_SIGNALS_PER_CYCLE:
+                        log.info("SCAN #%s reached MAX_SIGNALS_PER_CYCLE=%s; remaining symbols not checked", system_status["scan_count"], MAX_SIGNALS_PER_CYCLE)
                         break
-            except MarketError as exc:
-                message = str(exc)
-                if "100410" in message or "100429" in message:
-                    log.debug("Rate limit %s: %s", symbol, message)
                 else:
-                    log.warning("Ошибка сканирования %s: %s", symbol, exc)
-            except Exception:
-                log.exception("Ошибка сканирования %s", symbol)
+                    reason = "сигнал прошёл анализ, но не был сохранён в БД (возможно, дубликат/cooldown)"
+                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                    log.info("SCAN #%s %s NOT_SAVED: %s", system_status["scan_count"], symbol, reason)
+            except asyncio.CancelledError:
+                raise
+            except MarketError as exc:
+                reason = f"ошибка BingX/API: {exc}"
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                log.warning("SCAN #%s %s API_ERROR: %s", system_status["scan_count"], symbol, exc)
+            except Exception as exc:
+                reason = f"внутренняя ошибка: {type(exc).__name__}: {exc}"
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                log.exception("SCAN #%s %s INTERNAL_ERROR", system_status["scan_count"], symbol)
 
+        duration = time.monotonic() - scan_started
+        finished_utc = utc_text()
         system_status["signals_count"] = int(system_status.get("signals_count", 0)) + len(found)
+        system_status["last_scan_finished"] = finished_utc
+        system_status["last_scan_duration_sec"] = round(duration, 2)
+        system_status["last_scan_checked"] = checked
+        system_status["last_scan_skipped_unavailable"] = skipped_unavailable
+        summary = (f"checked={checked}/{len(SYMBOLS)}; unavailable_skipped={skipped_unavailable}; "
+                   f"accepted={len(found)}; duration={duration:.1f}s")
+        system_status["last_scan_summary"] = summary
+        log.info("SCAN #%s FINISH started=%s finished=%s %s", system_status["scan_count"], scan_started_utc, finished_utc, summary)
+        if reason_counts:
+            top_reasons = sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))[:12]
+            log.info("SCAN #%s REJECTION_COUNTS: %s", system_status["scan_count"], " | ".join(f"{count}x {reason}" for reason, count in top_reasons))
+        if stage_counts:
+            log.info("SCAN #%s STAGE_COUNTS: %s", system_status["scan_count"], stage_counts)
         return found
 
 
 async def broadcast_signal(signal):
     with db() as con:
         users = con.execute("SELECT user_id FROM users WHERE is_active=1").fetchall()
+    delivered = 0
+    failed = 0
     for row in users:
         try:
             await bot.send_message(row["user_id"], signal_text(signal), parse_mode="HTML")
+            delivered += 1
         except Exception:
+            failed += 1
             log.exception("Не отправлен сигнал пользователю %s", row["user_id"])
+    log.info("SIGNAL_DELIVERY symbol=%s side=%s delivered=%s failed=%s active_users=%s",
+             signal.get("symbol"), signal.get("side"), delivered, failed, len(users))
 
 
 
@@ -1303,6 +1391,8 @@ async def scan_market_callback(message: Message):
         await status.edit_text(f"✅ Найдено сильных сетапов: {len(signals)}.")
         for signal in signals:
             await message.answer(signal_text(signal), parse_mode="HTML")
+            log.info("SIGNAL_DELIVERY mode=manual symbol=%s side=%s user_id=%s",
+                     signal.get("symbol"), signal.get("side"), message.from_user.id)
     except Exception:
         log.exception("Ошибка ручного сканирования")
         await status.edit_text("❌ Не удалось завершить анализ. Подробности записаны в лог.")
@@ -1353,7 +1443,10 @@ async def system_status_handler(message: Message):
         f"API BingX: {html.escape(str(system_status.get('api_status', '—')))}\n"
         f"Сканов: {system_status.get('scan_count', 0)}\n"
         f"Отправлено сигналов: {system_status.get('signals_count', 0)}\n"
-        f"Последний скан: {system_status.get('last_scan') or '—'}\n"
+        f"Последний скан (UTC): {system_status.get('last_scan') or '—'}\n"
+        f"Последний цикл: {html.escape(str(system_status.get('last_scan_summary') or '—'))}\n"
+        f"Проверено пар: {system_status.get('last_scan_checked', 0)}/{system_status.get('last_scan_planned', len(SYMBOLS))}\n"
+        f"Длительность: {system_status.get('last_scan_duration_sec') if system_status.get('last_scan_duration_sec') is not None else '—'} сек.\n"
         f"Недоступных контрактов: {len(_unavailable_symbols)}",
         parse_mode="HTML")
 
@@ -1416,6 +1509,8 @@ async def background_scan():
                 found = await scan_market(strategy_version=STRATEGY_B)
                 for signal in found:
                     await broadcast_signal(signal)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             log.exception("Ошибка фонового Futures-скана")
         await asyncio.sleep(MARKET_SCAN_INTERVAL_SEC)
