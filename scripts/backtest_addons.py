@@ -61,13 +61,16 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
     cursor = start_ms
     step = INTERVAL_MS[interval]
     global LAST_API_REQUEST
-    for _ in range(12):
+    # Use fixed windows of 800 candles. BingX may return 999 even when
+    # limit=1000, so a single long-range request is not reliable for paging.
+    while cursor < end_ms:
+        window_end = min(cursor + step * 800, end_ms)
         wait = 1.05 - (time.monotonic() - LAST_API_REQUEST)
         if wait > 0:
             time.sleep(wait)
         query = urllib.parse.urlencode({
             "symbol": symbol, "interval": interval, "startTime": cursor,
-            "endTime": end_ms, "limit": 1000,
+            "endTime": window_end, "limit": 1000,
         })
         req = urllib.request.Request(
             BASE + PATH + "?" + query,
@@ -82,7 +85,8 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
         if isinstance(batch, dict):
             batch = batch.get("data", batch.get("list", batch.get("rows", [])))
         if not batch:
-            break
+            cursor = window_end
+            continue
         parsed = []
         for row in batch:
             try:
@@ -96,28 +100,16 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
                     ct = int(float(row.get("closeTime", row.get("close_time", ot + step - 1))))
                 else:
                     continue
-                if ot > 0 and all(math.isfinite(v) for v in values):
+                if cursor <= ot < window_end and ot > 0 and all(math.isfinite(v) for v in values):
                     parsed.append((ot, *values, ct))
             except (ValueError, TypeError, KeyError, OverflowError):
                 continue
-        if not parsed:
+        if not parsed and batch:
             preview = json.dumps(payload, ensure_ascii=False)[:1200]
             raise RuntimeError(f"Unexpected kline format for {symbol} {interval}: {preview}")
         rows.extend(parsed)
-        newest = max(row[0] for row in parsed)
-        next_cursor = newest + step
-        if next_cursor <= cursor or len(parsed) < 1000 or next_cursor >= end_ms:
-            break
-        cursor = next_cursor
-        time.sleep(1.05)  # documented public kline endpoint limit: 1 request/sec
-    frame_rows = []
-    for row in rows:
-        ot = int(row[0])
-        ct = int(row[6])
-        values = [float(row[j]) for j in range(1, 6)]
-        if ot < end_ms and ct < end_ms and all(math.isfinite(v) for v in values):
-            frame_rows.append((ot, *values, ct))
-    df = pd.DataFrame(frame_rows, columns=[
+        cursor = window_end
+    df = pd.DataFrame(rows, columns=[
         "open_time", "open", "high", "low", "close", "volume", "close_time"
     ])
     if df.empty:
