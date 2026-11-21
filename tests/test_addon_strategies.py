@@ -236,3 +236,13 @@ def test_backtest_excludes_the_current_forming_candle():
     })
     closed = filter_closed_candles(frame, current_ms=121_000)
     assert closed["close_time"].tolist() == [59_999]
+
+
+def test_backtest_skips_entry_when_next_open_exceeds_live_drift_limit():
+    candles = _simulation_frame([
+        (100.0, 100.2, 99.8, 100.0),
+        (100.6, 100.8, 100.4, 100.6),
+        (100.6, 101.0, 100.2, 100.8),
+    ])
+    result = simulate_trade(_simulation_signal(), candles, 0)
+    assert result["status"] == "skipped_drift"
