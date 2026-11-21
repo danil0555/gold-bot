@@ -118,6 +118,13 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
               .reset_index(drop=True))
 
 
+def filter_closed_candles(frame, current_ms):
+    """Exclude the currently forming candle, matching the live bot's closed-bar rule."""
+    if frame.empty or "close_time" not in frame.columns:
+        return frame.copy()
+    return frame.loc[pd.to_numeric(frame["close_time"], errors="coerce") < int(current_ms) - 2_000].copy().reset_index(drop=True)
+
+
 def simulate_trade(signal, minute_frame, signal_index):
     """Simulate fills with spread/slippage applied once per execution side."""
     if signal_index + 1 >= len(minute_frame):
@@ -198,7 +205,7 @@ def run(args):
             continue
         print(f"FETCH {symbol}", flush=True)
         frames = {
-            tf: fetch_interval(symbol, tf, fetch_start, now)
+            tf: filter_closed_candles(fetch_interval(symbol, tf, fetch_start, now), now)
             for tf in ("1m", "5m", "15m")
         }
         expected_minutes = (args.days + 2) * 24 * 60
