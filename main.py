@@ -1032,19 +1032,25 @@ STRATEGY_E = "E_OVERHEAT_REVERSAL"
 ADDON_STRATEGIES = (STRATEGY_C, STRATEGY_D, STRATEGY_E)
 
 
+def _addon_reject(diagnostics: dict[str, Any] | None, reason: str):
+    if diagnostics is not None:
+        diagnostics["reason"] = reason
+    return None
+
+
 def _make_addon_signal(strategy: str, symbol: str, side: str, entry: float,
                        atr: float, score: int, regime: str, reasons: list[str],
-                       setup_stamp: int) -> dict[str, Any] | None:
+                       setup_stamp: int,
+                       diagnostics: dict[str, Any] | None = None) -> dict[str, Any] | None:
     if entry <= 0 or atr <= 0:
-        return None
+        return _addon_reject(diagnostics, "invalid_price_or_atr")
     risk_dist = max(1.25 * atr, entry * 0.0015)
-    sl_dist = risk_dist
     if side == "BUY":
-        sl, tp1, tp2 = entry - sl_dist, entry + sl_dist * TP1_R, entry + sl_dist * TP2_R
+        sl, tp1, tp2 = entry - risk_dist, entry + risk_dist * TP1_R, entry + risk_dist * TP2_R
     else:
-        sl, tp1, tp2 = entry + sl_dist, entry - sl_dist * TP1_R, entry - sl_dist * TP2_R
+        sl, tp1, tp2 = entry + risk_dist, entry - risk_dist * TP1_R, entry - risk_dist * TP2_R
     if min(sl, tp1, tp2) <= 0:
-        return None
+        return _addon_reject(diagnostics, "invalid_sl_tp")
     gross_rr = abs(tp2 - entry) / abs(entry - sl)
     fee_pct = TAKER_FEE_RATE * 200.0
     slip_pct = DEFAULT_SLIPPAGE_PCT * 2.0
@@ -1052,8 +1058,14 @@ def _make_addon_signal(strategy: str, symbol: str, side: str, entry: float,
     cost = entry * ((estimated_spread + fee_pct + slip_pct) / 100.0)
     net_rr = max(abs(tp2 - entry) - cost, 0.0) / max(abs(entry - sl) + cost * 0.5, 1e-9)
     quality = round(min(100.0, 62 + score * 5 - estimated_spread * 10), 1)
-    if gross_rr < MIN_RR or net_rr < MIN_NET_RR or quality < MIN_QUALITY_SCORE:
-        return None
+    if gross_rr < MIN_RR:
+        return _addon_reject(diagnostics, f"gross_rr_below_min:{gross_rr:.2f}")
+    if net_rr < MIN_NET_RR:
+        return _addon_reject(diagnostics, f"net_rr_below_min:{net_rr:.2f}")
+    if quality < MIN_QUALITY_SCORE:
+        return _addon_reject(diagnostics, f"quality_below_min:{quality:.1f}")
+    if diagnostics is not None:
+        diagnostics["reason"] = "candidate_created"
     return {
         "strategy_version": strategy, "market": "swap", "symbol": symbol, "side": side,
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp": tp2,
@@ -1067,93 +1079,109 @@ def _make_addon_signal(strategy: str, symbol: str, side: str, entry: float,
     }
 
 
-def build_signal_c_breakout_retest(symbol: str, frames: dict[str, pd.DataFrame]) -> dict[str, Any] | None:
-    """Пробой диапазона 20 свечей с удержанием уровня на закрытых 5m."""
-    if any(tf not in frames or len(frames[tf]) < 60 for tf in ("5m", "15m")):
-        return None
+def build_signal_c_breakout_retest(symbol: str, frames: dict[str, pd.DataFrame],
+                                   diagnostics: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Пробой диапазона 20 свечей и ретест уровня следующей свечой."""
+    if any(tf not in frames or frames[tf] is None or len(frames[tf]) < 60 for tf in ("5m", "15m")):
+        return _addon_reject(diagnostics, "insufficient_5m_or_15m_candles")
     m5 = enrich_scalper_series(frames["5m"])
     m15 = enrich_scalper_series(frames["15m"])
     cur, prev = m5.iloc[-1], m5.iloc[-2]
     ctx = m15.iloc[-1]
     price, atr = safe_float(cur["close"]), safe_float(cur["atr"])
+    # У prev.range_*_20 уровень рассчитан по 20 свечам ДО prev.
+    # prev подтверждает пробой, cur — удержание ретеста.
     hi, lo = safe_float(prev["range_high_20"]), safe_float(prev["range_low_20"])
     if price <= 0 or atr <= 0:
-        return None
-    vol = safe_float(cur["vol_ratio"], 1.0)
+        return _addon_reject(diagnostics, "invalid_5m_price_or_atr")
+    vol = safe_float(cur["volume"]) / max(safe_float(prev["vol_ma20"]), 1e-12)
     adx = safe_float(ctx["adx"])
-    side = None
-    reasons = []
-    if hi > 0 and safe_float(cur["low"]) <= hi * 1.002 and price > hi and vol >= 1.15 and adx >= 15:
+    side, reasons = None, []
+    if hi > 0 and safe_float(prev["close"]) > hi and safe_float(cur["low"]) <= hi * 1.002 and price > hi and vol >= 1.05 and adx >= 15:
         side = "BUY"
-        reasons = ["5м: цена закрылась выше диапазона 20 свечей", "5м: ретест уровня удержан", f"Объём x{vol:.2f}"]
-    elif lo > 0 and safe_float(cur["high"]) >= lo * 0.998 and price < lo and vol >= 1.15 and adx >= 15:
+        reasons = ["5м: предыдущая свеча пробила максимум 20 свечей", "5м: текущая свеча протестировала и удержала уровень", f"Объём относительно предыдущей средней x{vol:.2f}"]
+    elif lo > 0 and safe_float(prev["close"]) < lo and safe_float(cur["high"]) >= lo * 0.998 and price < lo and vol >= 1.05 and adx >= 15:
         side = "SELL"
-        reasons = ["5м: цена закрылась ниже диапазона 20 свечей", "5м: ретест уровня удержан", f"Объём x{vol:.2f}"]
-    if not side:
-        return None
+        reasons = ["5м: предыдущая свеча пробила минимум 20 свечей", "5м: текущая свеча протестировала и удержала уровень", f"Объём относительно предыдущей средней x{vol:.2f}"]
+    else:
+        return _addon_reject(diagnostics, "no_confirmed_breakout_then_retest")
     if side == "BUY" and safe_float(ctx["close"]) < safe_float(ctx["ema50"]):
-        return None
+        return _addon_reject(diagnostics, "15m_context_below_ema50")
     if side == "SELL" and safe_float(ctx["close"]) > safe_float(ctx["ema50"]):
-        return None
-    return _make_addon_signal(STRATEGY_C, symbol, side, price, atr, 6, "breakout", reasons, int(cur["open_time"]))
+        return _addon_reject(diagnostics, "15m_context_above_ema50")
+    return _make_addon_signal(STRATEGY_C, symbol, side, price, atr, 6, "breakout",
+                              reasons, int(cur["open_time"]), diagnostics)
 
 
-def build_signal_d_impulse(symbol: str, frames: dict[str, pd.DataFrame]) -> dict[str, Any] | None:
-    """Импульсный сетап: расширение тела/объёма на 1m + согласование 5m."""
-    if any(tf not in frames or len(frames[tf]) < 60 for tf in ("1m", "5m")):
-        return None
+def build_signal_d_impulse(symbol: str, frames: dict[str, pd.DataFrame],
+                           diagnostics: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Импульс 1m; ATR и средний объём берутся до текущей свечи."""
+    if any(tf not in frames or frames[tf] is None or len(frames[tf]) < 60 for tf in ("1m", "5m")):
+        return _addon_reject(diagnostics, "insufficient_1m_or_5m_candles")
     m1 = enrich_scalper_series(frames["1m"])
     m5 = enrich_scalper_series(frames["5m"])
     cur, prev = m1.iloc[-1], m1.iloc[-2]
     ctx = m5.iloc[-1]
-    price, atr = safe_float(cur["close"]), safe_float(cur["atr"])
+    price, atr_ref = safe_float(cur["close"]), safe_float(prev["atr"])
+    baseline_volume = safe_float(prev["vol_ma20"])
     body = abs(safe_float(cur["close"]) - safe_float(cur["open"]))
-    vol = safe_float(cur["vol_ratio"], 1.0)
-    if price <= 0 or atr <= 0 or body < atr * 1.15 or vol < 1.8:
-        return None
+    vol = safe_float(cur["volume"]) / max(baseline_volume, 1e-12)
+    if price <= 0 or atr_ref <= 0:
+        return _addon_reject(diagnostics, "invalid_1m_price_or_reference_atr")
+    if body < atr_ref:
+        return _addon_reject(diagnostics, f"impulse_body_too_small:{body / atr_ref:.2f}_atr")
+    if vol < 1.5:
+        return _addon_reject(diagnostics, f"volume_below_1_5x:{vol:.2f}")
     if safe_float(ctx["adx"]) < 15:
-        return None
+        return _addon_reject(diagnostics, "5m_adx_below_15")
     if price > safe_float(cur["open"]) and safe_float(ctx["close"]) > safe_float(ctx["ema20"]) > safe_float(ctx["ema50"]):
         side = "BUY"
     elif price < safe_float(cur["open"]) and safe_float(ctx["close"]) < safe_float(ctx["ema20"]) < safe_float(ctx["ema50"]):
         side = "SELL"
     else:
-        return None
-    # Не входить в продолжение уже чрезмерно растянутого импульса.
-    if abs(price - safe_float(ctx["ema20"])) > safe_float(ctx["atr"]) * 2.0:
-        return None
-    reasons = [f"1м: импульсное тело {body / atr:.2f} ATR", f"1м: объём x{vol:.2f}", "5м: EMA20/EMA50 подтверждают направление"]
-    return _make_addon_signal(STRATEGY_D, symbol, side, price, atr, 6, "impulse", reasons, int(cur["open_time"]))
+        return _addon_reject(diagnostics, "1m_impulse_not_aligned_with_5m_ema")
+    ctx_atr = safe_float(ctx["atr"])
+    if ctx_atr <= 0 or abs(price - safe_float(ctx["ema20"])) > ctx_atr * 2.0:
+        return _addon_reject(diagnostics, "price_too_extended_from_5m_ema20")
+    reasons = [f"1м: импульсное тело {body / atr_ref:.2f} ATR", f"1м: объём x{vol:.2f} от предыдущей средней", "5м: EMA20/EMA50 подтверждают направление"]
+    return _make_addon_signal(STRATEGY_D, symbol, side, price, atr_ref, 6, "impulse",
+                              reasons, int(cur["open_time"]), diagnostics)
 
 
-def build_signal_e_overheat_reversal(symbol: str, frames: dict[str, pd.DataFrame]) -> dict[str, Any] | None:
-    """Контртренд только после экстремума RSI и закрытия обратно внутрь диапазона."""
-    if any(tf not in frames or len(frames[tf]) < 60 for tf in ("1m", "5m")):
-        return None
+def build_signal_e_overheat_reversal(symbol: str, frames: dict[str, pd.DataFrame],
+                                     diagnostics: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Разворот после RSI-экстремума в последних пяти свечах 1m."""
+    if any(tf not in frames or frames[tf] is None or len(frames[tf]) < 60 for tf in ("1m", "5m")):
+        return _addon_reject(diagnostics, "insufficient_1m_or_5m_candles")
     m1 = enrich_scalper_series(frames["1m"])
     m5 = enrich_scalper_series(frames["5m"])
     cur, prev = m1.iloc[-1], m1.iloc[-2]
-    ctx = m5.iloc[-1]
+    recent, ctx = m1.iloc[-6:-1], m5.iloc[-1]
     price, atr = safe_float(cur["close"]), safe_float(cur["atr"])
-    rsi_now, rsi_prev = safe_float(cur["rsi"]), safe_float(prev["rsi"])
-    vol = safe_float(cur["vol_ratio"], 1.0)
-    if price <= 0 or atr <= 0 or vol < 1.2:
-        return None
-    # RSI возвращается из зоны экстремума; тело текущей свечи должно сменить направление.
-    if rsi_prev >= 82 and rsi_now < 75 and price < safe_float(cur["open"]) and price < safe_float(ctx["close"]):
-        side = "SELL"
-    elif rsi_prev <= 18 and rsi_now > 25 and price > safe_float(cur["open"]) and price > safe_float(ctx["close"]):
-        side = "BUY"
+    rsi_now = safe_float(cur["rsi"])
+    recent_high, recent_low = safe_float(recent["rsi"].max()), safe_float(recent["rsi"].min())
+    vol = safe_float(cur["volume"]) / max(safe_float(prev["vol_ma20"]), 1e-12)
+    if price <= 0 or atr <= 0:
+        return _addon_reject(diagnostics, "invalid_1m_price_or_atr")
+    if vol < 1.1:
+        return _addon_reject(diagnostics, f"volume_below_1_1x:{vol:.2f}")
+    if recent_high >= 80 and rsi_now < 75 and price < safe_float(cur["open"]) and price < safe_float(prev["close"]):
+        side, extreme = "SELL", recent_high
+    elif recent_low <= 20 and rsi_now > 25 and price > safe_float(cur["open"]) and price > safe_float(prev["close"]):
+        side, extreme = "BUY", recent_low
     else:
-        return None
-    if abs(price - safe_float(ctx["ema20"])) < safe_float(ctx["atr"]) * 0.6:
-        return None
-    reasons = [f"1м: RSI вернулся из экстремума ({rsi_prev:.1f} → {rsi_now:.1f})", f"Объём x{vol:.2f}", "5м: подтверждён возврат цены"]
-    return _make_addon_signal(STRATEGY_E, symbol, side, price, atr, 6, "overheat_reversal", reasons, int(cur["open_time"]))
+        return _addon_reject(diagnostics, f"no_rsi_extreme_reversal:high={recent_high:.1f},low={recent_low:.1f},now={rsi_now:.1f}")
+    ctx_atr = safe_float(ctx["atr"])
+    if ctx_atr <= 0 or abs(price - safe_float(ctx["ema20"])) < ctx_atr * 0.4:
+        return _addon_reject(diagnostics, "reversal_too_close_to_5m_ema20")
+    reasons = [f"1м: RSI вернулся из экстремума ({extreme:.1f} → {rsi_now:.1f})", f"Объём x{vol:.2f} от предыдущей средней", "1м: свеча подтвердила смену направления"]
+    return _make_addon_signal(STRATEGY_E, symbol, side, price, atr, 6, "overheat_reversal",
+                              reasons, int(cur["open_time"]), diagnostics)
 
 
 
 # ============================================================
+
 # 9. LIVE QUOTE + SIGNAL STORAGE
 # ============================================================
 
@@ -1613,7 +1641,7 @@ async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEG
 
 async def analyze_addon_strategies(symbol: str, frames: dict[str, pd.DataFrame],
                                   diagnostics: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Проверяет C/D/E на свечах, уже загруженных основным проходом."""
+    """Проверяет независимые C/D/E и сохраняет точную причину каждого отказа."""
     if ("swap", symbol) in _unavailable_symbols:
         return []
     builders = (
@@ -1623,35 +1651,45 @@ async def analyze_addon_strategies(symbol: str, frames: dict[str, pd.DataFrame],
     )
     results = []
     for strategy_name, builder in builders:
-        if diagnostics is not None:
-            diagnostics[strategy_name]["checked"] += 1
+        stats = diagnostics.get(strategy_name) if diagnostics is not None else None
+        if stats is not None:
+            stats["checked"] += 1
+        local_diag: dict[str, str] = {}
         try:
-            candidate = builder(symbol, frames)
+            candidate = builder(symbol, frames, local_diag)
             if not candidate:
-                if diagnostics is not None:
-                    diagnostics[strategy_name]["rejected"] += 1
+                reason = local_diag.get("reason", "unspecified_filter_rejection")
+                if stats is not None:
+                    stats["rejected"] += 1
+                    stats.setdefault("reasons", {})[reason] = stats.setdefault("reasons", {}).get(reason, 0) + 1
+                log.info("ADDON_FILTER_REJECT %s %s: %s", strategy_name, symbol, reason)
                 continue
-            if diagnostics is not None:
-                diagnostics[strategy_name]["candidate"] += 1
+            if stats is not None:
+                stats["candidate"] += 1
             snapshot = await fetch_live_market_snapshot("swap", symbol)
             if not snapshot:
-                if diagnostics is not None:
-                    diagnostics[strategy_name]["rejected"] += 1
-                log.info("ADDON_REJECT %s %s: нет актуальной котировки", strategy_name, symbol)
+                reason = "live_quote_unavailable"
+                if stats is not None:
+                    stats["rejected"] += 1
+                    stats.setdefault("reasons", {})[reason] = stats.setdefault("reasons", {}).get(reason, 0) + 1
+                log.info("ADDON_REJECT %s %s: %s", strategy_name, symbol, reason)
                 continue
             final_candidate = enrich_signal_with_live_data(candidate, snapshot)
             if final_candidate.get("status") == "CANCELLED":
-                if diagnostics is not None:
-                    diagnostics[strategy_name]["rejected"] += 1
-                log.info("ADDON_REJECT %s %s: %s", strategy_name, symbol,
-                         final_candidate.get("cancel_reason") or "live validation")
+                reason = str(final_candidate.get("cancel_reason") or "live_validation_cancelled")
+                if stats is not None:
+                    stats["rejected"] += 1
+                    stats.setdefault("reasons", {})[reason] = stats.setdefault("reasons", {}).get(reason, 0) + 1
+                log.info("ADDON_REJECT %s %s: %s", strategy_name, symbol, reason)
                 continue
             results.append(final_candidate)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            if diagnostics is not None:
-                diagnostics[strategy_name]["errors"] += 1
+        except Exception as exc:
+            if stats is not None:
+                stats["errors"] += 1
+                reason = f"exception:{type(exc).__name__}"
+                stats.setdefault("reasons", {})[reason] = stats.setdefault("reasons", {}).get(reason, 0) + 1
             log.exception("Ошибка дополнительной стратегии %s для %s", strategy_name, symbol)
     if not results:
         return []
@@ -1680,7 +1718,7 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
         reason_counts: dict[str, int] = {}
         stage_counts: dict[str, int] = {}
         addon_stats: dict[str, Any] = {
-            name: {"checked": 0, "candidate": 0, "rejected": 0, "errors": 0}
+            name: {"checked": 0, "candidate": 0, "rejected": 0, "errors": 0, "reasons": {}}
             for name in ADDON_STRATEGIES
         }
         addon_stats["conflicts"] = 0
@@ -1795,6 +1833,8 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
             log.info("SCAN #%s ADDON_STATS %s: checked=%s candidates=%s rejected=%s errors=%s",
                      scan_no, strategy_name, stats["checked"], stats["candidate"],
                      stats["rejected"], stats["errors"])
+            if stats.get("reasons"):
+                log.info("SCAN #%s ADDON_REASONS %s: %s", scan_no, strategy_name, stats["reasons"])
         log.info("SCAN #%s ADDON_CONFLICTS: %s", scan_no, addon_stats["conflicts"])
         if reason_counts:
             top_reasons = sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))[:12]
