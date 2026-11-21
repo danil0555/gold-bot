@@ -708,12 +708,33 @@ def build_signal_b(market, symbol, frames, quote=None, diagnostics=None):
     m1_bull = m1_now["close"] > m1_now["ema20"] and m1_now["macd"] > m1_now["macd_signal"]
     m1_bear = m1_now["close"] < m1_now["ema20"] and m1_now["macd"] < m1_now["macd_signal"]
 
-    if h1_bull and not h4_bear and m15_bull and m5_bull and m1_bull:
+    buy_checks = {
+        "1H_bull": bool(h1_bull),
+        "4H_not_bear": bool(not h4_bear),
+        "15m_bull": bool(m15_bull),
+        "5m_bull": bool(m5_bull),
+        "1m_bull": bool(m1_bull),
+    }
+    sell_checks = {
+        "1H_bear": bool(h1_bear),
+        "4H_not_bull": bool(not h4_bull),
+        "15m_bear": bool(m15_bear),
+        "5m_bear": bool(m5_bear),
+        "1m_bear": bool(m1_bear),
+    }
+
+    if all(buy_checks.values()):
         side = "BUY"
-    elif h1_bear and not h4_bull and m15_bear and m5_bear and m1_bear:
+    elif all(sell_checks.values()):
         side = "SELL"
     else:
-        return reject("нет согласования тренда 1H/4H и импульса 15m/5m/1m")
+        # Диагностика показывает каждое условие, не меняя торговую логику.
+        buy_state = ",".join(f"{name}={'OK' if passed else 'NO'}" for name, passed in buy_checks.items())
+        sell_state = ",".join(f"{name}={'OK' if passed else 'NO'}" for name, passed in sell_checks.items())
+        details = f"BUY[{buy_state}] SELL[{sell_state}]"
+        if diagnostics is not None:
+            diagnostics["trend_checks"] = details
+        return reject(f"нет согласования тренда/импульса: {details}")
 
     score = 0.0
     reasons = []
