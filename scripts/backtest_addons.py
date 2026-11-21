@@ -29,6 +29,7 @@ STRATEGIES = {
 TAKER_FEE_RATE = 0.0005
 SLIPPAGE_PCT = 0.03
 SPREAD_PCT = 0.04
+LAST_API_REQUEST = 0.0
 
 
 def load_builders():
@@ -59,7 +60,11 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
     rows = []
     cursor = start_ms
     step = INTERVAL_MS[interval]
+    global LAST_API_REQUEST
     for _ in range(12):
+        wait = 1.05 - (time.monotonic() - LAST_API_REQUEST)
+        if wait > 0:
+            time.sleep(wait)
         query = urllib.parse.urlencode({
             "symbol": symbol, "interval": interval, "startTime": cursor,
             "endTime": end_ms, "limit": 1440,
@@ -70,6 +75,7 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
         )
         with urllib.request.urlopen(req, timeout=25) as response:
             payload = json.loads(response.read().decode("utf-8"))
+        LAST_API_REQUEST = time.monotonic()
         if payload.get("code", 0) not in (0, "0", None):
             raise RuntimeError(f"BingX {symbol} {interval}: {payload}")
         batch = payload.get("data") or []
@@ -138,7 +144,7 @@ def simulate_trade(signal, minute_frame, signal_index):
             second_hit = low <= tp2
 
         # Conservative intrabar ordering: if stop and target overlap, assume stop first.
-        if stop_hit and (not tp1_hit or not second_hit):
+        if stop_hit:
             gross_r = (0.7 * 1.8 - 0.3) if tp1_hit else -1.0
             exit_index = j
             break
