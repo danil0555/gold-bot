@@ -177,7 +177,7 @@ def test_websocket_1m_frame_requires_full_continuity_and_freshness():
     assert not S["_is_usable_ws_1m_frame"](incomplete, last_close + 30_000, 101)
 
 
-from scripts.backtest_addons import simulate_trade
+from scripts.backtest_addons import filter_closed_candles, simulate_trade
 
 
 def _simulation_frame(rows):
@@ -222,3 +222,17 @@ def test_backtest_stop_before_tp1_is_a_loss():
     assert result["status"] == "sl"
     assert result["gross_r"] < 0
     assert result["net_r"] < result["gross_r"]
+
+
+def test_backtest_excludes_the_current_forming_candle():
+    frame = pd.DataFrame({
+        "open_time": [0, 60_000, 120_000],
+        "close_time": [59_999, 119_999, 179_999],
+        "open": [1.0, 1.0, 1.0],
+        "high": [1.1, 1.1, 1.1],
+        "low": [0.9, 0.9, 0.9],
+        "close": [1.0, 1.0, 1.0],
+        "volume": [10.0, 10.0, 10.0],
+    })
+    closed = filter_closed_candles(frame, current_ms=150_000)
+    assert closed["close_time"].tolist() == [59_999]
