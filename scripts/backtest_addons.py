@@ -119,16 +119,18 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
 
 
 def simulate_trade(signal, minute_frame, signal_index):
+    """Simulate fills with spread/slippage applied once per execution side."""
     if signal_index + 1 >= len(minute_frame):
         return None
-    next_bar = minute_frame.iloc[signal_index + 1]
-    raw_entry = float(next_bar["open"])
     side = signal["side"]
-    slip = SLIPPAGE_PCT / 100.0
-    entry = raw_entry * (1 + slip if side == "BUY" else 1 - slip)
     risk = abs(float(signal["entry"]) - float(signal["sl"]))
     if risk <= 0:
         return None
+
+    # A market order pays half the quoted spread plus adverse slippage on entry.
+    adverse = (SPREAD_PCT / 2.0 + SLIPPAGE_PCT) / 100.0
+    raw_entry = float(minute_frame.iloc[signal_index + 1]["open"])
+    entry = raw_entry * (1 + adverse if side == "BUY" else 1 - adverse)
     if side == "BUY":
         sl, tp1, tp2 = entry - risk, entry + 1.8 * risk, entry + 3.0 * risk
     else:
@@ -136,39 +138,50 @@ def simulate_trade(signal, minute_frame, signal_index):
 
     tp1_hit = False
     exit_index = None
-    gross_r = None
+    exit_kind = None
+    exit_levels = None
     for j in range(signal_index + 1, len(minute_frame)):
         bar = minute_frame.iloc[j]
         high, low = float(bar["high"]), float(bar["low"])
         if side == "BUY":
-            stop_hit = low <= sl
-            first_hit = high >= tp1
-            second_hit = high >= tp2
+            stop_hit, first_hit, second_hit = low <= sl, high >= tp1, high >= tp2
         else:
-            stop_hit = high >= sl
-            first_hit = low <= tp1
-            second_hit = low <= tp2
+            stop_hit, first_hit, second_hit = high >= sl, low <= tp1, low <= tp2
 
-        # Conservative intrabar ordering: if stop and target overlap, assume stop first.
+        # Conservative ordering: if stop and a target overlap, assume stop first.
         if stop_hit:
-            gross_r = (0.7 * 1.8 - 0.3) if tp1_hit else -1.0
+            exit_kind = "tp1_then_sl" if tp1_hit else "sl"
+            exit_levels = ([tp1, sl] if tp1_hit else [sl])
             exit_index = j
             break
         if not tp1_hit and first_hit:
             tp1_hit = True
         if tp1_hit and second_hit:
-            gross_r = 0.7 * 1.8 + 0.3 * 3.0
+            exit_kind = "tp2"
+            exit_levels = [tp1, tp2]
             exit_index = j
             break
+
     if exit_index is None:
         return {"status": "unresolved", "exit_index": len(minute_frame) - 1}
-    # Round-trip taker fees + modeled slippage and spread; converted to R.
-    cost_pct = 2 * TAKER_FEE_RATE * 100 + 2 * SLIPPAGE_PCT + SPREAD_PCT
-    cost_r = (entry * cost_pct / 100.0) / risk
+
+    # Apply adverse spread + slippage to each exit fill; charge taker fees on
+    # the entry and the weighted exit notionals. Entry friction is not deducted twice.
+    exit_weights = ([0.7, 0.3] if len(exit_levels) == 2 else [1.0])
+    gross_pnl = 0.0
+    exit_notional = 0.0
+    for level, weight in zip(exit_levels, exit_weights):
+        fill = level * (1 - adverse if side == "BUY" else 1 + adverse)
+        pnl_per_unit = (fill - entry) if side == "BUY" else (entry - fill)
+        gross_pnl += weight * pnl_per_unit
+        exit_notional += weight * fill
+    gross_r = gross_pnl / risk
+    fee_cost = TAKER_FEE_RATE * (entry + exit_notional)
+    fee_r = fee_cost / risk
+    net_r = gross_r - fee_r
     return {
-        "status": "tp2" if gross_r > 2.0 else ("tp1_then_sl" if tp1_hit else "sl"),
-        "gross_r": gross_r, "net_r": gross_r - cost_r,
-        "exit_index": exit_index,
+        "status": exit_kind, "gross_r": gross_r, "fee_r": fee_r,
+        "net_r": net_r, "exit_index": exit_index,
     }
 
 
@@ -235,6 +248,8 @@ def run(args):
                 stat[outcome["status"]] += 1
                 if outcome["status"] != "unresolved":
                     stat["net_r_sum"] += outcome["net_r"]
+                    stat["gross_r_sum"] += outcome["gross_r"]
+                    stat["fee_r_sum"] += outcome["fee_r"]
                     stat["closed"] += 1
                     rows_out.append({
                         "symbol": symbol, "strategy": strategy,
@@ -247,7 +262,7 @@ def run(args):
     report = {
         "period_days": args.days, "symbols": args.symbols.split(","),
         "generated_utc": datetime.now(timezone.utc).isoformat(),
-        "method": "closed candles; next 1m open entry; conservative stop-first intrabar; TP1 70%/1.8R, TP2 30%/3R; taker fee, modeled slippage and spread deducted; funding excluded",
+        "method": "closed candles; next 1m open entry; adverse half-spread plus slippage applied once on each fill; taker fees charged on entry and weighted exits; conservative stop-first intrabar; TP1 70%/1.8R, TP2 30%/3R; funding excluded",
         "results": {},
     }
     for strategy, stat in totals.items():
@@ -256,6 +271,8 @@ def run(args):
             "signals": int(stat["signals"]), "closed": closed,
             "tp2": int(stat["tp2"]), "tp1_then_sl": int(stat["tp1_then_sl"]),
             "sl": int(stat["sl"]), "unresolved": int(stat["unresolved"]),
+            "gross_r_total": round(stat["gross_r_sum"], 3),
+            "fees_r_total": round(stat["fee_r_sum"], 3),
             "net_r_total": round(stat["net_r_sum"], 3),
             "net_r_per_closed_trade": round(stat["net_r_sum"] / closed, 3) if closed else None,
         }
