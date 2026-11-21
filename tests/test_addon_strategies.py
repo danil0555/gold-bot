@@ -21,8 +21,11 @@ def load_strategy_functions():
     assert found == wanted, f"Missing strategy functions: {wanted - found}"
     namespace = {
         "Any": Any, "math": math, "np": np, "pd": pd,
-        "MIN_RR": 1.0, "MIN_NET_RR": 1.30,
+        "MIN_RR": 1.0, "MIN_NET_RR": 1.30, "MIN_QUALITY_SCORE": 85.0,
         "TP1_R": 1.8, "TP2_R": 3.0,
+        "STRATEGY_C": "C_BREAKOUT_RETEST",
+        "STRATEGY_D": "D_IMPULSE",
+        "STRATEGY_E": "E_OVERHEAT_REVERSAL",
         "TAKER_FEE_RATE": 0.0005,
         "DEFAULT_SLIPPAGE_PCT": 0.03,
         "DEFAULT_SYNTHETIC_SPREAD_PCT": 0.04,
@@ -126,6 +129,9 @@ def test_overheat_reversal_needs_recent_rsi_extreme_and_reversal():
         101.5, 101.6, 98.5, 98.8, 500.0
     ]
     frames["1m"] = m1
+    # Put the 5m reference EMA clearly above price so the reversal is not
+    # rejected by the strategy's minimum distance-from-EMA condition.
+    frames["5m"] = candles(np.linspace(90.0, 110.0, 100), spread=1.5)
     diag = {}
     signal = S["build_signal_e_overheat_reversal"]("BTC-USDT", frames, diag)
     assert signal is not None, diag
