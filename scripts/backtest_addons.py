@@ -79,16 +79,32 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
         if payload.get("code", 0) not in (0, "0", None):
             raise RuntimeError(f"BingX {symbol} {interval}: {payload}")
         batch = payload.get("data") or []
+        if isinstance(batch, dict):
+            batch = batch.get("data", batch.get("list", batch.get("rows", [])))
         if not batch:
             break
-        rows.extend(batch)
         parsed = []
         for row in batch:
-            if isinstance(row, (list, tuple)) and len(row) >= 7:
-                parsed.append(row)
+            try:
+                if isinstance(row, (list, tuple)) and len(row) >= 6:
+                    ot = int(float(row[0]))
+                    values = [float(row[j]) for j in range(1, 6)]
+                    ct = int(float(row[6])) if len(row) > 6 and row[6] not in (None, "") else ot + step - 1
+                elif isinstance(row, dict):
+                    ot = int(float(row.get("openTime", row.get("time", row.get("timestamp", 0)))))
+                    values = [float(row[k]) for k in ("open", "high", "low", "close", "volume")]
+                    ct = int(float(row.get("closeTime", row.get("close_time", ot + step - 1))))
+                else:
+                    continue
+                if ot > 0 and all(math.isfinite(v) for v in values):
+                    parsed.append((ot, *values, ct))
+            except (ValueError, TypeError, KeyError, OverflowError):
+                continue
         if not parsed:
-            raise RuntimeError(f"Unexpected kline format for {symbol} {interval}")
-        newest = max(int(float(row[0])) for row in parsed)
+            preview = json.dumps(payload, ensure_ascii=False)[:1200]
+            raise RuntimeError(f"Unexpected kline format for {symbol} {interval}: {preview}")
+        rows.extend(parsed)
+        newest = max(row[0] for row in parsed)
         next_cursor = newest + step
         if next_cursor <= cursor or len(parsed) < 1440 or next_cursor >= end_ms:
             break
@@ -96,10 +112,8 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
         time.sleep(1.05)  # documented public kline endpoint limit: 1 request/sec
     frame_rows = []
     for row in rows:
-        if not isinstance(row, (list, tuple)) or len(row) < 7:
-            continue
-        ot = int(float(row[0]))
-        ct = int(float(row[6]))
+        ot = int(row[0])
+        ct = int(row[6])
         values = [float(row[j]) for j in range(1, 6)]
         if ot < end_ms and ct < end_ms and all(math.isfinite(v) for v in values):
             frame_rows.append((ot, *values, ct))
