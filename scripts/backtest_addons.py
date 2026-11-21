@@ -122,6 +122,10 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
                     ct = int(float(row.get("closeTime", row.get("close_time", ot + step - 1))))
                 else:
                     continue
+                if ot < 10_000_000_000:
+                    ot *= 1000
+                if ct < 10_000_000_000:
+                    ct *= 1000
                 if cursor <= ot < window_end and ot > 0 and all(math.isfinite(v) for v in values):
                     parsed.append((ot, *values, ct))
             except (ValueError, TypeError, KeyError, OverflowError):
@@ -249,10 +253,12 @@ def run(args):
 
         ns["enrich_scalper_series"] = cached_enrich
         print(f"FETCH {symbol}", flush=True)
-        frames = {
-            tf: filter_closed_candles(fetch_interval(symbol, tf, fetch_start, now), now)
-            for tf in ("1m", "5m", "15m")
-        }
+        frames = {}
+        for tf in ("1m", "5m", "15m"):
+            print(f"FETCH_INTERVAL {symbol} {tf}", flush=True)
+            fetched = fetch_interval(symbol, tf, fetch_start, now)
+            frames[tf] = filter_closed_candles(fetched, now)
+            print(f"FETCHED {symbol} {tf}: {len(frames[tf])} closed candles", flush=True)
         expected_minutes = (args.days + 2) * 24 * 60
         for tf, frame in frames.items():
             interval_minutes = INTERVAL_MS[tf] // 60_000
