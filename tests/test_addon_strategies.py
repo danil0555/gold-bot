@@ -11,6 +11,7 @@ def load_strategy_functions():
     source = ast.parse(Path("main.py").read_text(encoding="utf-8"))
     wanted = {
         "safe_float", "indicators", "enrich_scalper_series", "_addon_reject",
+        "_is_usable_ws_1m_frame",
         "_make_addon_signal", "build_signal_c_breakout_retest",
         "build_signal_d_impulse", "build_signal_e_overheat_reversal",
     }
@@ -22,6 +23,7 @@ def load_strategy_functions():
     namespace = {
         "Any": Any, "math": math, "np": np, "pd": pd,
         "MIN_RR": 1.0, "MIN_NET_RR": 1.30, "MIN_QUALITY_SCORE": 85.0,
+        "MIN_CANDLE_ROWS": 60,
         "TP1_R": 1.8, "TP2_R": 3.0,
         "STRATEGY_C": "C_BREAKOUT_RETEST",
         "STRATEGY_D": "D_IMPULSE",
@@ -156,3 +158,20 @@ def test_insufficient_history_is_rejected_cleanly():
         diag = {}
         assert S[name]("BTC-USDT", frames, diag) is None
         assert diag.get("reason", "").startswith("insufficient_")
+
+
+
+def test_websocket_1m_frame_requires_full_continuity_and_freshness():
+    frame = candles(np.linspace(100.0, 101.0, 100))
+    last_close = int(frame.iloc[-1]["close_time"])
+    assert S["_is_usable_ws_1m_frame"](frame, last_close + 30_000, 60)
+    assert not S["_is_usable_ws_1m_frame"](frame, last_close + 90_001, 60)
+    assert not S["_is_usable_ws_1m_frame"](frame, last_close - 1, 60)
+
+    # A gap in the older part of the indicator window must invalidate WS data too.
+    gapped = frame.copy()
+    gapped.loc[20, "open_time"] += 60_000
+    assert not S["_is_usable_ws_1m_frame"](gapped, last_close + 30_000, 60)
+
+    incomplete = frame.iloc[:-1].copy()
+    assert not S["_is_usable_ws_1m_frame"](incomplete, last_close + 30_000, 101)
