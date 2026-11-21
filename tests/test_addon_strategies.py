@@ -234,5 +234,5 @@ def test_backtest_excludes_the_current_forming_candle():
         "close": [1.0, 1.0, 1.0],
         "volume": [10.0, 10.0, 10.0],
     })
-    closed = filter_closed_candles(frame, current_ms=150_000)
+    closed = filter_closed_candles(frame, current_ms=121_000)
     assert closed["close_time"].tolist() == [59_999]
