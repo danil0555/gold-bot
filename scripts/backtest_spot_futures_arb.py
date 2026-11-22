@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Historical, read-only BingX cash-and-carry backtest.
 
-Uses 15m spot/perpetual candles and actual settled historical funding records.
+Uses 1h spot/perpetual candles and actual settled historical funding records.
 No account endpoints, credentials, database access, or orders. Historical books
 are unavailable, so fills use explicit conservative synthetic slippage; results
 are a research proxy, not an execution-quality backtest.
@@ -18,8 +18,8 @@ from collections import defaultdict
 from typing import Any
 
 BASE = "https://open-api.bingx.com"
-INTERVAL = "15m"
-STEP_MS = 15 * 60_000
+INTERVAL = "1h"
+STEP_MS = 60 * 60_000
 PAGE_SIZE = 1440
 DEFAULT_SYMBOLS = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT",
                    "ADA-USDT", "DOGE-USDT", "LINK-USDT", "LTC-USDT")
