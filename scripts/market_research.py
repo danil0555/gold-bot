@@ -676,11 +676,13 @@ def run_research(args):
         "signal_probability_threshold": args.threshold,
         "data_limitations": [
             "Current listed contracts only: survivorship/listing-history bias remains.",
-            "Historical Binance candles provide taker-buy volume and trade-count proxies, but not full trade-by-trade order flow. Historical order books, liquidations and long-run open-interest snapshots are not reconstructed.",
+            ("BingX hourly candle flow fields are aggregate proxies, not full historical trade-by-trade order flow or historical order-book replay." if args.bingx_only else "Binance Vision historical candle flow fields are aggregate proxies, not full historical trade-by-trade order flow or historical order-book replay."),
+            "Historical liquidations and long-run open-interest snapshots are not reconstructed.",
             "No portfolio sizing, overlapping-signal capital allocation, funding, exchange-specific fills or liquidation simulation in this screening report.",
             "Model scores are research diagnostics, not trading probabilities until calibrated and independently replicated.",
             "Thresholds are selected on validation only; final reported performance is on a later held-out test segment.",
-            "BTC trend regimes use +/-1% 24h return; high-volatility cutoff is the training-period 70th percentile of BTC 24h realized volatility."
+            "BTC trend regimes use +/-1% 24h return; high-volatility cutoff is the training-period 70th percentile of BTC 24h realized volatility.",
+            ("This BingX-only research path does not depend on Binance Vision archives." if args.bingx_only else "Binance Vision archive-derived results are restricted to non-commercial, non-production research under published terms.")
         ],
         "results": results,
     }
