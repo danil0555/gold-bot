@@ -373,13 +373,26 @@ def add_cross_venue_features(bingx_frame, binance_frame):
 def build_panel(frames, cost, binance_frames):
     btc = frames.get("BTC-USDT")
     btc_returns = None
+    btc_context = None
     if btc is not None:
-        btc_returns = btc.set_index("time")["close"].pct_change()
+        btc_indexed = btc.sort_values("time").set_index("time")
+        btc_returns = btc_indexed["close"].pct_change()
+        btc_context = pd.DataFrame(index=btc_indexed.index)
+        btc_context["btc_ret_24h"] = btc_indexed["close"].pct_change(24)
+        btc_context["btc_rv_24h"] = (
+            btc_returns.rolling(24, min_periods=18).std() * math.sqrt(24)
+        )
     pieces = []
     for symbol, raw in frames.items():
         f = add_features(raw, btc_returns).set_index("time")
         cross = add_cross_venue_features(raw, binance_frames[symbol])
-        f = f.join(cross, how="left").reset_index()
+        f = f.join(cross, how="left")
+        if btc_context is not None:
+            f = f.join(btc_context, how="left")
+        else:
+            f["btc_ret_24h"] = np.nan
+            f["btc_rv_24h"] = np.nan
+        f = f.reset_index()
         f["symbol"] = symbol
         for horizon in (1, 4, 12, 24):
             future = f["close"].shift(-horizon)/f["close"]-1
@@ -416,6 +429,50 @@ def _metrics(y_true, probabilities, forward_returns, cost, threshold):
         "positive_net_signal_pct": round(float((net > 0).mean()*100), 2) if len(net) else None,
         "net_profit_factor": round(float(net[net>0].sum()/abs(net[net<0].sum())), 4) if (net<0).any() and (net>0).any() else None,
     })
+    return out
+
+
+def _select_threshold(y_true, probabilities, forward_returns, cost, fallback):
+    """Choose a symmetric probability threshold on validation only."""
+    candidates = [round(x, 2) for x in np.arange(0.52, 0.751, 0.02)]
+    minimum_signals = max(50, int(len(y_true) * 0.005))
+    scored = []
+    for threshold in candidates:
+        metrics = _metrics(y_true, probabilities, forward_returns, cost, threshold)
+        if metrics["signals"] < minimum_signals:
+            continue
+        # Conservative selection: mean net return minus one standard error.
+        values = np.asarray(forward_returns, dtype=float)
+        p = np.asarray(probabilities, dtype=float)
+        direction = np.where(p >= threshold, 1, np.where(p <= 1-threshold, -1, 0))
+        net = direction[direction != 0] * values[direction != 0] - cost
+        score = float(net.mean() - net.std(ddof=1) / math.sqrt(len(net))) if len(net) > 1 else -math.inf
+        scored.append((score, threshold, metrics))
+    if not scored:
+        return fallback, {"method": "fixed_fallback_no_validation_threshold_met",
+                          "threshold": fallback, "minimum_signals": minimum_signals}
+    score, threshold, metrics = max(scored, key=lambda item: (item[0], item[1]))
+    return threshold, {
+        "method": "validation_mean_net_return_minus_one_standard_error",
+        "threshold": threshold,
+        "minimum_signals": minimum_signals,
+        "validation_score_pct": round(score*100, 5),
+        "validation_metrics": metrics,
+    }
+
+
+def _market_regime_breakdown(test, probabilities, threshold, cost):
+    """Report held-out outcomes by BTC trend and volatility regime."""
+    out = {}
+    for regime, group in test.assign(_probability=probabilities).groupby("market_regime"):
+        metrics = _metrics(
+            group["label"].to_numpy(),
+            group["_probability"].to_numpy(),
+            group["forward_return"].to_numpy(),
+            cost,
+            threshold,
+        )
+        out[str(regime)] = metrics
     return out
 
 
@@ -461,6 +518,14 @@ def run_research(args):
         raise RuntimeError(f"Insufficient aligned history after features: {len(unique_times)} timestamps")
     cut1 = int(np.quantile(unique_times, 0.60))
     cut2 = int(np.quantile(unique_times, 0.80))
+    train_context = panel.loc[panel["time"] < cut1, "btc_rv_24h"].dropna()
+    btc_vol_cut = float(train_context.quantile(0.70)) if not train_context.empty else math.inf
+    panel["btc_trend_regime"] = np.select(
+        [panel["btc_ret_24h"] >= 0.01, panel["btc_ret_24h"] <= -0.01],
+        ["up", "down"], default="sideways"
+    )
+    panel["btc_vol_regime"] = np.where(panel["btc_rv_24h"] >= btc_vol_cut, "high_vol", "normal_vol")
+    panel["market_regime"] = panel["btc_trend_regime"] + "_" + panel["btc_vol_regime"]
     from sklearn.impute import SimpleImputer
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import make_pipeline
@@ -478,6 +543,7 @@ def run_research(args):
             results[f"{horizon}h"] = {"status":"insufficient_samples","train":len(train),"validation":len(valid),"test":len(test)}
             continue
         X_train, y_train = train[FEATURES], train[label_col].astype(int)
+        X_valid, y_valid = valid[FEATURES], valid[label_col].astype(int)
         X_test, y_test = test[FEATURES], test[label_col].astype(int)
         models = {
             "logistic": make_pipeline(
@@ -507,16 +573,32 @@ def run_research(args):
         }
         for name, model in models.items():
             model.fit(X_train, y_train)
-            proba = model.predict_proba(X_test)
             classes = list(model[-1].classes_)
+            valid_proba = model.predict_proba(X_valid)[:, classes.index(1)] if len(X_valid) else np.array([])
+            p_valid = valid_proba
+            selected_threshold, threshold_report = _select_threshold(
+                y_valid.to_numpy(), p_valid, valid[ret_col].to_numpy(),
+                args.cost_bps/10_000, args.threshold
+            ) if len(X_valid) else (args.threshold, {"method":"fixed_fallback_no_validation_rows","threshold":args.threshold})
+            proba = model.predict_proba(X_test)
             p_up = proba[:, classes.index(1)]
             costs = {}
             for bps in (args.cost_bps, 20, 30):
                 c = bps/10_000
                 costs[str(bps)+"bps"] = _metrics(
-                    y_test.to_numpy(), p_up, test[ret_col].to_numpy(), c, args.threshold
+                    y_test.to_numpy(), p_up, test[ret_col].to_numpy(), c, selected_threshold
                 )
-            horizon_result["models"][name] = {"cost_sensitivity":costs}
+            test_for_regime = test.assign(
+                label=y_test.to_numpy(), forward_return=test[ret_col].to_numpy()
+            )
+            regime_breakdown = _market_regime_breakdown(
+                test_for_regime, p_up, selected_threshold, args.cost_bps/10_000
+            )
+            horizon_result["models"][name] = {
+                "threshold_selection": threshold_report,
+                "cost_sensitivity":costs,
+                "market_regime_breakdown":regime_breakdown,
+            }
             if name == "logistic":
                 coefs = model[-1].coef_[0]
                 horizon_result["models"][name]["largest_abs_coefficients"] = [
@@ -535,7 +617,7 @@ def run_research(args):
 
     report = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
-        "method": "Read-only cross-venue BingX+Binance USDT-M 1h research; current liquid BingX contracts with matching Binance USD-M archive coverage; includes prior Binance taker-buy imbalance and volume/trade-count features; time-ordered 60/20/20 split with horizon purge; logistic and histogram gradient boosting; no execution/portfolio simulation.",
+        "method": "Read-only cross-venue BingX+Binance USDT-M 1h research; current liquid BingX contracts with matching Binance USD-M archive coverage; includes prior Binance taker-buy imbalance and volume/trade-count features; time-ordered 60/20/20 split with horizon purge; validation-only threshold selection; held-out BTC trend/volatility regime breakdown; logistic and histogram gradient boosting; no execution/portfolio simulation.",
         "evaluation_days": args.days,
         "requested_universe": args.universe,
         "actual_symbols": list(frames),
@@ -549,7 +631,9 @@ def run_research(args):
             "Current listed contracts only: survivorship/listing-history bias remains.",
             "Historical Binance candles provide taker-buy volume and trade-count proxies, but not full trade-by-trade order flow. Historical order books, liquidations and long-run open-interest snapshots are not reconstructed.",
             "No portfolio sizing, overlapping-signal capital allocation, funding, exchange-specific fills or liquidation simulation in this screening report.",
-            "Model scores are research diagnostics, not trading probabilities until calibrated and independently replicated."
+            "Model scores are research diagnostics, not trading probabilities until calibrated and independently replicated.",
+            "Thresholds are selected on validation only; final reported performance is on a later held-out test segment.",
+            "BTC trend regimes use +/-1% 24h return; high-volatility cutoff is the training-period 70th percentile of BTC 24h realized volatility."
         ],
         "results": results,
     }
