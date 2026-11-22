@@ -228,3 +228,30 @@ def test_level_entry_without_zone_touch_is_not_filled():
         signal, minute, {"5m": five}, close_times, 0, max_wait_minutes=2
     )
     assert resolved["status"] == "unfilled_level"
+
+
+
+def test_gate_futures_candle_normalization(monkeypatch):
+    import json
+    from contextlib import contextmanager
+
+    from scripts import backtest_strategy_b as backtest
+
+    base_sec = 1_700_000_000
+    @contextmanager
+    def fake_urlopen(request, timeout=25):
+        class Response:
+            def read(self):
+                return json.dumps([{
+                    "t": str(base_sec), "o": "0.50", "h": "0.51",
+                    "l": "0.49", "c": "0.505", "v": "20", "sum": "50.5",
+                }]).encode()
+        yield Response()
+
+    monkeypatch.setattr(backtest.urllib.request, "urlopen", fake_urlopen)
+    frame = backtest.fetch_gate_history(
+        "XRP-USDT", "1m", base_sec * 1000, (base_sec + 60) * 1000
+    )
+    assert len(frame) == 1
+    assert frame.iloc[0]["close"] == 0.505
+    assert frame.iloc[0]["volume"] == 100.0
