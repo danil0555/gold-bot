@@ -51,15 +51,15 @@ jobs:
         run: python scripts/backtest_scalping_100.py --days 7 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --deposit 100 --risk-percent 2 --leverage 5 --max-positions 5
         timeout-minutes: 30
       - name: Run 180-day cross-sectional market research
-        if: github.ref == 'refs/heads/research/market-discovery-engine'
+        if: github.ref == 'refs/heads/research/market-discovery-engine' || github.ref == 'refs/heads/research/market-discovery-valid-labels'
         run: python scripts/market_research.py --days 180 --universe 30 --min-quote-volume 5000000 --cost-bps 12 --threshold 0.58
         timeout-minutes: 60
       - name: Run 180-day BingX-only market research
-        if: github.ref == 'refs/heads/research/bingx-only-market-model'
+        if: github.ref == 'refs/heads/research/bingx-only-market-model' || github.ref == 'refs/heads/research/bingx-feature-coverage-fix'
         run: python scripts/market_research.py --days 180 --universe 30 --min-quote-volume 5000000 --cost-bps 12 --threshold 0.58 --bingx-only
         timeout-minutes: 60
       - name: Upload BingX-only research report
-        if: always() && github.ref == 'refs/heads/research/bingx-only-market-model'
+        if: always() && (github.ref == 'refs/heads/research/bingx-only-market-model' || github.ref == 'refs/heads/research/bingx-feature-coverage-fix')
         uses: actions/upload-artifact@v4
         with:
           name: market-research-bingx-only-180d
