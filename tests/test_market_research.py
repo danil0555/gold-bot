@@ -3,7 +3,7 @@ import zipfile
 import numpy as np
 import pandas as pd
 
-from scripts.market_research import add_features, build_panel, parse_binance_kline_archive, _select_threshold, add_bingx_flow_features, BASE_FEATURES, BINGX_FLOW_FEATURES, CROSS_VENUE_FEATURES
+from scripts.market_research import add_features, build_panel, parse_binance_kline_archive, _select_threshold, add_bingx_flow_features, BASE_FEATURES, BINGX_FLOW_FEATURES, CROSS_VENUE_FEATURES, _select_available_features
 
 
 def sample_frame(periods=260, offset=0.0):
@@ -155,3 +155,24 @@ def test_bingx_only_panel_has_flow_features_without_binance_data():
     assert set(BINGX_FLOW_FEATURES).issubset(panel.columns)
     assert panel.loc[panel["symbol"] == "BTC-USDT"].iloc[-2][BINGX_FLOW_FEATURES].notna().all()
     assert panel["binance_taker_imbalance_lag1"].isna().all()
+
+
+
+def test_feature_coverage_selection_uses_training_only_and_keeps_partial_rows():
+    frame = sample_frame(periods=260)
+    panel = pd.DataFrame({
+        "time": frame["time"],
+        "good": np.sin(np.arange(260) / 7),
+        "sparse": np.where(np.arange(260) % 3 == 0, np.nan, 1.0),
+        "future_only": np.where(np.arange(260) >= 200, np.arange(260), np.nan),
+    })
+    end = int(frame["time"].iloc[180])
+    selected, coverage = _select_available_features(
+        panel, ["good", "sparse", "future_only"], end, min_coverage=0.60
+    )
+    assert selected == ["good"]
+    assert coverage["good"] == 1.0
+    assert coverage["sparse"] < 0.60
+    assert coverage["future_only"] == 0.0
+    # Feature selection is diagnostic only: it does not drop panel rows.
+    assert len(panel) == 260
