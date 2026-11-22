@@ -307,6 +307,28 @@ def metric_pack(trades):
     }
 
 
+def structure_trigger(reasons):
+    """Classify the structural trigger from the exact live builder's reason labels."""
+    for reason in reasons or []:
+        lowered = str(reason).lower()
+        if "bos" in lowered:
+            return "BOS"
+        if "sweep" in lowered:
+            return "sweep"
+    return "unknown"
+
+
+def grouped_metric_pack(trades, field):
+    """Summarize all signal outcomes by one recorded signal attribute."""
+    groups = defaultdict(list)
+    for trade in trades:
+        groups[str(trade.get(field) or "unknown")].append(trade)
+    return {
+        key: metric_pack(sorted(items, key=lambda item: item["time"]))
+        for key, items in sorted(groups.items())
+    }
+
+
 def confirmation_passed(side, candle):
     """Apply the same closed-5m EMA/MACD/RSI alignment as the live builder."""
     close, ema20, ema50 = (float(candle[k]) for k in ("close", "ema20", "ema50"))
@@ -567,6 +589,10 @@ def run(args):
                 "tp1": round(float(signal["tp1"]), 10),
                 "tp2": round(float(signal["tp2"]), 10),
                 "quality_score": signal["quality_score"],
+                "score": signal.get("score"),
+                "market_regime": signal.get("market_regime", "unknown"),
+                "structure_trigger": structure_trigger(signal.get("reasons", [])),
+                "reasons": list(signal.get("reasons", [])),
                 "net_rr_estimate": round(float(signal["net_rr"]), 3),
                 **outcome,
             })
@@ -621,6 +647,12 @@ def run(args):
             symbol: metric_pack([t for t in trades if t["symbol"] == symbol])
             for symbol in symbols
         },
+        "by_side": grouped_metric_pack(trades, "side"),
+        "by_market_regime": grouped_metric_pack(trades, "market_regime"),
+        "by_structure_trigger": grouped_metric_pack(trades, "structure_trigger"),
+        "by_entry_mode": grouped_metric_pack(trades, "entry_mode"),
+        "by_raw_score": grouped_metric_pack(trades, "score"),
+        "by_quality_score": grouped_metric_pack(trades, "quality_score"),
         "trades": sorted(trades, key=lambda x: x["time"]),
         "replay_events": replay_events,
     }
