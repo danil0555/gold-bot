@@ -291,3 +291,32 @@ def test_okx_history_candle_normalization_and_pagination(monkeypatch):
     assert frame.iloc[0]["volume"] == 100.0
     assert seen[0]["instId"] == ["XRP-USDT-SWAP"]
     assert seen[0]["bar"] == ["1m"]
+
+
+
+def test_structure_trigger_classifies_live_builder_reasons():
+    from scripts.backtest_strategy_b import structure_trigger
+
+    assert structure_trigger(["15м: пробой структуры вниз (BOS)"]) == "BOS"
+    assert structure_trigger(["15м: sweep вверх и возврат под уровень"]) == "sweep"
+    assert structure_trigger(["VWAP подтверждён"]) == "unknown"
+
+
+def test_grouped_metrics_preserve_signal_counts_and_net_results():
+    from scripts.backtest_strategy_b import grouped_metric_pack
+
+    trades = [
+        {"side": "SELL", "status": "tp2", "net_r": 2.0,
+         "time": "2026-01-01T00:00:00+00:00"},
+        {"side": "SELL", "status": "sl", "net_r": -1.1,
+         "time": "2026-01-01T01:00:00+00:00"},
+        {"side": "BUY", "status": "unfilled_level",
+         "time": "2026-01-01T02:00:00+00:00"},
+    ]
+    result = grouped_metric_pack(trades, "side")
+
+    assert result["SELL"]["signals_generated"] == 2
+    assert result["SELL"]["closed_trades"] == 2
+    assert result["SELL"]["net_r"] == 0.9
+    assert result["BUY"]["signals_generated"] == 1
+    assert result["BUY"]["closed_trades"] == 0
