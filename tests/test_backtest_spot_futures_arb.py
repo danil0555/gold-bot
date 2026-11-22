@@ -1,14 +1,35 @@
 import pytest
 
-from scripts.backtest_spot_futures_arb import STEP_MS, metric_pack, simulate_cash_carry
+from scripts.backtest_spot_futures_arb import (
+    STEP_MS, metric_pack, parse_candle, simulate_cash_carry,
+)
 
 
-def test_cash_carry_trade_earns_basis_convergence_and_funding_after_costs():
+def bar(stamp, spot_open, spot_close, swap_open, swap_close):
+    return {
+        "time": stamp,
+        "spot_open": spot_open,
+        "spot_close": spot_close,
+        "swap_open": swap_open,
+        "swap_close": swap_close,
+    }
+
+
+def test_parse_candle_preserves_open_and_close_for_next_open_execution():
+    parsed = parse_candle(
+        [1_700_000_000_000, 100.0, 101.0, 99.0, 100.5, 12.0, 1_700_000_003_599],
+        "spot",
+    )
+    assert parsed == (1_700_000_000_000, 100.0, 100.5, 1_700_000_003_599)
+
+
+def test_cash_carry_trade_uses_next_open_and_earns_funding_after_costs():
     start = 1_700_000_000_000
     bars = [
-        {"time": start, "spot": 100.0, "swap": 100.7},
-        {"time": start + STEP_MS, "spot": 100.0, "swap": 100.6},
-        {"time": start + 2 * STEP_MS, "spot": 100.0, "swap": 100.0},
+        bar(start, 100.0, 100.0, 100.7, 100.7),
+        bar(start + STEP_MS, 100.0, 100.0, 100.7, 100.6),
+        bar(start + 2 * STEP_MS, 100.0, 100.0, 100.0, 100.0),
+        bar(start + 3 * STEP_MS, 100.0, 100.0, 100.0, 100.0),
     ]
     funding = [
         {"time": start - 1, "rate": 0.001, "mark": 100.0},
@@ -21,17 +42,36 @@ def test_cash_carry_trade_earns_basis_convergence_and_funding_after_costs():
     )
     assert len(result["trades"]) == 1
     trade = result["trades"][0]
+    assert trade["entry_time"] == start + STEP_MS
+    assert trade["exit_time"] == start + 3 * STEP_MS
+    assert trade["entry_signal_time"] == start + STEP_MS
+    assert trade["exit_signal_time"] == start + 3 * STEP_MS
     assert trade["exit_reason"] == "basis_target"
     assert trade["gross_pnl_usdt"] > 0
     assert trade["funding_pnl_usdt"] > 0
     assert trade["net_pnl_usdt"] > 0
 
 
+def test_entry_is_rejected_if_next_open_basis_no_longer_meets_threshold():
+    start = 1_700_000_000_000
+    bars = [
+        bar(start, 100.0, 100.0, 100.8, 100.8),
+        bar(start + STEP_MS, 100.0, 100.0, 100.4, 100.4),
+    ]
+    funding = [{"time": start - 1, "rate": 0.001, "mark": 100.0}]
+    result = simulate_cash_carry(
+        bars, funding, min_entry_basis_pct=0.5, target_basis_pct=0.05,
+        spot_fee=0, swap_fee=0, slippage_pct=0,
+    )
+    assert result["trades"] == []
+    assert result["open_at_end"] == 0
+
+
 def test_cash_carry_does_not_enter_without_positive_settled_funding():
     start = 1_700_000_000_000
     bars = [
-        {"time": start, "spot": 100.0, "swap": 100.8},
-        {"time": start + STEP_MS, "spot": 100.0, "swap": 100.7},
+        bar(start, 100.0, 100.0, 100.8, 100.8),
+        bar(start + STEP_MS, 100.0, 100.0, 100.7, 100.7),
     ]
     funding = [{"time": start - 1, "rate": -0.001, "mark": 100.0}]
     result = simulate_cash_carry(
@@ -39,11 +79,15 @@ def test_cash_carry_does_not_enter_without_positive_settled_funding():
         spot_fee=0, swap_fee=0, slippage_pct=0,
     )
     assert result["trades"] == []
+    assert result["open_at_end"] == 0
 
 
 def test_open_trade_at_end_is_not_counted_as_closed_loss():
     start = 1_700_000_000_000
-    bars = [{"time": start, "spot": 100.0, "swap": 100.8}]
+    bars = [
+        bar(start, 100.0, 100.0, 100.8, 100.8),
+        bar(start + STEP_MS, 100.0, 100.0, 100.8, 100.8),
+    ]
     funding = [{"time": start - 1, "rate": 0.001, "mark": 100.0}]
     result = simulate_cash_carry(
         bars, funding, min_entry_basis_pct=0.5, target_basis_pct=0.05,
@@ -66,12 +110,12 @@ def test_metric_pack_uses_net_after_fees_and_funding():
     assert result["profit_factor"] == 2.5
 
 
-
 def test_negative_settled_funding_is_charged_to_open_short_perpetual():
     start = 1_700_000_000_000
     bars = [
-        {"time": start, "spot": 100.0, "swap": 100.8},
-        {"time": start + STEP_MS, "spot": 100.0, "swap": 100.7},
+        bar(start, 100.0, 100.0, 100.8, 100.8),
+        bar(start + STEP_MS, 100.0, 100.0, 100.8, 100.7),
+        bar(start + 2 * STEP_MS, 100.0, 100.0, 100.7, 100.7),
     ]
     funding = [
         {"time": start - 1, "rate": 0.001, "mark": 100.0},
@@ -85,3 +129,4 @@ def test_negative_settled_funding_is_charged_to_open_short_perpetual():
     assert len(result["trades"]) == 1
     assert result["trades"][0]["funding_pnl_usdt"] < 0
     assert result["trades"][0]["exit_reason"] == "max_hold"
+    assert result["trades"][0]["exit_time"] == start + 2 * STEP_MS
