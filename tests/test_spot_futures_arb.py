@@ -97,3 +97,21 @@ def test_basis_convergence_scenario_captures_positive_entry_premium():
     assert result["expected_net_at_basis_target_usdt"] == pytest.approx(
         result["expected_basis_capture_usdt"]
     )
+
+
+
+def test_expected_basis_scenario_charges_exit_bid_ask_spreads():
+    b = books()
+    result = calculate_cash_carry(
+        "BTC-USDT", b["spot_bids"], b["spot_asks"], b["swap_bids"],
+        b["swap_asks"], funding_rate=0, funding_periods=0,
+        quote_notional=1000, spot_taker_fee=0, swap_taker_fee=0,
+        stress_widening_bps=0, exit_basis_target_pct=0,
+    )
+    spot_mid = (b["spot_bids"][0][0] + b["spot_asks"][0][0]) / 2
+    assert result["assumed_exit_spot_bid"] < spot_mid
+    assert result["assumed_exit_swap_ask"] > spot_mid
+    naive_midpoint_capture = result["quantity_base"] * (
+        result["swap_entry_vwap"] - spot_mid
+    )
+    assert result["expected_basis_capture_usdt"] < naive_midpoint_capture
