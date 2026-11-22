@@ -277,7 +277,7 @@ def resolve_signal_entry(signal, minute_frame, frames, close_times, signal_index
             if float(bar["low"]) <= zone_high and float(bar["high"]) >= zone_low:
                 touch_close_time = int(bar["close_time"])
             continue
-        available_5m = closed_window(frames["5m"], close_times["5m"], int(bar["close_time"]), 300)
+        available_5m = market_data.closed_window(frames["5m"], close_times["5m"], int(bar["close_time"]), 300)
         if available_5m.empty:
             continue
         confirm = available_5m.iloc[-1]
