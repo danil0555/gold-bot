@@ -442,6 +442,10 @@ def run(args):
     generated_by_symbol = Counter()
     skipped_duplicate = Counter()
     skipped_cooldown = Counter()
+    replay_events = []
+    replay_target_ms = (int(datetime.fromisoformat(args.replay_time_utc.replace("Z", "+00:00")).timestamp() * 1000)
+                       if args.replay_time_utc else None)
+    replay_symbol = args.replay_symbol.upper() if args.replay_symbol else None
 
     for symbol in symbols:
         print(f"FETCH {symbol}", flush=True)
@@ -494,6 +498,20 @@ def run(args):
             signal = strategy["build_signal_b"](
                 "swap", symbol, available, quote=None, diagnostics=diagnostics
             )
+            replay_event = None
+            if (replay_target_ms is not None and symbol == replay_symbol
+                    and abs(stamp - replay_target_ms) <= 60_000):
+                replay_event = {
+                    "timestamp": datetime.fromtimestamp(stamp / 1000, tz=timezone.utc).isoformat(),
+                    "signal_detected": signal is not None,
+                    "diagnostics": dict(diagnostics),
+                    "signal": ({key: signal.get(key) for key in (
+                        "side", "entry", "entry_mode", "entry_zone_low", "entry_zone_high",
+                        "sl", "tp1", "tp2", "quality_score", "net_rr", "reasons",
+                        "confirmation_rule",
+                    )} if signal else None),
+                }
+                replay_events.append(replay_event)
             if signal is None:
                 reason = diagnostics.get("reason", "unknown_rejection")
                 rejection_counts[reason] += 1
@@ -519,7 +537,11 @@ def run(args):
                 max_wait_minutes=args.level_entry_wait_minutes,
             )
             if resolved is None:
+                if replay_event is not None:
+                    replay_event["entry_resolution"] = None
                 continue
+            if replay_event is not None:
+                replay_event["entry_resolution"] = dict(resolved)
             if resolved.get("status"):
                 outcome = {"status": resolved["status"], "exit_index": resolved["entry_index"],
                            "raw_entry": resolved.get("raw_entry")}
@@ -529,6 +551,8 @@ def run(args):
                 )
             if outcome is None:
                 continue
+            if replay_event is not None:
+                replay_event["outcome"] = dict(outcome)
             last_signal_ms[side_key] = stamp + COOLDOWN_MS
             trades.append({
                 "symbol": symbol,
@@ -598,6 +622,7 @@ def run(args):
             for symbol in symbols
         },
         "trades": sorted(trades, key=lambda x: x["time"]),
+        "replay_events": replay_events,
     }
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     print("STRATEGY_B_REPORT_BEGIN")
@@ -638,7 +663,11 @@ if __name__ == "__main__":
     parser.add_argument("--symbols", default="BTC-USDT,ETH-USDT,SOL-USDT")
     parser.add_argument("--source", choices=("bingx", "binance", "gate", "okx"), default="bingx")
     parser.add_argument("--level-entry-wait-minutes", type=int, default=8)
+    parser.add_argument("--replay-symbol", default="")
+    parser.add_argument("--replay-time-utc", default="")
     args = parser.parse_args()
     if not 1 <= args.days <= 60:
         parser.error("--days must be between 1 and 60")
+    if bool(args.replay_symbol) != bool(args.replay_time_utc):
+        parser.error("--replay-symbol and --replay-time-utc must be supplied together")
     run(args)
