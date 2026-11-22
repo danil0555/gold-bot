@@ -505,6 +505,22 @@ def _select_threshold(y_true, probabilities, forward_returns, cost, fallback):
     }
 
 
+def _select_available_features(panel, candidates, training_end_ms, min_coverage=0.60):
+    """Select usable columns from the training period only; never discard rows globally."""
+    training = panel.loc[panel["time"] < training_end_ms, candidates]
+    coverage = training.notna().mean()
+    selected = [
+        name for name in candidates
+        if float(coverage.get(name, 0.0)) >= min_coverage
+        and training[name].nunique(dropna=True) > 1
+    ]
+    report = {
+        name: round(float(coverage.get(name, 0.0)), 4)
+        for name in candidates
+    }
+    return selected, report
+
+
 def _market_regime_breakdown(test, probabilities, threshold, cost):
     """Report held-out outcomes by BTC trend and volatility regime."""
     out = {}
@@ -558,12 +574,28 @@ def run_research(args):
     active_features = BINGX_FEATURES if args.bingx_only else FEATURES
     evaluation_start = now - args.days*86_400_000
     panel = panel.loc[panel["time"] >= evaluation_start].copy()
-    panel = panel.dropna(subset=active_features, how="any")
+    # Keep rows with partially missing optional fields. A single unsupported API
+    # field must not erase the entire cross-sectional history; the train-only
+    # median imputer handles gaps after low-coverage columns are excluded.
     unique_times = np.sort(panel["time"].unique())
     if len(unique_times) < 24*30:
-        raise RuntimeError(f"Insufficient aligned history after features: {len(unique_times)} timestamps")
+        raise RuntimeError(f"Insufficient aligned timestamps before feature filtering: {len(unique_times)}")
     cut1 = int(np.quantile(unique_times, 0.60))
     cut2 = int(np.quantile(unique_times, 0.80))
+    requested_features = list(active_features)
+    active_features, feature_coverage = _select_available_features(
+        panel, requested_features, cut1, min_coverage=0.60
+    )
+    if len(active_features) < 8:
+        raise RuntimeError(
+            "Insufficient usable features from training data: "
+            f"{len(active_features)}; coverage={feature_coverage}"
+        )
+    print(
+        "FEATURE_COVERAGE="
+        + json.dumps({"selected": active_features, "coverage": feature_coverage}, ensure_ascii=False),
+        flush=True,
+    )
     train_context = panel.loc[panel["time"] < cut1, "btc_rv_24h"].dropna()
     btc_vol_cut = float(train_context.quantile(0.70)) if not train_context.empty else math.inf
     panel["btc_trend_regime"] = np.select(
@@ -669,7 +701,7 @@ def run_research(args):
         "actual_symbols": list(frames),
         "universe_candidates": len(universe),
         "symbol_quote_volume_24h": [item for item in universe if item["symbol"] in frames],
-        "features": active_features,
+        "features": active_features,\n        "requested_features": requested_features,\n        "training_feature_coverage": feature_coverage,\n        "feature_selection_rule": "At least 60% non-null coverage and non-constant values in the earliest 60% training period; missing rows imputed inside each model pipeline.",
         "market_data_source": "BingX public USDT-M klines including quote volume, trade count and taker-buy quote volume; prior completed candle flow features only.",
         "cross_venue_data_source": None if args.bingx_only else "Binance Vision USD-M public 1h monthly/daily ZIP archives; research-only under published non-commercial terms.",
         "label_cost_bps": args.cost_bps,
