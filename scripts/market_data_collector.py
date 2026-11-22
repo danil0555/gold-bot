@@ -110,6 +110,18 @@ class MarketMinuteAggregator:
             last_mid REAL,
             PRIMARY KEY(symbol, minute_ts)
         );
+        CREATE TABLE IF NOT EXISTS minute_candles (
+            symbol TEXT NOT NULL,
+            minute_ts INTEGER NOT NULL,
+            close_ts INTEGER NOT NULL,
+            open REAL NOT NULL,
+            high REAL NOT NULL,
+            low REAL NOT NULL,
+            close REAL NOT NULL,
+            volume REAL NOT NULL,
+            is_closed INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(symbol, minute_ts)
+        );
         CREATE TABLE IF NOT EXISTS derivatives_snapshots (
             symbol TEXT NOT NULL,
             ts_ms INTEGER NOT NULL,
@@ -230,6 +242,31 @@ class MarketMinuteAggregator:
         self.pending.clear()
         self.db.commit()
 
+    def save_candle(self, symbol, candle):
+        """Persist the latest BingX 1m kline update; research queries must use closed rows only."""
+        kline = candle.get("K", candle) if isinstance(candle, dict) else {}
+        try:
+            minute_ts = int(kline.get("t", kline.get("openTime", 0)))
+            close_ts = int(kline.get("T", kline.get("closeTime", 0)))
+            values = [float(kline[key]) for key in ("o", "h", "l", "c", "v")]
+            open_price, high, low, close, volume = values
+            if minute_ts <= 0 or close_ts <= minute_ts or not all(map(math.isfinite, values)):
+                return False
+            if min(open_price, high, low, close) <= 0 or volume < 0:
+                return False
+            if high < max(open_price, close, low) or low > min(open_price, close, high):
+                return False
+            is_closed = int(close_ts < int(time.time()*1000) - 2_000)
+            self.db.execute("""
+                INSERT OR REPLACE INTO minute_candles
+                (symbol,minute_ts,close_ts,open,high,low,close,volume,is_closed)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (str(symbol).upper(), minute_ts, close_ts, open_price, high, low, close, volume, is_closed))
+            self.db.commit()
+            return True
+        except (TypeError, ValueError, KeyError, OverflowError):
+            return False
+
     def save_derivatives(self, symbol, ts_ms, open_interest=None, funding_rate=None,
                          mark_price=None, index_price=None, next_funding_time=None):
         self.db.execute("""
@@ -300,6 +337,7 @@ async def websocket_loop(session, aggregator, symbols):
     for symbol in symbols:
         channels.append(f"{symbol}@depth{DEPTH_LEVEL}@{DEPTH_INTERVAL}")
         channels.append(f"{symbol}@trade")
+        channels.append(f"{symbol}@kline_1m")
     backoff = 1
     while True:
         try:
@@ -352,6 +390,9 @@ async def websocket_loop(session, aggregator, symbols):
                         event_ts = int(decoded.get("ts") or now_ms)
                         aggregator.process_depth(symbol, event_ts, data)
                         aggregator.flush_before(event_ts)
+                    elif data_type.endswith("@kline_1m") and isinstance(data, dict):
+                        symbol = data_type.split("@", 1)[0]
+                        aggregator.save_candle(symbol, data)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
