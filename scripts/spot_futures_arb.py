@@ -288,7 +288,7 @@ def scan_symbols(symbols: tuple[str, ...] = DEFAULT_SYMBOLS,
             reports.append({"symbol": symbol, "eligible_candidate": False,
                             "rejected_reason": str(exc)})
     return sorted(reports, key=lambda x: x.get(
-        "expected_net_at_current_basis_assumption_usdt", float("-inf")), reverse=True)
+        "expected_net_at_basis_target_usdt", float("-inf")), reverse=True)
 
 
 def main() -> None:
