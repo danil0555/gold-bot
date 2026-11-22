@@ -3,7 +3,7 @@ import zipfile
 import numpy as np
 import pandas as pd
 
-from scripts.market_research import add_features, build_panel, parse_binance_kline_archive, _select_threshold, BASE_FEATURES, CROSS_VENUE_FEATURES
+from scripts.market_research import _select_available_features, add_features, build_panel, parse_binance_kline_archive, _select_threshold, BASE_FEATURES, CROSS_VENUE_FEATURES
 
 
 def sample_frame(periods=260, offset=0.0):
