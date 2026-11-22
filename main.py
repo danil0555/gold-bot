@@ -40,6 +40,13 @@ from aiogram.types import (
     KeyboardButton,
 )
 
+from scripts.spot_futures_arb import (
+    DEFAULT_SYMBOLS as ARBITRAGE_SYMBOLS,
+    DEFAULT_SPOT_TAKER_FEE,
+    DEFAULT_SWAP_TAKER_FEE,
+    scan_symbols as scan_spot_futures_arbitrage,
+)
+
 
 # ============================================================
 # 1. ENVIRONMENT
@@ -1552,6 +1559,7 @@ def signal_text(signal):
 def main_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔎 Сканировать Futures")],
+        [KeyboardButton(text="🔁 Спот–фьючерс")],
         [KeyboardButton(text="📊 Статистика стратегий")],
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="🖥 Статус системы")],
     ], resize_keyboard=True)
@@ -1963,6 +1971,84 @@ async def scan_market_callback(message: Message):
 
 
 
+
+
+@router.message(F.text == "🔁 Спот–фьючерс")
+async def spot_futures_arbitrage_handler(message: Message):
+    """Manual read-only scan of BingX spot/perpetual cash-and-carry opportunities."""
+    register_user(message.from_user)
+    status = await message.answer(
+        "⏳ Сканирую спотовый и фьючерсный стаканы BingX. "
+        "Проверяю funding, комиссии, глубину и стресс-сценарий..."
+    )
+    try:
+        reports = await asyncio.to_thread(
+            scan_spot_futures_arbitrage,
+            ARBITRAGE_SYMBOLS,
+            1000.0,
+            3,
+            DEFAULT_SPOT_TAKER_FEE,
+            DEFAULT_SWAP_TAKER_FEE,
+            0.0,
+        )
+        candidates = [r for r in reports if r.get("eligible_candidate")]
+        if not candidates:
+            checked = [r for r in reports if "expected_net_at_basis_target_usdt" in r]
+            if not checked:
+                reasons = [f"{r.get('symbol')}: {r.get('rejected_reason', 'нет данных')}" for r in reports[:3]]
+                detail = "\n".join(reasons) if reasons else "Публичные данные недоступны."
+                await status.edit_text(
+                    "⚠️ Не удалось получить согласованные рыночные данные. "
+                    "Сигналы не сформированы.\n\n" + html.escape(detail)
+                )
+                return
+            best = max(checked, key=lambda r: r["expected_net_at_basis_target_usdt"])
+            await status.edit_text(
+                "🔎 <b>SPOT–FUTURES: проверка завершена</b>\n"
+                "Сейчас нет связки, прошедшей все фильтры доходности и стресс-теста.\n\n"
+                f"Лучшая сценарная оценка: <b>{html.escape(best['symbol'])}</b>\n"
+                f"Базис входа: <b>{best['entry_basis_pct']:+.3f}%</b>\n"
+                f"Funding сейчас: <b>{best['funding_rate_current'] * 100:+.4f}%</b> за расчётный период\n"
+                f"Чистый результат при схождении базиса к 0%: "
+                f"<b>{best['expected_net_at_basis_target_usdt']:+.2f} USDT</b>\n"
+                f"Стресс при расширении базиса ещё на 50 б.п.: "
+                f"<b>{best['stressed_net_usdt']:+.2f} USDT</b>\n\n"
+                "Это сценарная оценка, а не обещание схождения цены. "
+                "Будущие funding-выплаты не гарантированы. Реальные ордера отключены.",
+                parse_mode="HTML",
+            )
+            return
+
+        lines = ["🔁 <b>SPOT–FUTURES: потенциальные связки</b>"]
+        for report in candidates[:3]:
+            rate_pct = report["funding_rate_current"] * 100
+            lines.extend([
+                "",
+                f"🟢 <b>{html.escape(report['symbol'])}</b> — BUY SPOT + SHORT PERPETUAL",
+                f"Базис входа: <b>{report['entry_basis_pct']:+.3f}%</b>",
+                f"Funding сейчас: <b>{rate_pct:+.4f}%</b> за период",
+                f"Оценка funding: <b>{report['expected_funding_usdt']:+.2f} USDT</b> "
+                f"({report['funding_periods_assumed']} расчёта, haircut 50%)",
+                f"Комиссии полного цикла: <b>{report['estimated_round_trip_fees_usdt']:.2f} USDT</b>",
+                f"Чистый результат при схождении базиса к {report['exit_basis_target_pct']:.2f}%: "
+                f"<b>{report['expected_net_at_basis_target_usdt']:+.2f} USDT</b>",
+                f"Стресс (+{report['stress_widening_bps']:.0f} б.п. к базису): "
+                f"<b>{report['stressed_net_usdt']:+.2f} USDT</b>",
+                f"Объём каждой стороны: {report['quote_notional']:.0f} USDT",
+            ])
+        lines.extend([
+            "",
+            "⚠️ Сценарная оценка: схождение базиса и будущий funding не гарантированы. "
+            "Расчёт не учитывает риск ликвидации и налоги. Только ручная торговля; "
+            "реальные ордера через API отключены.",
+        ])
+        await status.edit_text("\n".join(lines), parse_mode="HTML")
+    except Exception:
+        log.exception("Ошибка Spot–Futures анализа")
+        await status.edit_text(
+            "❌ Не удалось завершить Spot–Futures анализ. "
+            "Подробности записаны в лог."
+        )
 
 
 @router.message(F.text == "⚙️ Настройки")
