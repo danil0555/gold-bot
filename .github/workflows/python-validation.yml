@@ -1,4 +1,4 @@
-name: Python validation and spot-futures research
+name: Python validation and market research
 
 concurrency:
   group: addon-validation-${{ github.ref }}
@@ -6,7 +6,7 @@ concurrency:
 
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt]
+    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -14,7 +14,7 @@ on:
 jobs:
   syntax:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 70
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -24,16 +24,16 @@ jobs:
           python-version: "3.13"
       - name: Compile Python sources
         run: python -m compileall -q .
-      - name: Install runtime and strategy test dependencies
-        run: python -m pip install --disable-pip-version-check -r requirements.txt pytest
+      - name: Install runtime, research and test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt pytest scikit-learn
       - name: Import runtime and verify safe defaults
         env:
           BOT_TOKEN: "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
           DB_PATH: /tmp/trading_bot_ci_smoke.db
           BACKUP_DIR: /tmp/trading_bot_ci_backups
         run: python -c "import main; assert main.REAL_TRADING_ENABLED is False; assert main.ENABLE_ADDON_STRATEGIES is False; assert main.RISK_PERCENT == 2.0; assert main.FUTURES_LEVERAGE == 5; print('runtime import OK; real orders OFF; add-ons OFF')"
-      - name: Run deterministic addon and arbitrage tests
-        run: python -m pytest -q tests/test_addon_strategies.py tests/test_spot_futures_arb.py tests/test_backtest_spot_futures_arb.py tests/test_scalping_100.py
+      - name: Run deterministic strategy and research tests
+        run: python -m pytest -q tests/test_addon_strategies.py tests/test_spot_futures_arb.py tests/test_backtest_spot_futures_arb.py tests/test_scalping_100.py tests/test_market_research.py
       - name: Run read-only public BingX spot-perpetual smoke scan
         if: github.event_name == 'pull_request' || github.ref == 'refs/heads/research/spot-futures-arbitrage'
         run: python -m scripts.spot_futures_arb --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --notional 1000 --funding-periods 3
@@ -50,3 +50,14 @@ jobs:
         if: github.ref == 'refs/heads/research/futures-scalping-100-usdt'
         run: python scripts/backtest_scalping_100.py --days 7 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --deposit 100 --risk-percent 2 --leverage 5 --max-positions 5
         timeout-minutes: 30
+      - name: Run 180-day cross-sectional market research
+        if: github.ref == 'refs/heads/research/market-discovery-engine'
+        run: python scripts/market_research.py --days 180 --universe 30 --min-quote-volume 5000000 --cost-bps 12 --threshold 0.58
+        timeout-minutes: 60
+      - name: Upload research report
+        if: always() && github.ref == 'refs/heads/research/market-discovery-engine'
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-research-180d
+          path: research-output/market_research_180d.json
+          if-no-files-found: warn
