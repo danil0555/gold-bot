@@ -129,6 +129,8 @@ class MarketMinuteAggregator:
         """)
         self.db.commit()
         self.pending = {}
+        self.seen_trade_ids = set()
+        self.trade_id_order = deque(maxlen=50_000)
 
     def _window(self, symbol, timestamp_ms):
         minute_ts = int(timestamp_ms // 60_000 * 60_000)
@@ -145,6 +147,16 @@ class MarketMinuteAggregator:
     def process_trade(self, trade):
         try:
             symbol = str(trade["s"]).upper()
+            trade_id = str(trade.get("t", ""))
+            if trade_id:
+                dedupe_key = (symbol, trade_id)
+                if dedupe_key in self.seen_trade_ids:
+                    return
+                if len(self.trade_id_order) == self.trade_id_order.maxlen:
+                    expired = self.trade_id_order.popleft()
+                    self.seen_trade_ids.discard(expired)
+                self.trade_id_order.append(dedupe_key)
+                self.seen_trade_ids.add(dedupe_key)
             timestamp = int(trade["T"])
             price, qty = float(trade["p"]), float(trade["q"])
             if price <= 0 or qty <= 0 or timestamp <= 0:
@@ -286,7 +298,7 @@ async def websocket_loop(session, aggregator, symbols):
     while True:
         try:
             async with session.ws_connect(
-                WS_URL, autoping=False, heartbeat=30, receive_timeout=90,
+                WS_URL, autoping=False, receive_timeout=90,
                 max_msg_size=4*1024*1024
             ) as ws:
                 aggregator.event("ws_connected", f"symbols={len(symbols)} channels={len(channels)}")
@@ -345,7 +357,7 @@ async def websocket_loop(session, aggregator, symbols):
 
 async def run_collector(symbols, db_path, duration_hours, derivatives_interval):
     aggregator = MarketMinuteAggregator(db_path)
-    timeout = aiohttp.ClientTimeout(total=25)
+    timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             tasks = [
