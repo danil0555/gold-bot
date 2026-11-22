@@ -193,6 +193,7 @@ def simulate_cash_carry(
     last_exit_time = -10**30
     trades = []
     open_at_end = 0
+    open_position_mark = None
     slip = slippage_pct / 100
 
     for bar in sorted(bars, key=lambda x: x["time"]):
@@ -273,7 +274,36 @@ def simulate_cash_carry(
 
     if position is not None:
         open_at_end = 1
-    return {"trades": trades, "open_at_end": open_at_end}
+        if bars:
+            last_bar = max(bars, key=lambda x: x["time"])
+            mark_time = int(last_bar["time"]) + STEP_MS
+            spot_mark = float(last_bar["spot"])
+            swap_mark = float(last_bar["swap"])
+            spot_exit = spot_mark * (1 - slip)
+            swap_exit = swap_mark * (1 + slip)
+            quantity = position["quantity"]
+            gross = (quantity * (spot_exit - position["spot_entry"])
+                     + quantity * (position["swap_entry"] - swap_exit))
+            exit_fees = (spot_exit * quantity * spot_fee
+                         + swap_exit * quantity * swap_fee)
+            fees = position["entry_fees"] + exit_fees
+            net = gross + position["funding_usdt"] - fees
+            open_position_mark = {
+                "mark_time": mark_time,
+                "hold_hours": (mark_time - position["entry_time"]) / 3_600_000,
+                "entry_basis_pct": position["entry_basis_pct"],
+                "current_basis_pct": (swap_mark / spot_mark - 1) * 100,
+                "gross_pnl_usdt": gross,
+                "funding_pnl_usdt": position["funding_usdt"],
+                "estimated_total_fees_usdt": fees,
+                "net_mark_to_market_usdt": net,
+                "note": "Unclosed position marked at last completed hourly close with modeled exit slippage and fees",
+            }
+    return {
+        "trades": trades,
+        "open_at_end": open_at_end,
+        "open_position_mark": open_position_mark,
+    }
 
 
 def metric_pack(trades: list[dict[str, Any]]) -> dict[str, Any]:
@@ -341,6 +371,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "first_half": metric_pack(first_half),
             "second_half": metric_pack(second_half),
             "open_at_end": simulation["open_at_end"],
+            "open_position_mark_to_market": simulation["open_position_mark"],
+            "closed_trade_details": [{
+                "entry_time": t["entry_time"], "exit_time": t["exit_time"],
+                "entry_basis_pct": round(t["entry_basis_pct"], 5),
+                "exit_basis_pct": round(t["exit_basis_pct"], 5),
+                "hold_hours": round(t["hold_hours"], 3),
+                "gross_pnl_usdt": round(t["gross_pnl_usdt"], 5),
+                "funding_pnl_usdt": round(t["funding_pnl_usdt"], 5),
+                "fees_usdt": round(t["fees_usdt"], 5),
+                "net_pnl_usdt": round(t["net_pnl_usdt"], 5),
+                "exit_reason": t["exit_reason"],
+            } for t in trades],
             "assumptions": {
                 "timeframe": INTERVAL,
                 "entry_basis_pct": args.min_entry_basis,
