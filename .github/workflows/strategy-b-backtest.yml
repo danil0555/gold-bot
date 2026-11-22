@@ -2,7 +2,7 @@ name: Strategy B historical backtest
 
 on:
   push:
-    branches: [research/strategy-b-historical-backtest]
+    branches: [research/strategy-b-historical-backtest, research/binance-data-and-level-entry]
   workflow_dispatch:
 
 jobs:
