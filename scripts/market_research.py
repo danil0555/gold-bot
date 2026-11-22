@@ -9,11 +9,14 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import io
+import zipfile
+import urllib.error
 import os
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import numpy as np
 import pandas as pd
@@ -27,9 +30,7 @@ PAGE_CANDLES = 800
 REQUEST_PAUSE = 1.05
 LAST_REQUEST = 0.0
 STABLE_BASES = {"USDC", "USDE", "FDUSD", "TUSD", "USDP", "DAI", "BUSD"}
-BINANCE_BASE = "https://fapi.binance.com"
-BINANCE_EXCHANGE_INFO = "/fapi/v1/exchangeInfo"
-BINANCE_KLINES = "/fapi/v1/klines"
+BINANCE_ARCHIVE_BASE = "https://data.binance.vision/data/futures/um"
 BINANCE_LAST_REQUEST = 0.0
 
 
@@ -89,45 +90,84 @@ def _number(row, *keys):
     return 0.0
 
 
-def get_binance_json(path, params=None, retries=4):
+def download_archive_bytes(url, retries=3):
     global BINANCE_LAST_REQUEST
-    params = params or {}
-    query = urllib.parse.urlencode(params)
-    url = BINANCE_BASE + path + ("?" + query if query else "")
     last_error = None
     for attempt in range(retries):
-        pause = 0.15 - (time.monotonic() - BINANCE_LAST_REQUEST)
+        pause = 0.05 - (time.monotonic() - BINANCE_LAST_REQUEST)
         if pause > 0:
             time.sleep(pause)
         request = urllib.request.Request(
-            url, headers={"User-Agent": "gold-bot-cross-venue-research/1.0"}
+            url, headers={"User-Agent": "gold-bot-binance-public-archive/1.0"}
         )
         try:
-            with urllib.request.urlopen(request, timeout=25) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            with urllib.request.urlopen(request, timeout=30) as response:
+                data = response.read()
             BINANCE_LAST_REQUEST = time.monotonic()
-            if isinstance(payload, dict) and payload.get("code") not in (None, 0, "0"):
-                raise RuntimeError(f"Binance API error {payload.get('code')}: {payload.get('msg')}")
-            return payload
+            return data
+        except urllib.error.HTTPError as exc:
+            BINANCE_LAST_REQUEST = time.monotonic()
+            if exc.code == 404:
+                return None
+            last_error = exc
         except Exception as exc:
             BINANCE_LAST_REQUEST = time.monotonic()
             last_error = exc
-            if attempt + 1 >= retries:
-                break
+        if attempt + 1 < retries:
             time.sleep(min(2 ** attempt, 8))
-    raise RuntimeError(f"Binance request failed: {url}: {last_error}") from last_error
+    raise RuntimeError(f"Binance archive download failed: {url}: {last_error}") from last_error
+
+
+def parse_binance_kline_archive(data):
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        names = [name for name in archive.namelist() if name.lower().endswith(".csv")]
+        if not names:
+            raise RuntimeError("Binance archive contains no CSV")
+        with archive.open(names[0]) as handle:
+            raw = pd.read_csv(handle, header=None, dtype=str)
+    if raw.empty:
+        return pd.DataFrame(columns=[
+            "time","open","high","low","close","volume","quote_volume",
+            "trade_count","taker_buy_base","taker_buy_quote"
+        ])
+    first = pd.to_numeric(raw.iloc[0, 0], errors="coerce")
+    if pd.isna(first):
+        raw = raw.iloc[1:].copy()
+    if raw.shape[1] < 11:
+        raise RuntimeError(f"Unexpected Binance kline CSV width: {raw.shape[1]}")
+    selected = raw.iloc[:, [0,1,2,3,4,5,7,8,9,10]].copy()
+    selected.columns = [
+        "time","open","high","low","close","volume","quote_volume",
+        "trade_count","taker_buy_base","taker_buy_quote"
+    ]
+    for column in selected.columns:
+        selected[column] = pd.to_numeric(selected[column], errors="coerce")
+    selected = selected.dropna(subset=["time","open","high","low","close"])
+    selected["time"] = selected["time"].astype("int64")
+    # USD-M futures archives use milliseconds; tolerate microsecond timestamps too.
+    selected.loc[selected["time"] > 100_000_000_000_000, "time"] //= 1000
+    return selected.drop_duplicates("time").sort_values("time").reset_index(drop=True)
+
+
+def _month_starts(start_date, end_date):
+    cursor = datetime(start_date.year, start_date.month, 1, tzinfo=timezone.utc)
+    end_month = datetime(end_date.year, end_date.month, 1, tzinfo=timezone.utc)
+    months = []
+    while cursor <= end_month:
+        months.append(cursor)
+        if cursor.month == 12:
+            cursor = cursor.replace(year=cursor.year+1, month=1)
+        else:
+            cursor = cursor.replace(month=cursor.month+1)
+    return months
+
+
+def _archive_url(partition, symbol, filename):
+    return f"{BINANCE_ARCHIVE_BASE}/{partition}/klines/{symbol}/1h/{filename}"
 
 
 def discover_universe(limit=30, min_quote_volume=5_000_000):
-    """Today's liquid BingX contracts intersected with active Binance USDT-M crypto perps."""
-    exchange_info = get_binance_json(BINANCE_EXCHANGE_INFO)
-    eligible = {
-        str(item.get("symbol", "")).upper()
-        for item in exchange_info.get("symbols", [])
-        if item.get("contractType") == "PERPETUAL"
-        and item.get("quoteAsset") == "USDT"
-        and item.get("status") == "TRADING"
-    }
+    """Discover today's liquid BingX USDT contracts; Binance archive presence is checked per symbol."""
     rows = _rows(get_json(TICKER_PATH))
     ranked = []
     for row in rows:
@@ -137,7 +177,7 @@ def discover_universe(limit=30, min_quote_volume=5_000_000):
         if not symbol.endswith("-USDT"):
             continue
         base = symbol.split("-", 1)[0]
-        if base in STABLE_BASES or not base or symbol.replace("-", "") not in eligible:
+        if base in STABLE_BASES or not base:
             continue
         last = _number(row, "lastPrice", "last", "close")
         quote_volume = _number(row, "quoteVolume", "turnover", "quoteVol", "amount", "tradeValue")
@@ -190,38 +230,42 @@ def fetch_klines(symbol, start_ms, end_ms):
 
 
 def fetch_binance_klines(symbol, start_ms, end_ms):
-    """Fetch Binance USD-M 1h klines including quote volume, trade count and taker-buy volume."""
-    rows = []
-    cursor = int(start_ms)
-    page_size = 1400
-    while cursor < end_ms:
-        window_end = min(cursor + page_size * INTERVAL_MS, end_ms)
-        batch = get_binance_json(
-            BINANCE_KLINES,
-            {"symbol": symbol, "interval": INTERVAL, "startTime": cursor,
-             "endTime": window_end, "limit": 1500},
-        )
-        parsed = []
-        for row in batch if isinstance(batch, list) else []:
-            try:
-                stamp = int(row[0])
-                values = [float(row[i]) for i in (1, 2, 3, 4, 5, 7, 8, 9, 10)]
-                if cursor <= stamp < window_end and all(math.isfinite(v) for v in values):
-                    parsed.append((stamp, *values))
-            except (TypeError, ValueError, IndexError, OverflowError):
-                continue
-        rows.extend(parsed)
-        cursor = window_end
-        if not batch:
-            continue
-    frame = pd.DataFrame(
-        rows,
-        columns=["time", "open", "high", "low", "close", "volume",
-                 "quote_volume", "trade_count", "taker_buy_base", "taker_buy_quote"],
-    )
+    """Fetch Binance USD-M 1h klines from official monthly/daily public ZIP archives."""
+    start_date = datetime.fromtimestamp(start_ms/1000, tz=timezone.utc).date()
+    end_date = datetime.fromtimestamp((end_ms-1)/1000, tz=timezone.utc).date()
+    today_utc = datetime.now(timezone.utc).date()
+    last_complete_day = min(end_date, today_utc-timedelta(days=1))
+    months = _month_starts(start_date, end_date)
+    current_month = datetime(today_utc.year, today_utc.month, 1, tzinfo=timezone.utc)
+    complete_months = [m for m in months if m < current_month]
+    if not complete_months:
+        raise RuntimeError("No completed Binance monthly archive in requested period")
+    # Probe the latest completed month first. This filters non-Binance instruments
+    # before spending requests on the rest of the historical window.
+    probe_month = complete_months[-1]
+    probe_name = f"{symbol}-1h-{probe_month.year}-{probe_month.month:02d}.zip"
+    probe_data = download_archive_bytes(_archive_url("monthly", symbol, probe_name))
+    if probe_data is None:
+        raise RuntimeError(f"No Binance USD-M archive for {symbol} in {probe_month:%Y-%m}")
+    frames = [parse_binance_kline_archive(probe_data)]
+    for month in complete_months[:-1]:
+        name = f"{symbol}-1h-{month.year}-{month.month:02d}.zip"
+        data = download_archive_bytes(_archive_url("monthly", symbol, name))
+        if data is not None:
+            frames.append(parse_binance_kline_archive(data))
+    if last_complete_day >= current_month.date():
+        day = current_month.date()
+        while day <= last_complete_day:
+            name = f"{symbol}-1h-{day.isoformat()}.zip"
+            data = download_archive_bytes(_archive_url("daily", symbol, name))
+            if data is not None:
+                frames.append(parse_binance_kline_archive(data))
+            day += timedelta(days=1)
+    frame = pd.concat(frames, ignore_index=True).drop_duplicates("time").sort_values("time")
+    frame = frame.loc[(frame["time"] >= start_ms) & (frame["time"] < end_ms)].copy()
     if frame.empty:
-        raise RuntimeError(f"No Binance {INTERVAL} candles returned for {symbol}")
-    return frame.drop_duplicates("time").sort_values("time").reset_index(drop=True)
+        raise RuntimeError(f"No Binance {INTERVAL} archive rows returned for {symbol}")
+    return frame.reset_index(drop=True)
 
 
 def add_features(frame, btc_returns=None):
@@ -490,13 +534,13 @@ def run_research(args):
 
     report = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
-        "method": "Read-only cross-venue BingX+Binance USDT-M 1h research; current liquid crypto perpetual universe intersected with active Binance USDT-M perpetuals; includes prior Binance taker-buy imbalance and volume/trade-count features; time-ordered 60/20/20 split with horizon purge; logistic and histogram gradient boosting; no execution/portfolio simulation.",
+        "method": "Read-only cross-venue BingX+Binance USDT-M 1h research; current liquid BingX contracts with matching Binance USD-M archive coverage; includes prior Binance taker-buy imbalance and volume/trade-count features; time-ordered 60/20/20 split with horizon purge; logistic and histogram gradient boosting; no execution/portfolio simulation.",
         "evaluation_days": args.days,
         "requested_universe": args.universe,
         "actual_symbols": list(frames),
         "symbol_quote_volume_24h": universe,
         "features": FEATURES,
-        "cross_venue_data_source": "Binance USD-M public 1h klines: quote volume, trade count and taker-buy quote volume; prior completed candle features only.",
+        "cross_venue_data_source": "Binance Vision USD-M public 1h monthly/daily ZIP archives: quote volume, trade count and taker-buy quote volume; prior completed candle features only.",
         "label_cost_bps": args.cost_bps,
         "signal_probability_threshold": args.threshold,
         "data_limitations": [
