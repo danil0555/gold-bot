@@ -6,7 +6,7 @@ concurrency:
 
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model]
+    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model, research/market-feature-ablation]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -55,11 +55,11 @@ jobs:
         run: python scripts/market_research.py --days 180 --universe 30 --min-quote-volume 5000000 --cost-bps 12 --threshold 0.58
         timeout-minutes: 60
       - name: Run 180-day BingX-only market research
-        if: github.ref == 'refs/heads/research/bingx-only-market-model'
+        if: github.ref == 'refs/heads/research/bingx-only-market-model' || github.ref == 'refs/heads/research/market-feature-ablation'
         run: python scripts/market_research.py --days 180 --universe 30 --min-quote-volume 5000000 --cost-bps 12 --threshold 0.58 --bingx-only
         timeout-minutes: 60
       - name: Upload BingX-only research report
-        if: always() && github.ref == 'refs/heads/research/bingx-only-market-model'
+        if: always() && (github.ref == 'refs/heads/research/bingx-only-market-model' || github.ref == 'refs/heads/research/market-feature-ablation')
         uses: actions/upload-artifact@v4
         with:
           name: market-research-bingx-only-180d
