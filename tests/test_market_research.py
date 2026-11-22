@@ -215,7 +215,7 @@ def test_feature_group_mapping_covers_all_supported_feature_families():
         "hour_sin", "weekday_cos", "body_pct_range", "upper_wick_pct",
     ]
     groups = _feature_group_map(features)
-    assert set(groups) == {
+    assert set(groups.values()) == {
         "trend_momentum", "volatility", "trend_oscillators", "volume_flow",
         "cross_venue", "funding", "market_context", "calendar",
         "candle_structure",
