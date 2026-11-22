@@ -201,3 +201,25 @@ def test_individual_feature_score_uses_validation_threshold_and_reports_test_met
     assert scores[0]["feature"] == "signal"
     assert scores[0]["test_metrics_12bps"]["observations"] == 125
     assert "test_spearman_vs_forward_return" in scores[0]
+
+
+
+def test_feature_group_mapping_covers_all_supported_feature_families():
+    from scripts.market_research import _feature_group_map
+
+    features = [
+        "ret_1h", "relative_ret_24h", "rv_24h", "atr_pct_14",
+        "ema_gap_12_26", "rsi_14", "volume_z_24",
+        "bingx_taker_imbalance_lag1", "binance_ret_4h_lag1",
+        "funding_rate_lag1", "btc_ret_1h", "btc_corr_72h",
+        "hour_sin", "weekday_cos", "body_pct_range", "upper_wick_pct",
+    ]
+    groups = _feature_group_map(features)
+    assert set(groups) == {
+        "trend_momentum", "volatility", "trend_oscillators", "volume_flow",
+        "cross_venue", "funding", "market_context", "calendar",
+        "candle_structure",
+    }
+    assert groups["ret_1h"] == "trend_momentum"
+    assert groups["binance_ret_4h_lag1"] == "cross_venue"
+    assert groups["funding_rate_lag1"] == "funding"
