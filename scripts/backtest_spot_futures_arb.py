@@ -20,7 +20,7 @@ from typing import Any
 BASE = "https://open-api.bingx.com"
 INTERVAL = "1h"
 STEP_MS = 60 * 60_000
-PAGE_SIZE = 1440
+PAGE_SIZE = 900
 DEFAULT_SYMBOLS = ("BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT",
                    "ADA-USDT", "DOGE-USDT", "LINK-USDT", "LTC-USDT")
 SPOT_FEE = 0.001
