@@ -172,3 +172,59 @@ def test_binance_kline_pagination_and_normalization(monkeypatch):
     assert requested == [base]
     assert frame.iloc[0]["close"] == 100.5
     assert frame.iloc[0]["volume"] == 12.0
+
+
+
+def test_level_entry_waits_for_zone_touch_then_closed_5m_confirmation():
+    import numpy as np
+    import pandas as pd
+
+    from scripts.backtest_strategy_b import resolve_signal_entry
+
+    minute = pd.DataFrame([
+        {"open": 100.0, "high": 100.2, "low": 99.8, "close_time": 60_000},
+        {"open": 100.0, "high": 100.8, "low": 99.9, "close_time": 120_000},
+        {"open": 100.2, "high": 100.7, "low": 100.0, "close_time": 180_000},
+        {"open": 100.5, "high": 100.6, "low": 100.3, "close_time": 240_000},
+    ])
+    five = pd.DataFrame([{
+        "close_time": 180_000, "close": 100.1, "ema20": 100.2,
+        "ema50": 100.4, "macd": -0.2, "macd_signal": -0.1, "rsi": 42.0,
+    }])
+    close_times = {"5m": five["close_time"].to_numpy(dtype=np.int64)}
+    signal = {
+        "side": "SELL", "entry_mode": "level",
+        "entry_zone_low": 100.0, "entry_zone_high": 101.0,
+    }
+    resolved = resolve_signal_entry(
+        signal, minute, {"5m": five}, close_times, 0, max_wait_minutes=8
+    )
+    assert resolved["entry_mode"] == "level"
+    assert resolved["entry_index"] == 3
+    assert resolved["raw_entry"] == 100.5
+
+
+def test_level_entry_without_zone_touch_is_not_filled():
+    import numpy as np
+    import pandas as pd
+
+    from scripts.backtest_strategy_b import resolve_signal_entry
+
+    minute = pd.DataFrame([
+        {"open": 100.0, "high": 100.1, "low": 99.9, "close_time": 60_000},
+        {"open": 100.0, "high": 100.2, "low": 99.8, "close_time": 120_000},
+        {"open": 100.0, "high": 100.2, "low": 99.8, "close_time": 180_000},
+    ])
+    five = pd.DataFrame([{
+        "close_time": 180_000, "close": 100.1, "ema20": 100.2,
+        "ema50": 100.4, "macd": -0.2, "macd_signal": -0.1, "rsi": 42.0,
+    }])
+    close_times = {"5m": five["close_time"].to_numpy(dtype=np.int64)}
+    signal = {
+        "side": "SELL", "entry_mode": "level",
+        "entry_zone_low": 101.0, "entry_zone_high": 102.0,
+    }
+    resolved = resolve_signal_entry(
+        signal, minute, {"5m": five}, close_times, 0, max_wait_minutes=2
+    )
+    assert resolved["status"] == "unfilled_level"
