@@ -6,7 +6,7 @@ concurrency:
 
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt]
+    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/futures-scalping-30d]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -46,7 +46,7 @@ jobs:
         if: github.ref == 'refs/heads/fix/addon-strategies-diagnostics-20261121'
         run: python scripts/backtest_addons.py --days 7 --symbols BTC-USDT,ETH-USDT,SOL-USDT
         timeout-minutes: 20
-      - name: Run $100 USDT-M futures scalping portfolio backtest
-        if: github.ref == 'refs/heads/research/futures-scalping-100-usdt'
-        run: python scripts/backtest_scalping_100.py --days 7 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --deposit 100 --risk-percent 2 --leverage 5 --max-positions 5
+      - name: Run $100 USDT-M futures scalping portfolio backtest (30-day validation)
+        if: github.ref == 'refs/heads/research/futures-scalping-100-usdt' || github.ref == 'refs/heads/research/futures-scalping-30d'
+        run: python scripts/backtest_scalping_100.py --days 30 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --deposit 100 --risk-percent 2 --leverage 5 --max-positions 5
         timeout-minutes: 30
