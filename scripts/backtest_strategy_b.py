@@ -157,9 +157,10 @@ def fetch_gate_history(symbol, interval, start_ms, end_ms):
             with urllib.request.urlopen(request, timeout=25) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:1000]
             if exc.code in (418, 429):
-                raise RuntimeError(f"Gate API rate/access limit HTTP {exc.code}; stopping safely") from exc
-            raise
+                raise RuntimeError(f"Gate API rate/access limit HTTP {exc.code}: {body}; stopping safely") from exc
+            raise RuntimeError(f"Gate API HTTP {exc.code} for {symbol} {interval}: {body}") from exc
         if isinstance(payload, dict):
             raise RuntimeError(f"Gate kline error for {symbol} {interval}: {payload}")
         parsed = []
