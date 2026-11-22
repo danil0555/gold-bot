@@ -15,7 +15,7 @@ import os
 import sqlite3
 import time
 import uuid
-from collections import defaultdict
+from collections import deque
 from datetime import datetime, timezone
 
 import aiohttp
