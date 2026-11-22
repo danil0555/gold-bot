@@ -91,7 +91,7 @@ def parse_order_book(payload: dict[str, Any], label: str) -> tuple[list, list, i
         raise MarketDataError(f"{label}: unexpected order book response")
     bids = _levels(data.get("bids"), f"{label} bids")
     asks = _levels(data.get("asks"), f"{label} asks")
-    stamp = int(data.get("ts") or data.get("timestamp") or data.get("time") or 0)
+    stamp = int(data.get("ts") or data.get("T") or data.get("timestamp") or data.get("time") or 0)
     return bids, asks, stamp
 
 
