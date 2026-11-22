@@ -1982,13 +1982,18 @@ async def spot_futures_arbitrage_handler(message: Message):
         "Проверяю funding, комиссии, глубину и стресс-сценарий..."
     )
     try:
+        arbitrage_notional = safe_float(os.getenv("ARBITRAGE_NOTIONAL_USDT"), 1000.0)
+        spot_taker_fee = safe_float(os.getenv("SPOT_TAKER_FEE"), DEFAULT_SPOT_TAKER_FEE)
+        swap_taker_fee = safe_float(os.getenv("SWAP_TAKER_FEE"), DEFAULT_SWAP_TAKER_FEE)
+        if arbitrage_notional <= 0 or spot_taker_fee < 0 or swap_taker_fee < 0:
+            raise ValueError("Некорректные настройки объёма или комиссий Spot–Futures")
         reports = await asyncio.to_thread(
             scan_spot_futures_arbitrage,
             ARBITRAGE_SYMBOLS,
-            1000.0,
+            arbitrage_notional,
             3,
-            DEFAULT_SPOT_TAKER_FEE,
-            DEFAULT_SWAP_TAKER_FEE,
+            spot_taker_fee,
+            swap_taker_fee,
             0.0,
         )
         candidates = [r for r in reports if r.get("eligible_candidate")]
