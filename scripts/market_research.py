@@ -503,9 +503,18 @@ def build_panel(frames, cost, binance_frames, funding_frames=None):
         f = f.reset_index()
         f["symbol"] = symbol
         for horizon in (1, 4, 12, 24):
-            future = f["close"].shift(-horizon)/f["close"]-1
+            # Signal is known after candle t closes; enter at next candle open.
+            entry = f["open"].shift(-1)
+            entry_time = f["time"].shift(-1)
+            exit_price = f["close"].shift(-horizon)
+            exit_time = f["time"].shift(-horizon)
+            continuous_target = (
+                (entry_time == f["time"] + INTERVAL_MS)
+                & (exit_time == f["time"] + horizon * INTERVAL_MS)
+            )
+            future = (exit_price / entry - 1).where(continuous_target)
             f[f"fwd_{horizon}h"] = future
-            # Keep every known outcome; do not condition the sample on future move size.
+            # Keep every known outcome; never select rows by future move size.
             f[f"label_{horizon}h"] = np.where(
                 future.notna(), (future > 0).astype(float), np.nan
             )
@@ -599,6 +608,121 @@ def _market_regime_breakdown(test, probabilities, threshold, cost):
         )
         out[str(regime)] = metrics
     return out
+
+
+def _funding_history_coverage(funding_frames):
+    """Summarize observed funding event coverage and gaps for each symbol."""
+    coverage = {}
+    for symbol, frame in funding_frames.items():
+        if frame is None or frame.empty or "funding_time" not in frame:
+            coverage[symbol] = {"events": 0, "first_event_utc": None, "last_event_utc": None}
+            continue
+        stamps = pd.to_numeric(frame["funding_time"], errors="coerce").dropna().sort_values()
+        gaps = stamps.diff().dropna() / 3_600_000
+        coverage[symbol] = {
+            "events": int(len(stamps)),
+            "first_event_utc": datetime.fromtimestamp(int(stamps.iloc[0])/1000, tz=timezone.utc).isoformat(),
+            "last_event_utc": datetime.fromtimestamp(int(stamps.iloc[-1])/1000, tz=timezone.utc).isoformat(),
+            "median_interval_hours": round(float(gaps.median()), 3) if len(gaps) else None,
+            "max_interval_hours": round(float(gaps.max()), 3) if len(gaps) else None,
+        }
+    return coverage
+
+
+def _feature_group_map(features):
+    """Assign each feature to one interpretable family for leave-one-family-out tests."""
+    groups = {}
+    for feature in features:
+        if feature.startswith("funding_"):
+            group = "funding"
+        elif feature.startswith("binance_"):
+            group = "cross_venue"
+        elif feature.startswith(("bingx_", "volume_")):
+            group = "volume_flow"
+        elif feature.startswith(("btc_", "relative_")):
+            group = "market_context"
+        elif feature.startswith(("hour_", "weekday_")):
+            group = "calendar"
+        elif feature in {"body_pct_range", "upper_wick_pct", "lower_wick_pct", "close_location"}:
+            group = "candle_structure"
+        elif feature.startswith(("rv_", "atr_")) or feature == "bb_width_20":
+            group = "volatility"
+        elif feature.startswith(("ema_", "rsi_", "range_pos_")):
+            group = "trend_oscillators"
+        else:
+            group = "trend_momentum"
+        groups[feature] = group
+    return groups
+
+
+def _run_group_ablation(
+    train, valid, test, features, label_col, return_col, cost_bps,
+    fallback_threshold, baseline_test_probabilities, baseline_threshold,
+):
+    """Remove one feature family at a time; tune on validation and score once on held-out test."""
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import make_pipeline
+    from sklearn.ensemble import HistGradientBoostingClassifier
+
+    feature_groups = _feature_group_map(features)
+    baseline = {}
+    for bps in (cost_bps, 20, 30):
+        baseline[str(bps) + "bps"] = _metrics(
+            test[label_col].to_numpy(), baseline_test_probabilities,
+            test[return_col].to_numpy(), bps / 10_000, baseline_threshold,
+        )
+    results = {}
+    for group in sorted(set(feature_groups.values())):
+        removed = [name for name, family in feature_groups.items() if family == group]
+        remaining = [name for name in features if name not in removed]
+        if len(remaining) < 3:
+            results[group] = {"status": "skipped_too_few_remaining_features", "removed_features": removed}
+            continue
+        model = make_pipeline(
+            SimpleImputer(strategy="median"),
+            HistGradientBoostingClassifier(
+                max_iter=120, learning_rate=0.05, max_leaf_nodes=15,
+                l2_regularization=2.0, random_state=17,
+            ),
+        )
+        model.fit(train[remaining], train[label_col].astype(int))
+        classes = list(model[-1].classes_)
+        valid_prob = model.predict_proba(valid[remaining])[:, classes.index(1)] if len(valid) else np.array([])
+        test_prob = model.predict_proba(test[remaining])[:, classes.index(1)]
+        if len(valid):
+            threshold, threshold_report = _select_threshold(
+                valid[label_col].to_numpy(), valid_prob,
+                valid[return_col].to_numpy(), cost_bps / 10_000,
+                fallback_threshold,
+            )
+        else:
+            threshold = fallback_threshold
+            threshold_report = {"method": "fixed_fallback_no_validation_rows", "threshold": threshold}
+        costs = {}
+        for bps in (cost_bps, 20, 30):
+            key = str(bps) + "bps"
+            metrics = _metrics(
+                test[label_col].to_numpy(), test_prob,
+                test[return_col].to_numpy(), bps / 10_000, threshold,
+            )
+            base_mean = baseline[key].get("mean_net_return_pct")
+            test_mean = metrics.get("mean_net_return_pct")
+            metrics["delta_mean_net_return_pct_vs_full"] = (
+                round(test_mean - base_mean, 5)
+                if test_mean is not None and base_mean is not None else None
+            )
+            costs[key] = metrics
+        results[group] = {
+            "removed_features": removed,
+            "remaining_feature_count": len(remaining),
+            "threshold_selection": threshold_report,
+            "cost_sensitivity": costs,
+        }
+    return {
+        "comparison_model": "HistGradientBoostingClassifier",
+        "baseline_full_feature_metrics": baseline,
+        "leave_one_feature_family_out": results,
+    }
 
 
 def _score_individual_features(train, valid, test, features, label_col, return_col, cost, fallback_threshold):
@@ -777,6 +901,8 @@ def run_research(args):
             ],
             "models": {},
         }
+        hgb_test_probabilities = np.array([])
+        hgb_selected_threshold = args.threshold
         for name, model in models.items():
             model.fit(X_train, y_train)
             classes = list(model[-1].classes_)
@@ -805,12 +931,20 @@ def run_research(args):
                 "cost_sensitivity":costs,
                 "market_regime_breakdown":regime_breakdown,
             }
+            if name == "hist_gradient_boosting":
+                hgb_test_probabilities = p_up
+                hgb_selected_threshold = selected_threshold
             if name == "logistic":
                 coefs = model[-1].coef_[0]
                 horizon_result["models"][name]["largest_abs_coefficients"] = [
                     {"feature":active_features[i],"coefficient":round(float(coefs[i]),5)}
                     for i in np.argsort(np.abs(coefs))[::-1][:10]
                 ]
+        horizon_result["group_ablation_hist_gradient_boosting"] = _run_group_ablation(
+            train, valid, test, active_features, label_col, ret_col,
+            args.cost_bps, args.threshold, hgb_test_probabilities,
+            hgb_selected_threshold,
+        )
         # A transparent momentum baseline, evaluated on the same test rows.
         momentum = np.where(test["ret_24h"].to_numpy() >= 0, 1, 0)
         baseline_p = np.where(momentum == 1, 0.500001, 0.499999)
@@ -835,9 +969,11 @@ def run_research(args):
         "feature_selection_rule": "At least 60% non-null coverage and non-constant values in the earliest 60% training period; missing rows imputed inside each model pipeline.",
         "market_data_source": "BingX public USDT-M klines and, when enabled, settled historical funding events; prior completed candle features only.",
         "funding_data_source": "BingX public settled funding history" if args.with_funding else None,
+        "funding_history_coverage": _funding_history_coverage(funding_frames) if args.with_funding else None,
         "cross_venue_data_source": None if args.bingx_only else "Binance Vision USD-M public 1h monthly/daily ZIP archives; research-only under published non-commercial terms.",
         "label_cost_bps": args.cost_bps,
-        "target_definition": "Binary up/down direction on every row with a known future return; no samples are excluded based on future move size. Costs are applied only in validation/test net-return metrics.",
+        "target_definition": "Binary up/down direction on every row with a known future return; no samples are excluded based on future move size. Signal is formed after candle close, entry is modeled at the next candle open, and exit is the close after the requested holding horizon. Costs are applied only in validation/test net-return metrics.",
+        "execution_assumption": "Completed-candle signal -> next-candle open entry -> close after 1/4/12/24 hours; spread, slippage and fees are approximated by fixed round-trip cost scenarios, not order-book replay.",
         "signal_probability_threshold": args.threshold,
         "data_limitations": [
             "Current listed contracts only: survivorship/listing-history bias remains.",
