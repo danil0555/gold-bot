@@ -3,7 +3,7 @@ import zipfile
 import numpy as np
 import pandas as pd
 
-from scripts.market_research import add_features, build_panel, parse_binance_kline_archive, _select_threshold, add_bingx_flow_features, BASE_FEATURES, BINGX_FLOW_FEATURES, CROSS_VENUE_FEATURES
+from scripts.market_research import add_features, build_panel, parse_binance_kline_archive, _select_threshold, add_bingx_flow_features, add_bingx_funding_features, BASE_FEATURES, BINGX_FLOW_FEATURES, FUNDING_FEATURES, CROSS_VENUE_FEATURES
 
 
 def sample_frame(periods=260, offset=0.0):
@@ -155,3 +155,27 @@ def test_bingx_only_panel_has_flow_features_without_binance_data():
     assert set(BINGX_FLOW_FEATURES).issubset(panel.columns)
     assert panel.loc[panel["symbol"] == "BTC-USDT"].iloc[-2][BINGX_FLOW_FEATURES].notna().all()
     assert panel["binance_taker_imbalance_lag1"].isna().all()
+
+
+
+def test_bingx_funding_features_use_only_settled_lagged_events():
+    candles = sample_frame()
+    event_times = candles["time"].iloc[::8].to_numpy()
+    rates = 0.0001 * np.sin(np.arange(len(event_times)) / 2) + 0.00002
+    funding = pd.DataFrame({"funding_time": event_times, "funding_rate": rates})
+    features = add_bingx_funding_features(candles, funding)
+    assert set(FUNDING_FEATURES).issubset(features.columns)
+    assert features.iloc[-1][FUNDING_FEATURES].notna().all()
+    changed = funding.copy()
+    changed.loc[changed["funding_time"] >= candles["time"].iloc[160], "funding_rate"] += 0.01
+    changed_features = add_bingx_funding_features(candles, changed)
+    pd.testing.assert_frame_equal(
+        features.loc[:159, FUNDING_FEATURES],
+        changed_features.loc[:159, FUNDING_FEATURES],
+        check_dtype=False,
+    )
+
+
+def test_bingx_funding_features_are_missing_when_no_history_exists():
+    features = add_bingx_funding_features(sample_frame(), pd.DataFrame())
+    assert features[list(FUNDING_FEATURES)].isna().all().all()
