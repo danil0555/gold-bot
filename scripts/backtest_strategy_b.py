@@ -307,6 +307,27 @@ def metric_pack(trades):
     }
 
 
+def paired_closed_comparison(paired_trades):
+    """Compare only signal IDs that produced closed outcomes in both entry modes."""
+    grouped = defaultdict(dict)
+    for trade in paired_trades:
+        if trade.get("status") not in ("unresolved", "skipped_drift", "skipped_zone", "unfilled_level"):
+            grouped[trade["pair_id"]][trade["entry_mode"]] = trade
+    matched = [(items["market"], items["level"]) for items in grouped.values()
+               if "market" in items and "level" in items]
+    if not matched:
+        return {"matched_closed_pairs": 0, "mean_market_minus_level_net_r": None,
+                "market_wins": 0, "level_wins": 0, "ties": 0}
+    deltas = [m["net_r"] - l["net_r"] for m, l in matched]
+    return {
+        "matched_closed_pairs": len(matched),
+        "mean_market_minus_level_net_r": round(sum(deltas) / len(deltas), 4),
+        "market_wins": sum(d > 1e-12 for d in deltas),
+        "level_wins": sum(d < -1e-12 for d in deltas),
+        "ties": sum(abs(d) <= 1e-12 for d in deltas),
+    }
+
+
 def structure_trigger(reasons):
     """Classify the structural trigger from the exact live builder's reason labels."""
     for reason in reasons or []:
@@ -338,11 +359,12 @@ def confirmation_passed(side, candle):
     return close < ema20 < ema50 and macd < macd_signal and 28 <= rsi <= 50
 
 
-def resolve_signal_entry(signal, minute_frame, frames, close_times, signal_index, max_wait_minutes=8):
-    """Resolve a level entry only after zone touch and a later closed 5m confirmation."""
+def resolve_signal_entry(signal, minute_frame, frames, close_times, signal_index, max_wait_minutes=8, entry_mode=None):
+    """Resolve market or level execution for a signal; optional override enables paired tests."""
     if signal_index + 1 >= len(minute_frame):
         return None
-    if signal.get("entry_mode") != "level":
+    selected_mode = entry_mode or signal.get("entry_mode", "market")
+    if selected_mode != "level":
         return {"entry_index": signal_index + 1,
                 "raw_entry": float(minute_frame.iloc[signal_index + 1]["open"]),
                 "entry_mode": "market"}
@@ -386,8 +408,16 @@ def simulate_strategy_b_trade(signal, minute_frame, entry_index, raw_entry):
         return {"status": "skipped_drift", "exit_index": entry_index, "raw_entry": raw_entry}
     adverse = (STRATEGY_CONSTANTS["DEFAULT_SYNTHETIC_SPREAD_PCT"] / 2.0 + STRATEGY_CONSTANTS["DEFAULT_SLIPPAGE_PCT"]) / 100.0
     entry = raw_entry * (1 + adverse if side == "BUY" else 1 - adverse)
-    sl, tp1, tp2 = float(signal["sl"]), float(signal["tp1"]), float(signal["tp2"])
-    risk = abs(entry - sl)
+    if signal.get("entry_mode") == "market":
+        # Mirror live enrichment: preserve risk distance and move SL/TP with bid/ask.
+        risk = abs(float(signal["entry"]) - float(signal["sl"]))
+        if side == "BUY":
+            sl, tp1, tp2 = entry - risk, entry + 1.8 * risk, entry + 3.0 * risk
+        else:
+            sl, tp1, tp2 = entry + risk, entry - 1.8 * risk, entry - 3.0 * risk
+    else:
+        sl, tp1, tp2 = float(signal["sl"]), float(signal["tp1"]), float(signal["tp2"])
+        risk = abs(entry - sl)
     if risk <= 0:
         return None
     tp1_hit = False
@@ -457,6 +487,7 @@ def run(args):
     )
 
     trades = []
+    paired_trades = []
     rejection_counts = Counter()
     per_symbol_rejections = {symbol: Counter() for symbol in symbols}
     coverage_report = {}
@@ -554,6 +585,35 @@ def run(args):
 
             # Live validation permits up to 0.5R drift for market entries and
             # up to 1.0R for level entries.
+            if args.paired_entry_comparison:
+                for paired_mode in ("market", "level"):
+                    paired_resolved = resolve_signal_entry(
+                        signal, minute, frames, close_times, i,
+                        max_wait_minutes=args.level_entry_wait_minutes,
+                        entry_mode=paired_mode,
+                    )
+                    if paired_resolved is None:
+                        paired_outcome = {"status": "unresolved"}
+                    elif paired_resolved.get("status"):
+                        paired_outcome = {
+                            "status": paired_resolved["status"],
+                            "exit_index": paired_resolved["entry_index"],
+                            "raw_entry": paired_resolved.get("raw_entry"),
+                        }
+                    else:
+                        paired_signal = dict(signal, entry_mode=paired_mode)
+                        paired_outcome = simulate_strategy_b_trade(
+                            paired_signal, minute,
+                            paired_resolved["entry_index"], paired_resolved["raw_entry"],
+                        ) or {"status": "unresolved"}
+                    paired_trades.append({
+                        "pair_id": setup_key, "symbol": symbol, "side": signal["side"],
+                        "time": datetime.fromtimestamp(stamp / 1000, tz=timezone.utc).isoformat(),
+                        "entry_mode": paired_mode,
+                        "market_regime": signal.get("market_regime", "unknown"),
+                        **paired_outcome,
+                    })
+
             resolved = resolve_signal_entry(
                 signal, minute, frames, close_times, i,
                 max_wait_minutes=args.level_entry_wait_minutes,
@@ -643,6 +703,21 @@ def run(args):
             for symbol, counts in per_symbol_rejections.items()
         },
         "overall": metric_pack(trades),
+        "paired_entry_comparison": ({
+            "signals_compared": len({t["pair_id"] for t in paired_trades}),
+            "by_mode": {
+                mode: metric_pack([t for t in paired_trades if t["entry_mode"] == mode])
+                for mode in ("market", "level")
+            },
+            "by_symbol_and_mode": {
+                symbol: {
+                    mode: metric_pack([t for t in paired_trades
+                                       if t["symbol"] == symbol and t["entry_mode"] == mode])
+                    for mode in ("market", "level")
+                } for symbol in symbols
+            },
+            "paired_closed_comparison": paired_closed_comparison(paired_trades),
+        } if args.paired_entry_comparison else None),
         "by_symbol": {
             symbol: metric_pack([t for t in trades if t["symbol"] == symbol])
             for symbol in symbols
@@ -695,6 +770,8 @@ if __name__ == "__main__":
     parser.add_argument("--symbols", default="BTC-USDT,ETH-USDT,SOL-USDT")
     parser.add_argument("--source", choices=("bingx", "binance", "gate", "okx"), default="bingx")
     parser.add_argument("--level-entry-wait-minutes", type=int, default=8)
+    parser.add_argument("--paired-entry-comparison", action="store_true",
+                        help="Evaluate market and level execution on the same eligible signals")
     parser.add_argument("--replay-symbol", default="")
     parser.add_argument("--replay-time-utc", default="")
     args = parser.parse_args()
