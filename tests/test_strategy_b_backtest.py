@@ -274,7 +274,7 @@ def test_okx_history_candle_normalization_and_pagination(monkeypatch):
         query = parse_qs(urlparse(request.full_url).query)
         seen.append(query)
         cursor = int(query["after"][0])
-        ts = min(base + step, cursor - 1)
+        ts = base + step if len(seen) == 1 else base - step
         rows = [[str(ts), "0.50", "0.51", "0.49", "0.505",
                  "200", "100", "50.5", "1"]]
         class Response:
