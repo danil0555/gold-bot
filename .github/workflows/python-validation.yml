@@ -38,7 +38,7 @@ jobs:
         if: github.ref == 'refs/heads/research/live-market-data-collector'
         run: |
           python scripts/market_data_collector.py --symbols BTC-USDT,ETH-USDT --duration-hours 0.01 --db-path /tmp/market_microstructure.sqlite3 --derivatives-interval 60
-          python -c "import sqlite3; c=sqlite3.connect('/tmp/market_microstructure.sqlite3'); n=c.execute('select count(*) from minute_features').fetchone()[0]; d=c.execute('select coalesce(sum(depth_samples),0) from minute_features').fetchone()[0]; t=c.execute('select coalesce(sum(trades_count),0) from minute_features').fetchone()[0]; print('minute_rows=',n,'depth_samples=',d,'trades=',t); assert n>0 and d>0 and t>0"
+          python -c "import sqlite3; c=sqlite3.connect('/tmp/market_microstructure.sqlite3'); n=c.execute('select count(*) from minute_features').fetchone()[0]; d=c.execute('select coalesce(sum(depth_samples),0) from minute_features').fetchone()[0]; t=c.execute('select coalesce(sum(trades_count),0) from minute_features').fetchone()[0]; oi=c.execute('select count(*) from derivatives_snapshots').fetchone()[0]; print('minute_rows=',n,'depth_samples=',d,'trades=',t,'derivatives_rows=',oi); assert n>0 and d>0 and t>0 and oi>0"
         timeout-minutes: 3
       - name: Run read-only public BingX spot-perpetual smoke scan
         if: github.event_name == 'pull_request' || github.ref == 'refs/heads/research/spot-futures-arbitrage'
