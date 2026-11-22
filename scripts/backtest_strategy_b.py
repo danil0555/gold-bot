@@ -558,7 +558,7 @@ def run(args):
                 "symbol": symbol,
                 "side": signal["side"],
                 "time": datetime.fromtimestamp(stamp / 1000, tz=timezone.utc).isoformat(),
-                "entry": round(float(outcome.get("raw_entry", signal["entry"])), 10),
+                "entry": round(float(outcome.get("raw_entry") or signal["entry"]), 10),
                 "signal_entry": round(float(signal["entry"]), 10),
                 "entry_mode": signal.get("entry_mode", "market"),
                 "entry_zone_low": signal.get("entry_zone_low"),
