@@ -14,6 +14,7 @@ import math
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 from collections import defaultdict
 from typing import Any
 
@@ -34,24 +35,42 @@ class BacktestDataError(RuntimeError):
 
 
 def request(path: str, params: dict[str, Any]) -> dict[str, Any]:
-    previous = LAST_REQUEST.get(path, 0.0)
-    wait = 1.05 - (time.monotonic() - previous)
-    if wait > 0:
-        time.sleep(wait)
     query = urllib.parse.urlencode(params)
-    req = urllib.request.Request(BASE + path + "?" + query, headers={
+    url = BASE + path + "?" + query
+    req = urllib.request.Request(url, headers={
         "Accept": "application/json",
         "User-Agent": "gold-bot-cash-carry-backtest/1.0",
     })
-    try:
-        with urllib.request.urlopen(req, timeout=25) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except Exception as exc:
-        raise BacktestDataError(f"request failed {path}: {exc}") from exc
-    LAST_REQUEST[path] = time.monotonic()
-    if not isinstance(payload, dict) or payload.get("code", 0) not in (0, "0", None):
+    last_error: Exception | None = None
+    for attempt in range(5):
+        previous = LAST_REQUEST.get(path, 0.0)
+        wait = 1.25 - (time.monotonic() - previous)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            with urllib.request.urlopen(req, timeout=25) as response:
+                raw = response.read().decode("utf-8")
+            LAST_REQUEST[path] = time.monotonic()
+            payload = json.loads(raw)
+        except urllib.error.HTTPError as exc:
+            LAST_REQUEST[path] = time.monotonic()
+            if exc.code in (418, 429) and attempt < 4:
+                time.sleep(min(30.0, 2.0 ** (attempt + 1)))
+                last_error = exc
+                continue
+            raise BacktestDataError(f"HTTP {exc.code} for {path}") from exc
+        except Exception as exc:
+            LAST_REQUEST[path] = time.monotonic()
+            raise BacktestDataError(f"request failed {path}: {exc}") from exc
+
+        if isinstance(payload, dict) and payload.get("code", 0) in (0, "0", None):
+            return payload
+        if isinstance(payload, dict) and str(payload.get("code")) == "100410" and attempt < 4:
+            last_error = BacktestDataError(f"rate limited by BingX: {payload!r}")
+            time.sleep(min(30.0, 2.0 ** (attempt + 1)))
+            continue
         raise BacktestDataError(f"BingX returned an error for {path}: {payload!r}")
-    return payload
+    raise BacktestDataError(f"rate limit retries exhausted for {path}: {last_error}")
 
 
 def unwrap_data(payload: dict[str, Any]) -> list:
