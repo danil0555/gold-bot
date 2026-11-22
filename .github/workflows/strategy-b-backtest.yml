@@ -27,5 +27,5 @@ jobs:
       - name: Run deterministic tests
         run: python -m pytest -q tests/test_strategy_b_backtest.py tests/test_addon_strategies.py
       - name: Run 30-day Strategy B historical simulation
-        run: python -m scripts.backtest_strategy_b --days 30 --warmup-days 60 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT --source okx
+        run: python -m scripts.backtest_strategy_b --days 30 --warmup-days 60 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT --source okx --replay-symbol XRP-USDT --replay-time-utc 2026-11-22T05:37:00+00:00
         timeout-minutes: 40
