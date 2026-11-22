@@ -241,35 +241,29 @@ def fetch_klines(symbol, start_ms, end_ms):
 
 
 def fetch_funding_rates(symbol, start_ms, end_ms):
-    """Fetch settled BingX funding events using the public market-data endpoint."""
+    """Fetch settled BingX funding events in bounded windows below the 1000-row API cap."""
     rows = []
     cursor = int(start_ms)
+    window_ms = 30 * 86_400_000  # At 1h funding, at most 720 events per window.
     while cursor < end_ms:
+        window_end = min(cursor + window_ms, int(end_ms))
         payload = get_json(
             "/openApi/swap/v2/quote/fundingRate",
-            {"symbol": symbol, "startTime": cursor, "endTime": int(end_ms), "limit": 1000},
+            {"symbol": symbol, "startTime": cursor, "endTime": window_end, "limit": 1000},
         )
-        batch = _rows(payload)
-        parsed = []
-        for item in batch:
+        for item in _rows(payload):
             if not isinstance(item, dict):
                 continue
             try:
                 stamp = int(item.get("fundingTime", item.get("time", 0)))
                 rate = float(item["fundingRate"])
-                if stamp > 0 and math.isfinite(rate) and cursor <= stamp <= end_ms:
-                    parsed.append((stamp, rate))
+                if cursor <= stamp <= window_end and math.isfinite(rate):
+                    rows.append((stamp, rate))
             except (TypeError, ValueError, KeyError, OverflowError):
                 continue
-        if not parsed:
-            break
-        rows.extend(parsed)
-        next_cursor = max(stamp for stamp, _ in parsed) + 1
-        if next_cursor <= cursor:
-            break
-        cursor = next_cursor
-        if len(batch) < 1000:
-            break
+        # Move the request window forward even when an interval contains no events.
+        # Boundary duplicates are removed after all windows have been fetched.
+        cursor = window_end + 1
     frame = pd.DataFrame(rows, columns=["funding_time", "funding_rate"])
     if frame.empty:
         return frame
