@@ -193,6 +193,64 @@ def fetch_gate_history(symbol, interval, start_ms, end_ms):
         raise RuntimeError(f"No Gate USDT futures candles returned for {symbol} {interval}")
     return frame.drop_duplicates("open_time").sort_values("open_time").reset_index(drop=True)
 
+def fetch_okx_history(symbol, interval, start_ms, end_ms):
+    """Fetch public OKX USDT perpetual history candles using backward pagination."""
+    step_ms = TF_MS[interval]
+    bar = {"1h": "1H", "4h": "4H"}.get(interval, interval)
+    inst_id = symbol.upper() + "-SWAP"
+    cursor = int(end_ms) + 1
+    rows = []
+    base_url = "https://www.okx.com/api/v5/market/history-candles"
+    while cursor > start_ms:
+        query = urllib.parse.urlencode({
+            "instId": inst_id, "bar": bar, "after": str(cursor), "limit": "100",
+        })
+        request = urllib.request.Request(base_url + "?" + query, headers={
+            "Accept": "application/json",
+            "User-Agent": "gold-bot-readonly-backtest/1.0",
+        })
+        try:
+            with urllib.request.urlopen(request, timeout=25) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:1000]
+            raise RuntimeError(f"OKX HTTP {exc.code} for {inst_id} {bar}: {body}") from exc
+        if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+            raise RuntimeError(f"OKX kline error for {inst_id} {bar}: {payload}")
+        batch = payload.get("data") or []
+        if not batch:
+            break
+        parsed = []
+        timestamps = []
+        for row in batch:
+            try:
+                open_time = int(row[0])
+                timestamps.append(open_time)
+                if open_time < start_ms or open_time >= end_ms:
+                    continue
+                if len(row) > 8 and str(row[8]) == "0":
+                    continue
+                close = float(row[4])
+                volume = float(row[6]) if len(row) > 6 and row[6] not in (None, "") else float(row[5])
+                parsed.append((open_time, float(row[1]), float(row[2]), float(row[3]),
+                               close, volume, open_time + step_ms - 1))
+            except (IndexError, TypeError, ValueError):
+                continue
+        rows.extend(parsed)
+        oldest = min(timestamps)
+        if oldest <= start_ms:
+            break
+        if oldest >= cursor:
+            raise RuntimeError(f"Non-advancing OKX pagination for {inst_id} {bar}")
+        cursor = oldest
+        time.sleep(0.11)
+    frame = pd.DataFrame(rows, columns=[
+        "open_time", "open", "high", "low", "close", "volume", "close_time"
+    ])
+    if frame.empty:
+        raise RuntimeError(f"No OKX swap candles returned for {inst_id} {bar}")
+    return frame.drop_duplicates("open_time").sort_values("open_time").reset_index(drop=True)
+
 def enrich_once(frame, enrich_fn):
     required = {
         "ema20", "ema50", "ema200", "rsi", "atr", "adx", "macd",
@@ -205,7 +263,7 @@ def enrich_once(frame, enrich_fn):
 
 
 def fetch_history(symbol, interval, start_ms, end_ms, now_ms, source):
-    raw = (fetch_gate_history(symbol, interval, start_ms, end_ms) if source == "gate" else fetch_binance_history(symbol, interval, start_ms, end_ms) if source == "binance" else market_data.fetch_interval(symbol, interval, start_ms, end_ms))
+    raw = (fetch_okx_history(symbol, interval, start_ms, end_ms) if source == "okx" else fetch_gate_history(symbol, interval, start_ms, end_ms) if source == "gate" else fetch_binance_history(symbol, interval, start_ms, end_ms) if source == "binance" else market_data.fetch_interval(symbol, interval, start_ms, end_ms))
     frame = market_data.filter_closed_candles(raw, now_ms)
     expected = max(1, int((end_ms - start_ms) / TF_MS[interval]))
     coverage = len(frame) / expected
@@ -499,7 +557,7 @@ def run(args):
         "strategy": "B",
         "source": "exact build_signal_b and indicator functions extracted from main.py",
         "market_data_source": args.source,
-        "market_data_note": ("Gate USDT perpetual candles; volume normalized from quote turnover and may differ from BingX." if args.source == "gate" else "Binance USD-M futures candles; price/volume may differ from BingX live feed." if args.source == "binance" else "BingX USDT-M futures candles."),
+        "market_data_note": ("OKX USDT perpetual history candles; OHLCV may differ from BingX live feed." if args.source == "okx" else "Gate USDT perpetual candles; volume normalized from quote turnover and may differ from BingX." if args.source == "gate" else "Binance USD-M futures candles; price/volume may differ from BingX live feed." if args.source == "binance" else "BingX USDT-M futures candles."),
         "period_days": args.days,
         "warmup_days": args.warmup_days,
         "symbols": symbols,
@@ -578,7 +636,7 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--warmup-days", type=int, default=60)
     parser.add_argument("--symbols", default="BTC-USDT,ETH-USDT,SOL-USDT")
-    parser.add_argument("--source", choices=("bingx", "binance", "gate"), default="bingx")
+    parser.add_argument("--source", choices=("bingx", "binance", "gate", "okx"), default="bingx")
     parser.add_argument("--level-entry-wait-minutes", type=int, default=8)
     args = parser.parse_args()
     if not 1 <= args.days <= 60:
