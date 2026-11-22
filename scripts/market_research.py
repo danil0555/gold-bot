@@ -269,8 +269,8 @@ def add_features(frame, btc_returns=None):
     dt = pd.to_datetime(x["time"], unit="ms", utc=True)
     x["hour_sin"] = np.sin(2*np.pi*dt.dt.hour/24)
     x["hour_cos"] = np.cos(2*np.pi*dt.dt.hour/24)
-    x["weekday_sin"] = np.sin(2*np.pi*dt.dt.dayofweek/7)
-    x["weekday_cos"] = np.cos(2*np.pi*dt.dt.dayofweek/7)
+    x["weekday_sin"] = np.sin(2*np.pi*dt.dt.day_of_week/7)
+    x["weekday_cos"] = np.cos(2*np.pi*dt.dt.day_of_week/7)
     if btc_returns is not None:
         btc = pd.Series(btc_returns.values, index=btc_returns.index)
         aligned = pd.Series(x["time"].map(btc), index=x.index)
