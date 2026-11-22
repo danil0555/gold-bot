@@ -200,7 +200,7 @@ def fetch_okx_history(symbol, interval, start_ms, end_ms):
     inst_id = symbol.upper() + "-SWAP"
     cursor = int(end_ms) + 1
     rows = []
-    base_url = "https://www.okx.com/api/v5/market/history-candles"
+    base_url = "https://us.okx.com/api/v5/market/history-candles"
     while cursor > start_ms:
         query = urllib.parse.urlencode({
             "instId": inst_id, "bar": bar, "after": str(cursor), "limit": "100",
