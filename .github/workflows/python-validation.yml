@@ -6,7 +6,7 @@ concurrency:
 
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine]
+    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -54,6 +54,17 @@ jobs:
         if: github.ref == 'refs/heads/research/market-discovery-engine'
         run: python scripts/market_research.py --days 180 --universe 30 --min-quote-volume 5000000 --cost-bps 12 --threshold 0.58
         timeout-minutes: 60
+      - name: Run 180-day BingX-only market research
+        if: github.ref == 'refs/heads/research/bingx-only-market-model'
+        run: python scripts/market_research.py --days 180 --universe 30 --min-quote-volume 5000000 --cost-bps 12 --threshold 0.58 --bingx-only
+        timeout-minutes: 60
+      - name: Upload BingX-only research report
+        if: always() && github.ref == 'refs/heads/research/bingx-only-market-model'
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-research-bingx-only-180d
+          path: research-output/market_research_180d.json
+          if-no-files-found: warn
       - name: Upload research report
         if: always() && github.ref == 'refs/heads/research/market-discovery-engine'
         uses: actions/upload-artifact@v4
