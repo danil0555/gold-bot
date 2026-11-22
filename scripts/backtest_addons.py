@@ -67,7 +67,7 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
     # limit=1000, so a single long-range request is not reliable for paging.
     while cursor < end_ms:
         window_end = min(cursor + step * 800, end_ms)
-        wait = 1.75 - (time.monotonic() - LAST_API_REQUEST)
+        wait = 2.25 - (time.monotonic() - LAST_API_REQUEST)
         if wait > 0:
             time.sleep(wait)
         query = urllib.parse.urlencode({
@@ -87,10 +87,19 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
                 payload = json.loads(raw)
             except urllib.error.HTTPError as exc:
                 LAST_API_REQUEST = time.monotonic()
-                if exc.code not in (418, 429, 500, 502, 503, 504) or attempt == 3:
+                if exc.code == 418:
+                    raise RuntimeError(
+                        f"BingX temporarily banned this runner IP (HTTP 418) for "
+                        f"{symbol} {interval}; stop requests and retry only after cooldown"
+                    ) from exc
+                if exc.code not in (429, 500, 502, 503, 504) or attempt == 3:
                     raise
-                delay = 5 * (2 ** attempt)
-                print(f"RETRY BingX HTTP {exc.code} {symbol} {interval} in {delay}s", flush=True)
+                delay = (30 * (2 ** attempt)) if exc.code == 429 else (5 * (2 ** attempt))
+                print(
+                    f"RETRY BingX HTTP {exc.code} {symbol} {interval} "
+                    f"attempt={attempt + 1}/4 cooldown={delay}s",
+                    flush=True,
+                )
                 time.sleep(delay)
                 continue
             code = payload.get("code", 0)
@@ -98,8 +107,15 @@ def fetch_interval(symbol, interval, start_ms, end_ms):
                 break
             if str(code) not in ("100410", "100429", "100500") or attempt == 3:
                 raise RuntimeError(f"BingX {symbol} {interval}: {payload}")
-            delay = 5 * (2 ** attempt)
-            print(f"RETRY BingX code={code} {symbol} {interval} in {delay}s", flush=True)
+            # Kline endpoint is documented at 1 request/second per IP. 100410
+            # can reflect a shared GitHub-runner egress IP cooldown, so back off
+            # substantially instead of hammering the same public endpoint.
+            delay = (60 * (2 ** attempt)) if str(code) in ("100410", "100429") else (10 * (2 ** attempt))
+            print(
+                f"RETRY BingX code={code} msg={payload.get('msg', '')!r} "
+                f"{symbol} {interval} attempt={attempt + 1}/4 cooldown={delay}s",
+                flush=True,
+            )
             time.sleep(delay)
         if payload is None or payload.get("code", 0) not in (0, "0", None):
             raise RuntimeError(f"BingX {symbol} {interval}: {payload}")
