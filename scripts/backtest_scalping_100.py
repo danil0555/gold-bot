@@ -21,7 +21,7 @@ import pandas as pd
 
 BASE = "https://open-api.bingx.com"
 PATH = "/openApi/swap/v3/quote/klines"
-INTERVAL_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000}
+INTERVAL_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000}
 STRATEGIES = {
     "B_STRATEGY": ("build_signal_b", "1m"),
     "C_BREAKOUT_RETEST": ("build_signal_c_breakout_retest", "5m"),
@@ -266,7 +266,7 @@ def simulate_portfolio(trades, deposit, risk_percent, leverage, max_positions):
             else:
                 remaining.append(pos)
         open_positions = remaining
-        if len(open_positions) >= max_positions:
+        if len(open_positions) >= max_positions or any(p.get("symbol") == trade.get("symbol") for p in open_positions):
             skipped_slots += 1
             continue
         stop_pct = float(trade.get("stop_distance_pct") or 0.0) / 100.0
@@ -283,7 +283,8 @@ def simulate_portfolio(trades, deposit, risk_percent, leverage, max_positions):
         actual_risk = notional * stop_pct
         pnl = float(trade["net_r"]) * actual_risk
         open_positions.append({"exit_time": int(trade["exit_time"]),
-                               "notional": notional, "pnl_usdt": pnl})
+                               "notional": notional, "pnl_usdt": pnl,
+                               "symbol": trade.get("symbol")})
         max_open = max(max_open, len(open_positions))
         accepted.append({**trade, "notional_usdt": round(notional, 6),
                          "risk_usdt": round(actual_risk, 6), "net_pnl_usdt": round(pnl, 6)})
