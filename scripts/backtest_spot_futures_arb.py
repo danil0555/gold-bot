@@ -83,14 +83,17 @@ def unwrap_data(payload: dict[str, Any]) -> list:
     return data if isinstance(data, list) else []
 
 
-def parse_candle(row: Any, source: str) -> tuple[int, float, float] | None:
+def parse_candle(row: Any, source: str) -> tuple[int, float, float, float] | None:
+    """Return candle open time, open price, close price, and close timestamp."""
     try:
         if isinstance(row, (list, tuple)):
             stamp = int(float(row[0]))
+            open_price = float(row[1])
             close = float(row[4])
             close_time = int(float(row[6])) if len(row) > 6 else stamp + STEP_MS - 1
         elif isinstance(row, dict):
             stamp = int(float(row.get("time", row.get("openTime", row.get("t", 0)))))
+            open_price = float(row["open"])
             close = float(row["close"])
             close_time = int(float(row.get("closeTime", stamp + STEP_MS - 1)))
         else:
@@ -99,22 +102,23 @@ def parse_candle(row: Any, source: str) -> tuple[int, float, float] | None:
             stamp *= 1000
         if close_time < 10_000_000_000:
             close_time *= 1000
-        if stamp <= 0 or close <= 0 or not math.isfinite(close):
+        if (stamp <= 0 or open_price <= 0 or close <= 0
+                or not math.isfinite(open_price) or not math.isfinite(close)):
             return None
-        return stamp, close, close_time
+        return stamp, open_price, close, close_time
     except (KeyError, TypeError, ValueError, OverflowError):
         return None
 
 
 def fetch_candles(symbol: str, source: str, start_ms: int, end_ms: int,
-                  now_ms: int) -> dict[int, float]:
+                  now_ms: int) -> dict[int, dict[str, float]]:
     if source == "spot":
         path = "/openApi/spot/v2/market/kline"
     elif source == "swap":
         path = "/openApi/swap/v3/quote/klines"
     else:
         raise ValueError("source must be spot or swap")
-    result: dict[int, float] = {}
+    result: dict[int, dict[str, float]] = {}
     cursor = start_ms
     while cursor < end_ms:
         window_end = min(cursor + PAGE_SIZE * STEP_MS, end_ms)
@@ -128,8 +132,8 @@ def fetch_candles(symbol: str, source: str, start_ms: int, end_ms: int,
             continue
         parsed = [parse_candle(row, source) for row in batch]
         parsed = [row for row in parsed if row and cursor <= row[0] < window_end and row[2] < now_ms - 2_000]
-        for stamp, close, _ in parsed:
-            result[stamp] = close
+        for stamp, open_price, close, _ in parsed:
+            result[stamp] = {"open": open_price, "close": close}
         newest = max((row[0] for row in parsed), default=0)
         if newest <= cursor:
             cursor = window_end
@@ -181,11 +185,16 @@ def simulate_cash_carry(
     swap_fee: float = SWAP_FEE,
     slippage_pct: float = SLIPPAGE_PCT,
 ) -> dict[str, Any]:
-    """Simulate LONG spot + SHORT perpetual using only data known by each bar."""
+    """Use completed closes for signals and the NEXT candle open for execution.
+
+    This avoids the optimistic same-close fill that is impossible to guarantee
+    after a candle-close signal becomes known.
+    """
     if notional <= 0 or max_hold_hours <= 0:
         raise ValueError("notional and max_hold_hours must be positive")
     if not 0 <= target_basis_pct < min_entry_basis_pct:
         raise ValueError("target basis must be below entry threshold")
+    ordered_bars = sorted(bars, key=lambda x: x["time"])
     funding = sorted(funding, key=lambda x: x["time"])
     funding_index = 0
     latest_settled_rate = None
@@ -196,37 +205,58 @@ def simulate_cash_carry(
     open_position_mark = None
     slip = slippage_pct / 100
 
-    for bar in sorted(bars, key=lambda x: x["time"]):
-        decision_time = int(bar["time"]) + STEP_MS
-        spot_close = float(bar["spot"])
-        swap_close = float(bar["swap"])
-        if spot_close <= 0 or swap_close <= 0:
-            continue
-        basis_pct = (swap_close / spot_close - 1) * 100
-
-        while funding_index < len(funding) and funding[funding_index]["time"] <= decision_time:
+    def apply_funding(until_time: int, fallback_swap_price: float) -> None:
+        nonlocal funding_index, latest_settled_rate
+        while (funding_index < len(funding)
+               and funding[funding_index]["time"] <= until_time):
             event = funding[funding_index]
             latest_settled_rate = float(event["rate"])
             if position is not None and event["time"] > position["entry_time"]:
-                mark = float(event.get("mark") or swap_close)
+                mark = float(event.get("mark") or fallback_swap_price)
                 position["funding_usdt"] += position["quantity"] * mark * float(event["rate"])
             funding_index += 1
 
+    for index, bar in enumerate(ordered_bars):
+        signal_time = int(bar["time"]) + STEP_MS
+        spot_close = float(bar["spot_close"])
+        swap_close = float(bar["swap_close"])
+        if spot_close <= 0 or swap_close <= 0:
+            continue
+        signal_basis_pct = (swap_close / spot_close - 1) * 100
+        next_bar = ordered_bars[index + 1] if index + 1 < len(ordered_bars) else None
+
+        # Funding settled by the completed candle close belongs to any position
+        # that was already open at that settlement timestamp.
+        apply_funding(signal_time, swap_close)
+
+        # No next candle means there is no defensible next-open execution price.
+        if next_bar is None:
+            continue
+        fill_time = int(next_bar["time"])
+        spot_open = float(next_bar["spot_open"])
+        swap_open = float(next_bar["swap_open"])
+        if spot_open <= 0 or swap_open <= 0:
+            continue
+
         if position is None:
-            if decision_time - last_exit_time < cooldown_minutes * 60_000:
+            if signal_time - last_exit_time < cooldown_minutes * 60_000:
                 continue
             if latest_settled_rate is None or latest_settled_rate <= 0:
                 continue
-            spot_entry = spot_close * (1 + slip)
-            swap_entry = swap_close * (1 - slip)
+            # The signal is known at this close; execution is modeled at the
+            # next candle open, with adverse slippage on both legs.
+            spot_entry = spot_open * (1 + slip)
+            swap_entry = swap_open * (1 - slip)
             executable_basis = (swap_entry / spot_entry - 1) * 100
-            if executable_basis < min_entry_basis_pct:
+            if signal_basis_pct < min_entry_basis_pct or executable_basis < min_entry_basis_pct:
                 continue
             quantity = notional / spot_entry
             entry_fees = (spot_entry * quantity * spot_fee
                           + swap_entry * quantity * swap_fee)
             position = {
-                "entry_time": decision_time,
+                "entry_signal_time": signal_time,
+                "entry_time": fill_time,
+                "entry_signal_basis_pct": signal_basis_pct,
                 "entry_basis_pct": executable_basis,
                 "spot_entry": spot_entry,
                 "swap_entry": swap_entry,
@@ -236,17 +266,20 @@ def simulate_cash_carry(
             }
             continue
 
-        held_ms = decision_time - position["entry_time"]
+        held_ms = signal_time - position["entry_time"]
         exit_reason = None
-        if basis_pct <= target_basis_pct:
+        if signal_basis_pct <= target_basis_pct:
             exit_reason = "basis_target"
         elif held_ms >= max_hold_hours * 3_600_000:
             exit_reason = "max_hold"
         if exit_reason is None:
             continue
 
-        spot_exit = spot_close * (1 - slip)
-        swap_exit = swap_close * (1 + slip)
+        # If there is a data gap, include any settlement before the next-open
+        # fill. With contiguous hourly candles this is normally a no-op.
+        apply_funding(fill_time, swap_open)
+        spot_exit = spot_open * (1 - slip)
+        swap_exit = swap_open * (1 + slip)
         quantity = position["quantity"]
         spot_pnl = quantity * (spot_exit - position["spot_entry"])
         swap_pnl = quantity * (position["swap_entry"] - swap_exit)
@@ -256,12 +289,17 @@ def simulate_cash_carry(
         fees = position["entry_fees"] + exit_fees
         funding_pnl = position["funding_usdt"]
         net_pnl = gross_pnl + funding_pnl - fees
+        actual_exit_basis_pct = (swap_exit / spot_exit - 1) * 100
         trades.append({
+            "entry_signal_time": position["entry_signal_time"],
             "entry_time": position["entry_time"],
-            "exit_time": decision_time,
+            "exit_signal_time": signal_time,
+            "exit_time": fill_time,
+            "entry_signal_basis_pct": position["entry_signal_basis_pct"],
             "entry_basis_pct": position["entry_basis_pct"],
-            "exit_basis_pct": basis_pct,
-            "hold_hours": held_ms / 3_600_000,
+            "exit_signal_basis_pct": signal_basis_pct,
+            "exit_basis_pct": actual_exit_basis_pct,
+            "hold_hours": (fill_time - position["entry_time"]) / 3_600_000,
             "gross_pnl_usdt": gross_pnl,
             "funding_pnl_usdt": funding_pnl,
             "fees_usdt": fees,
@@ -270,41 +308,41 @@ def simulate_cash_carry(
             "exit_reason": exit_reason,
         })
         position = None
-        last_exit_time = decision_time
+        last_exit_time = fill_time
 
-    if position is not None:
+    if position is not None and ordered_bars:
         open_at_end = 1
-        if bars:
-            last_bar = max(bars, key=lambda x: x["time"])
-            mark_time = int(last_bar["time"]) + STEP_MS
-            spot_mark = float(last_bar["spot"])
-            swap_mark = float(last_bar["swap"])
-            spot_exit = spot_mark * (1 - slip)
-            swap_exit = swap_mark * (1 + slip)
-            quantity = position["quantity"]
-            gross = (quantity * (spot_exit - position["spot_entry"])
-                     + quantity * (position["swap_entry"] - swap_exit))
-            exit_fees = (spot_exit * quantity * spot_fee
-                         + swap_exit * quantity * swap_fee)
-            fees = position["entry_fees"] + exit_fees
-            net = gross + position["funding_usdt"] - fees
-            open_position_mark = {
-                "mark_time": mark_time,
-                "hold_hours": (mark_time - position["entry_time"]) / 3_600_000,
-                "entry_basis_pct": position["entry_basis_pct"],
-                "current_basis_pct": (swap_mark / spot_mark - 1) * 100,
-                "gross_pnl_usdt": gross,
-                "funding_pnl_usdt": position["funding_usdt"],
-                "estimated_total_fees_usdt": fees,
-                "net_mark_to_market_usdt": net,
-                "note": "Unclosed position marked at last completed hourly close with modeled exit slippage and fees",
-            }
+        last_bar = ordered_bars[-1]
+        mark_time = int(last_bar["time"]) + STEP_MS
+        spot_mark = float(last_bar["spot_close"])
+        swap_mark = float(last_bar["swap_close"])
+        spot_exit = spot_mark * (1 - slip)
+        swap_exit = swap_mark * (1 + slip)
+        quantity = position["quantity"]
+        gross = (quantity * (spot_exit - position["spot_entry"])
+                 + quantity * (position["swap_entry"] - swap_exit))
+        exit_fees = (spot_exit * quantity * spot_fee
+                     + swap_exit * quantity * swap_fee)
+        fees = position["entry_fees"] + exit_fees
+        net = gross + position["funding_usdt"] - fees
+        open_position_mark = {
+            "mark_time": mark_time,
+            "hold_hours": (mark_time - position["entry_time"]) / 3_600_000,
+            "entry_signal_time": position["entry_signal_time"],
+            "entry_time": position["entry_time"],
+            "entry_basis_pct": position["entry_basis_pct"],
+            "current_basis_pct": (swap_mark / spot_mark - 1) * 100,
+            "gross_pnl_usdt": gross,
+            "funding_pnl_usdt": position["funding_usdt"],
+            "estimated_total_fees_usdt": fees,
+            "net_mark_to_market_usdt": net,
+            "note": "Unclosed position marked at last completed hourly close with modeled exit slippage and fees",
+        }
     return {
         "trades": trades,
         "open_at_end": open_at_end,
         "open_position_mark": open_position_mark,
     }
-
 
 def metric_pack(trades: list[dict[str, Any]]) -> dict[str, Any]:
     values = [float(t["net_pnl_usdt"]) for t in trades]
@@ -350,8 +388,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 f"{symbol}: only {len(common)}/{expected} aligned candles ({coverage:.1%}); "
                 "refusing to publish incomplete backtest"
             )
-        bars = [{"time": stamp, "spot": spot[stamp], "swap": swap[stamp]}
-                for stamp in common]
+        bars = [{
+            "time": stamp,
+            "spot_open": spot[stamp]["open"],
+            "spot_close": spot[stamp]["close"],
+            "swap_open": swap[stamp]["open"],
+            "swap_close": swap[stamp]["close"],
+        } for stamp in common]
         simulation = simulate_cash_carry(
             bars, funding, notional=args.notional,
             min_entry_basis_pct=args.min_entry_basis,
@@ -392,6 +435,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "spot_taker_fee": args.spot_fee,
                 "swap_taker_fee": args.swap_fee,
                 "slippage_per_fill_pct": args.slippage_pct,
+                "signal_execution_model": "completed 1h close signal; next 1h candle open fill plus adverse slippage",
                 "historical_order_book": "not available; synthetic slippage used",
             },
         }
