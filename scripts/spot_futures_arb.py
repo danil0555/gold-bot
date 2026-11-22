@@ -108,6 +108,7 @@ def calculate_cash_carry(
     swap_taker_fee: float = DEFAULT_SWAP_TAKER_FEE,
     funding_haircut: float = DEFAULT_FUNDING_HAIRCUT,
     stress_widening_bps: float = DEFAULT_STRESS_WIDENING_BPS,
+    exit_basis_target_pct: float = 0.0,
 ) -> dict[str, Any]:
     """Evaluate LONG spot + SHORT perpetual with executable depth on all four fills.
 
@@ -143,19 +144,31 @@ def calculate_cash_carry(
     # Funding is settled on the swap notional. Positive rate pays the short side.
     funding_per_period = max(0.0, funding_rate) * swap_entry * quantity
     expected_funding = funding_per_period * funding_periods * funding_haircut
-    expected_net = spot_pnl + swap_pnl + expected_funding - fees
 
-    # Stress test: retain spot exit price, but assume the futures basis widens
-    # adversely by the configured number of basis points before closing.
-    stressed_swap_exit = spot_exit * (1 + (exit_basis_pct + stress_widening_bps / 100) / 100)
-    stressed_swap_pnl = quantity * (swap_entry - stressed_swap_exit)
-    stressed_swap_exit_fee = stressed_swap_exit * quantity * swap_taker_fee
-    stressed_fees = (entry_spot_fee + exit_spot_fee + entry_swap_fee
-                     + stressed_swap_exit_fee)
-    stressed_net = spot_pnl + stressed_swap_pnl + expected_funding - stressed_fees
+    # Scenario A: hold the spot reference price flat and let the futures basis
+    # converge to the configured target. This isolates basis PnL from direction.
+    assumed_exit_spot = spot_entry
+    assumed_exit_swap = assumed_exit_spot * (1 + exit_basis_target_pct / 100)
+    expected_basis_capture = quantity * (swap_entry - assumed_exit_swap)
+    expected_entry_fees = spot_entry * quantity * spot_taker_fee + swap_entry * quantity * swap_taker_fee
+    expected_exit_fees = assumed_exit_spot * quantity * spot_taker_fee + assumed_exit_swap * quantity * swap_taker_fee
+    expected_fees = expected_entry_fees + expected_exit_fees
+    expected_net = expected_basis_capture + expected_funding - expected_fees
 
-    gross_basis_capture = spot_pnl + swap_pnl
-    total_costs = fees
+    # Scenario B: adverse basis expansion relative to the entry basis.
+    stressed_exit_basis_pct = entry_basis_pct + stress_widening_bps / 100
+    stressed_swap_exit = assumed_exit_spot * (1 + stressed_exit_basis_pct / 100)
+    stressed_basis_pnl = quantity * (swap_entry - stressed_swap_exit)
+    stressed_exit_fees = (assumed_exit_spot * quantity * spot_taker_fee
+                          + stressed_swap_exit * quantity * swap_taker_fee)
+    stressed_fees = expected_entry_fees + stressed_exit_fees
+    stressed_net = stressed_basis_pnl + expected_funding - stressed_fees
+
+    current_close_fees = (
+        spot_entry * quantity * spot_taker_fee + swap_entry * quantity * swap_taker_fee
+        + spot_exit * quantity * spot_taker_fee + swap_exit * quantity * swap_taker_fee
+    )
+    current_close_net = spot_pnl + swap_pnl - current_close_fees
     return {
         "symbol": symbol,
         "direction": "LONG_SPOT_SHORT_PERPETUAL",
@@ -167,26 +180,30 @@ def calculate_cash_carry(
         "swap_exit_vwap_now": swap_exit,
         "entry_basis_pct": entry_basis_pct,
         "exit_basis_pct_now": exit_basis_pct,
+        "exit_basis_target_pct": exit_basis_target_pct,
+        "stressed_exit_basis_pct": stressed_exit_basis_pct,
         "funding_rate_current": funding_rate,
         "funding_periods_assumed": funding_periods,
         "funding_haircut": funding_haircut,
         "expected_funding_usdt": expected_funding,
         "spot_pnl_if_closed_now_usdt": spot_pnl,
         "swap_pnl_if_closed_now_usdt": swap_pnl,
-        "basis_pnl_if_closed_now_usdt": gross_basis_capture,
-        "estimated_round_trip_fees_usdt": total_costs,
-        "expected_net_if_closed_now_usdt": spot_pnl + swap_pnl - fees,
-        "expected_net_at_current_basis_assumption_usdt": expected_net,
+        "basis_pnl_if_closed_now_usdt": spot_pnl + swap_pnl,
+        "expected_basis_capture_usdt": expected_basis_capture,
+        "estimated_round_trip_fees_usdt": expected_fees,
+        "expected_net_if_closed_now_usdt": current_close_net,
+        "expected_net_at_basis_target_usdt": expected_net,
         "stress_widening_bps": stress_widening_bps,
         "stressed_net_usdt": stressed_net,
         "net_return_pct_of_notional": expected_net / notional * 100,
         "stressed_return_pct_of_notional": stressed_net / notional * 100,
         "assumptions": [
-            "current funding rate persists for the assumed number of settlements",
-            "funding estimate is haircut; future funding is not guaranteed",
-            "stressed exit widens the observed basis by the configured amount",
+            "spot reference price is held flat to isolate basis PnL",
+            "futures basis is assumed to converge to the configured target; this is not guaranteed",
+            "current funding rate is assumed for the specified settlements and then haircut",
+            "stress scenario widens the basis beyond entry by the configured basis points",
             "fees use configured taker rates; actual account tier may differ",
-            "no borrow interest, transfer cost, tax, or liquidation risk is modeled",
+            "no borrow interest, tax, or liquidation risk is modeled",
         ],
     }
 
@@ -263,7 +280,7 @@ def scan_symbols(symbols: tuple[str, ...] = DEFAULT_SYMBOLS,
             report["swap_book_time"] = snap["swap_book_time"]
             report["eligible_candidate"] = (
                 snap["funding_rate"] > 0
-                and report["expected_net_at_current_basis_assumption_usdt"] > min_expected_net_usdt
+                and report["expected_net_at_basis_target_usdt"] > min_expected_net_usdt
                 and report["stressed_net_usdt"] > 0
             )
             reports.append(report)
