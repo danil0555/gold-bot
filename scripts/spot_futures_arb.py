@@ -153,20 +153,32 @@ def calculate_cash_carry(
     funding_per_period = max(0.0, funding_rate) * swap_entry * quantity
     expected_funding = funding_per_period * funding_periods * funding_haircut
 
-    # Scenario A: hold the spot reference price flat and let the futures basis
-    # converge to the configured target. This isolates basis PnL from direction.
-    assumed_exit_spot = spot_entry
-    assumed_exit_swap = assumed_exit_spot * (1 + exit_basis_target_pct / 100)
-    expected_basis_capture = quantity * (swap_entry - assumed_exit_swap)
+    # Scenario A: hold the spot midpoint flat and let the futures basis
+    # converge to target. Model exit bid/ask execution using current half-spreads;
+    # assuming midpoint fills at exit would systematically overstate expectancy.
+    spot_mid = (spot_bids[0][0] + spot_asks[0][0]) / 2
+    swap_mid = (swap_bids[0][0] + swap_asks[0][0]) / 2
+    spot_half_spread = max(0.0, (spot_asks[0][0] - spot_bids[0][0]) / (2 * spot_mid))
+    swap_half_spread = max(0.0, (swap_asks[0][0] - swap_bids[0][0]) / (2 * swap_mid))
+    assumed_exit_spot = spot_mid * (1 - spot_half_spread)
+    assumed_exit_swap = spot_mid * (1 + exit_basis_target_pct / 100) * (1 + swap_half_spread)
+    expected_basis_capture = (
+        quantity * (assumed_exit_spot - spot_entry)
+        + quantity * (swap_entry - assumed_exit_swap)
+    )
     expected_entry_fees = spot_entry * quantity * spot_taker_fee + swap_entry * quantity * swap_taker_fee
     expected_exit_fees = assumed_exit_spot * quantity * spot_taker_fee + assumed_exit_swap * quantity * swap_taker_fee
     expected_fees = expected_entry_fees + expected_exit_fees
     expected_net = expected_basis_capture + expected_funding - expected_fees
 
-    # Scenario B: adverse basis expansion relative to the entry basis.
+    # Scenario B: adverse basis expansion relative to the entry basis. Keep
+    # the same estimated exit spreads and charge fees on executable prices.
     stressed_exit_basis_pct = entry_basis_pct + stress_widening_bps / 100
-    stressed_swap_exit = assumed_exit_spot * (1 + stressed_exit_basis_pct / 100)
-    stressed_basis_pnl = quantity * (swap_entry - stressed_swap_exit)
+    stressed_swap_exit = spot_mid * (1 + stressed_exit_basis_pct / 100) * (1 + swap_half_spread)
+    stressed_basis_pnl = (
+        quantity * (assumed_exit_spot - spot_entry)
+        + quantity * (swap_entry - stressed_swap_exit)
+    )
     stressed_exit_fees = (assumed_exit_spot * quantity * spot_taker_fee
                           + stressed_swap_exit * quantity * swap_taker_fee)
     stressed_fees = expected_entry_fees + stressed_exit_fees
@@ -198,6 +210,9 @@ def calculate_cash_carry(
         "swap_pnl_if_closed_now_usdt": swap_pnl,
         "basis_pnl_if_closed_now_usdt": spot_pnl + swap_pnl,
         "expected_basis_capture_usdt": expected_basis_capture,
+        "assumed_exit_spot_bid": assumed_exit_spot,
+        "assumed_exit_swap_ask": assumed_exit_swap,
+        "estimated_exit_spread_cost_usdt": quantity * (spot_mid - assumed_exit_spot) + quantity * (assumed_exit_swap - spot_mid * (1 + exit_basis_target_pct / 100)),
         "estimated_round_trip_fees_usdt": expected_fees,
         "expected_net_if_closed_now_usdt": current_close_net,
         "expected_net_at_basis_target_usdt": expected_net,
