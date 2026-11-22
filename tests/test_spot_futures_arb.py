@@ -68,7 +68,7 @@ def test_stress_scenario_is_not_better_than_base_scenario():
         quote_notional=1000, spot_taker_fee=0.0001, swap_taker_fee=0.0001,
         stress_widening_bps=50,
     )
-    assert result["stressed_net_usdt"] < result["expected_net_at_current_basis_assumption_usdt"]
+    assert result["stressed_net_usdt"] < result["expected_net_at_basis_target_usdt"]
 
 
 def test_order_book_parser_accepts_bingx_swap_timestamp_field_T():
@@ -83,3 +83,17 @@ def test_order_book_parser_accepts_bingx_swap_timestamp_field_T():
 def test_order_book_parser_requires_timestamp_and_depth():
     with pytest.raises(MarketDataError):
         parse_order_book({"code": 0, "data": {"bids": [], "asks": []}}, "test")
+
+
+def test_basis_convergence_scenario_captures_positive_entry_premium():
+    b = books()
+    result = calculate_cash_carry(
+        "BTC-USDT", b["spot_bids"], b["spot_asks"], b["swap_bids"],
+        b["swap_asks"], funding_rate=0, funding_periods=0,
+        quote_notional=1000, spot_taker_fee=0, swap_taker_fee=0,
+        stress_widening_bps=0, exit_basis_target_pct=0,
+    )
+    assert result["expected_basis_capture_usdt"] > 0
+    assert result["expected_net_at_basis_target_usdt"] == pytest.approx(
+        result["expected_basis_capture_usdt"]
+    )
