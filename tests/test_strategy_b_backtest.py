@@ -255,3 +255,39 @@ def test_gate_futures_candle_normalization(monkeypatch):
     assert len(frame) == 1
     assert frame.iloc[0]["close"] == 0.505
     assert frame.iloc[0]["volume"] == 100.0
+
+
+
+def test_okx_history_candle_normalization_and_pagination(monkeypatch):
+    import json
+    from contextlib import contextmanager
+    from urllib.parse import parse_qs, urlparse
+
+    from scripts import backtest_strategy_b as backtest
+
+    base = 1_700_000_000_000
+    step = 60_000
+    seen = []
+
+    @contextmanager
+    def fake_urlopen(request, timeout=25):
+        query = parse_qs(urlparse(request.full_url).query)
+        seen.append(query)
+        cursor = int(query["after"][0])
+        ts = min(base + step, cursor - 1)
+        rows = [[str(ts), "0.50", "0.51", "0.49", "0.505",
+                 "200", "100", "50.5", "1"]]
+        class Response:
+            def read(self):
+                return json.dumps({"code": "0", "msg": "", "data": rows}).encode()
+        yield Response()
+
+    monkeypatch.setattr(backtest.urllib.request, "urlopen", fake_urlopen)
+    frame = backtest.fetch_okx_history(
+        "XRP-USDT", "1m", base, base + 2 * step
+    )
+    assert len(frame) == 1
+    assert frame.iloc[0]["close"] == 0.505
+    assert frame.iloc[0]["volume"] == 100.0
+    assert seen[0]["instId"] == ["XRP-USDT-SWAP"]
+    assert seen[0]["bar"] == ["1m"]
