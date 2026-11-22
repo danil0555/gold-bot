@@ -12,6 +12,9 @@ import json
 import math
 import os
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,6 +82,58 @@ def load_strategy_b():
     return namespace
 
 
+def fetch_binance_history(symbol, interval, start_ms, end_ms):
+    """Fetch public Binance USD-M klines as an explicitly labelled proxy dataset."""
+    step = TF_MS[interval]
+    cursor = int(start_ms)
+    rows = []
+    base_url = "https://fapi.binance.com/fapi/v1/klines"
+    while cursor < end_ms:
+        query = urllib.parse.urlencode({
+            "symbol": symbol.replace("-", "").upper(), "interval": interval,
+            "startTime": cursor, "endTime": int(end_ms) - 1, "limit": 1500,
+        })
+        request = urllib.request.Request(base_url + "?" + query, headers={
+            "User-Agent": "gold-bot-readonly-backtest/1.0",
+        })
+        try:
+            with urllib.request.urlopen(request, timeout=25) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 418:
+                raise RuntimeError("Binance temporarily banned this runner IP (HTTP 418)") from exc
+            if exc.code == 429:
+                raise RuntimeError("Binance rate limit reached (HTTP 429); stopping safely") from exc
+            raise
+        if isinstance(payload, dict):
+            raise RuntimeError(f"Binance kline error for {symbol} {interval}: {payload}")
+        if not payload:
+            break
+        parsed = []
+        for row in payload:
+            if not isinstance(row, (list, tuple)) or len(row) < 7:
+                continue
+            open_time, close_time = int(row[0]), int(row[6])
+            if cursor <= open_time < end_ms:
+                parsed.append((open_time, float(row[1]), float(row[2]), float(row[3]),
+                               float(row[4]), float(row[5]), close_time))
+        if not parsed:
+            break
+        rows.extend(parsed)
+        next_cursor = parsed[-1][0] + step
+        if next_cursor <= cursor:
+            raise RuntimeError(f"Non-advancing Binance pagination for {symbol} {interval}")
+        cursor = next_cursor
+        if len(payload) < 1500:
+            break
+        time.sleep(0.25)
+    frame = pd.DataFrame(rows, columns=[
+        "open_time", "open", "high", "low", "close", "volume", "close_time"
+    ])
+    if frame.empty:
+        raise RuntimeError(f"No Binance candles returned for {symbol} {interval}")
+    return frame.drop_duplicates("open_time").sort_values("open_time").reset_index(drop=True)
+
 def enrich_once(frame, enrich_fn):
     required = {
         "ema20", "ema50", "ema200", "rsi", "atr", "adx", "macd",
@@ -90,8 +145,8 @@ def enrich_once(frame, enrich_fn):
     return enrich_fn(frame)
 
 
-def fetch_history(symbol, interval, start_ms, end_ms, now_ms):
-    raw = market_data.fetch_interval(symbol, interval, start_ms, end_ms)
+def fetch_history(symbol, interval, start_ms, end_ms, now_ms, source):
+    raw = fetch_binance_history(symbol, interval, start_ms, end_ms) if source == "binance" else market_data.fetch_interval(symbol, interval, start_ms, end_ms)
     frame = market_data.filter_closed_candles(raw, now_ms)
     expected = max(1, int((end_ms - start_ms) / TF_MS[interval]))
     coverage = len(frame) / expected
@@ -172,7 +227,7 @@ def run(args):
         for tf in ("1m", "5m", "15m", "1h", "4h"):
             print(f"FETCH_INTERVAL {symbol} {tf}", flush=True)
             frame, coverage = fetch_history(
-                symbol, tf, history_start, now_ms, now_ms
+                symbol, tf, history_start, now_ms, now_ms, args.source
             )
             frames[tf] = original_enrich(frame)
             coverage_report[symbol][tf] = {
@@ -265,6 +320,8 @@ def run(args):
     report = {
         "strategy": "B",
         "source": "exact build_signal_b and indicator functions extracted from main.py",
+        "market_data_source": args.source,
+        "market_data_note": ("Binance USD-M futures candles; price/volume may differ from BingX live feed." if args.source == "binance" else "BingX USDT-M futures candles."),
         "period_days": args.days,
         "warmup_days": args.warmup_days,
         "symbols": symbols,
@@ -340,6 +397,7 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--warmup-days", type=int, default=60)
     parser.add_argument("--symbols", default="BTC-USDT,ETH-USDT,SOL-USDT")
+    parser.add_argument("--source", choices=("bingx", "binance"), default="bingx")
     args = parser.parse_args()
     if not 1 <= args.days <= 60:
         parser.error("--days must be between 1 and 60")
