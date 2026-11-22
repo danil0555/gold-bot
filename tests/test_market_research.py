@@ -67,8 +67,10 @@ def test_panel_labels_use_forward_returns_and_cost_barrier():
         },
     )
     row = panel.loc[panel["symbol"] == "BTC-USDT"].iloc[100]
-    expected = btc.loc[101, "close"] / btc.loc[100, "close"] - 1
+    expected = btc.loc[101, "close"] / btc.loc[101, "open"] - 1
     assert abs(row["fwd_1h"] - expected) < 1e-12
+    # Entry must use the next candle open, never the signal candle close.
+    assert abs(row["fwd_1h"] - (btc.loc[101, "close"] / btc.loc[101, "open"] - 1)) < 1e-12
     # A positive move smaller than the cost barrier is still part of the
     # directional dataset; costs belong in PnL evaluation, not sample filtering.
     assert row["label_1h"] == 1.0
