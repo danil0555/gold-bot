@@ -206,6 +206,16 @@ def test_individual_feature_score_uses_validation_threshold_and_reports_test_met
 
 
 
+def test_forward_labels_reject_missing_hourly_candles():
+    btc = sample_frame(periods=260)
+    btc = btc.drop(index=101).reset_index(drop=True)
+    panel = build_panel({"BTC-USDT": btc}, cost=0.0012, binance_frames={})
+    row_before_gap = panel.loc[panel["time"] == 1_700_000_000_000 + 100*3_600_000].iloc[0]
+    # The next available row is not the next hour, so an executable entry is unknown.
+    assert pd.isna(row_before_gap["fwd_1h"])
+    assert pd.isna(row_before_gap["fwd_4h"])
+
+
 def test_feature_group_mapping_covers_all_supported_feature_families():
     from scripts.market_research import _feature_group_map
 
