@@ -3,7 +3,7 @@ import zipfile
 import numpy as np
 import pandas as pd
 
-from scripts.market_research import _select_available_features, add_features, build_panel, parse_binance_kline_archive, _select_threshold, add_bingx_flow_features, add_bingx_funding_features, BASE_FEATURES, BINGX_FLOW_FEATURES, FUNDING_FEATURES, CROSS_VENUE_FEATURES
+from scripts.market_research import fetch_funding_rates, _select_available_features, add_features, build_panel, parse_binance_kline_archive, _select_threshold, add_bingx_flow_features, add_bingx_funding_features, BASE_FEATURES, BINGX_FLOW_FEATURES, FUNDING_FEATURES, CROSS_VENUE_FEATURES
 
 
 def sample_frame(periods=260, offset=0.0):
@@ -222,3 +222,25 @@ def test_individual_feature_score_uses_validation_threshold_and_reports_test_met
     assert scores[0]["feature"] == "signal"
     assert scores[0]["test_metrics_12bps"]["observations"] == 125
     assert "test_spearman_vs_forward_return" in scores[0]
+
+
+
+def test_funding_history_fetch_uses_bounded_non_overflow_windows(monkeypatch):
+    calls = []
+    def fake_get_json(path, params):
+        calls.append((path, dict(params)))
+        stamp = int(params["startTime"]) + 1
+        return {"code": 0, "data": [{
+            "fundingTime": stamp,
+            "fundingRate": "0.0001",
+        }]}
+
+    import scripts.market_research as research
+    monkeypatch.setattr(research, "get_json", fake_get_json)
+    start = 1_700_000_000_000
+    end = start + 65 * 86_400_000
+    result = fetch_funding_rates("BTC-USDT", start, end)
+    assert len(calls) == 3
+    assert all(call[1]["limit"] == 1000 for call in calls)
+    assert all(call[1]["endTime"] - call[1]["startTime"] <= 30 * 86_400_000 for call in calls)
+    assert len(result) == 3
