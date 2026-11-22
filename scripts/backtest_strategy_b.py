@@ -446,13 +446,16 @@ def run(args):
         "symbols": symbols,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "method": (
-            "Only fully closed BingX USDT-M candles; indicators precomputed causally; "
-            "at each 1m close use the latest closed 1m/5m/15m/1h/4h candles; signal "
-            "entry at next 1m open; 0.5R maximum entry drift; live 30m per-symbol/side "
-            "cooldown and setup-key deduplication; 1.8R TP1 on 70%, 3R TP2 on 30%; "
-            "conservative stop-first intrabar; adverse half-spread plus slippage on "
-            "each fill; 0.05% taker fee each side; funding excluded. The live "
-            "15-symbol scan cap is not modeled in this focused 3-symbol study."
+            "Only fully closed candles from the selected public futures data source; indicators "
+            "precomputed causally; at each 1m close use the latest closed 1m/5m/15m/1h/4h "
+            "candles. Market entries use the next 1m open; level entries wait for a zone "
+            "touch and a later closed 5m candle satisfying the same EMA/MACD/RSI checks, "
+            "then use the next 1m open only if it remains inside the zone. Level-entry "
+            "wait is capped at the configured number of minutes. Live 30m per-symbol/side "
+            "cooldown and setup-key deduplication; original SL/TP levels retained; 1.8R "
+            "TP1 on 70%, 3R TP2 on 30%; conservative stop-first intrabar; adverse "
+            "half-spread plus slippage on each fill; 0.05% taker fee each side; funding "
+            "excluded. The live 15-symbol scan cap is not modeled in this focused study."
         ),
         "cost_assumptions": {
             "spread_pct": 0.04,
