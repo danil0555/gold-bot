@@ -471,6 +471,6 @@ if __name__ == "__main__":
     parser.add_argument("--leverage", type=float, default=5.0)
     parser.add_argument("--max-positions", type=int, default=5)
     args = parser.parse_args()
-    if not 1 <= args.days <= 7:
-        parser.error("--days must be between 1 and 7")
+    if not 1 <= args.days <= 30:
+        parser.error("--days must be between 1 and 30")
     run(args)
