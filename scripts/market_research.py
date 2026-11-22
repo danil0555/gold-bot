@@ -27,6 +27,10 @@ PAGE_CANDLES = 800
 REQUEST_PAUSE = 1.05
 LAST_REQUEST = 0.0
 STABLE_BASES = {"USDC", "USDE", "FDUSD", "TUSD", "USDP", "DAI", "BUSD"}
+BINANCE_BASE = "https://fapi.binance.com"
+BINANCE_EXCHANGE_INFO = "/fapi/v1/exchangeInfo"
+BINANCE_KLINES = "/fapi/v1/klines"
+BINANCE_LAST_REQUEST = 0.0
 
 
 def _rows(payload):
@@ -85,8 +89,45 @@ def _number(row, *keys):
     return 0.0
 
 
+def get_binance_json(path, params=None, retries=4):
+    global BINANCE_LAST_REQUEST
+    params = params or {}
+    query = urllib.parse.urlencode(params)
+    url = BINANCE_BASE + path + ("?" + query if query else "")
+    last_error = None
+    for attempt in range(retries):
+        pause = 0.15 - (time.monotonic() - BINANCE_LAST_REQUEST)
+        if pause > 0:
+            time.sleep(pause)
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "gold-bot-cross-venue-research/1.0"}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=25) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            BINANCE_LAST_REQUEST = time.monotonic()
+            if isinstance(payload, dict) and payload.get("code") not in (None, 0, "0"):
+                raise RuntimeError(f"Binance API error {payload.get('code')}: {payload.get('msg')}")
+            return payload
+        except Exception as exc:
+            BINANCE_LAST_REQUEST = time.monotonic()
+            last_error = exc
+            if attempt + 1 >= retries:
+                break
+            time.sleep(min(2 ** attempt, 8))
+    raise RuntimeError(f"Binance request failed: {url}: {last_error}") from last_error
+
+
 def discover_universe(limit=30, min_quote_volume=5_000_000):
-    """Discover today's liquid USDT perpetuals. This is not a historical universe."""
+    """Today's liquid BingX contracts intersected with active Binance USDT-M crypto perps."""
+    exchange_info = get_binance_json(BINANCE_EXCHANGE_INFO)
+    eligible = {
+        str(item.get("symbol", "")).upper()
+        for item in exchange_info.get("symbols", [])
+        if item.get("contractType") == "PERPETUAL"
+        and item.get("quoteAsset") == "USDT"
+        and item.get("status") == "TRADING"
+    }
     rows = _rows(get_json(TICKER_PATH))
     ranked = []
     for row in rows:
@@ -96,12 +137,10 @@ def discover_universe(limit=30, min_quote_volume=5_000_000):
         if not symbol.endswith("-USDT"):
             continue
         base = symbol.split("-", 1)[0]
-        if base in STABLE_BASES or not base:
+        if base in STABLE_BASES or not base or symbol.replace("-", "") not in eligible:
             continue
         last = _number(row, "lastPrice", "last", "close")
-        quote_volume = _number(
-            row, "quoteVolume", "turnover", "quoteVol", "amount", "tradeValue"
-        )
+        quote_volume = _number(row, "quoteVolume", "turnover", "quoteVol", "amount", "tradeValue")
         if quote_volume <= 0:
             quote_volume = _number(row, "volume", "vol") * last
         if last <= 0 or quote_volume < min_quote_volume:
@@ -148,6 +187,41 @@ def fetch_klines(symbol, start_ms, end_ms):
         raise RuntimeError(f"No {INTERVAL} candles returned for {symbol}")
     return (frame.drop_duplicates("time").sort_values("time")
             .reset_index(drop=True))
+
+
+def fetch_binance_klines(symbol, start_ms, end_ms):
+    """Fetch Binance USD-M 1h klines including quote volume, trade count and taker-buy volume."""
+    rows = []
+    cursor = int(start_ms)
+    page_size = 1400
+    while cursor < end_ms:
+        window_end = min(cursor + page_size * INTERVAL_MS, end_ms)
+        batch = get_binance_json(
+            BINANCE_KLINES,
+            {"symbol": symbol, "interval": INTERVAL, "startTime": cursor,
+             "endTime": window_end, "limit": 1500},
+        )
+        parsed = []
+        for row in batch if isinstance(batch, list) else []:
+            try:
+                stamp = int(row[0])
+                values = [float(row[i]) for i in (1, 2, 3, 4, 5, 7, 8, 9, 10)]
+                if cursor <= stamp < window_end and all(math.isfinite(v) for v in values):
+                    parsed.append((stamp, *values))
+            except (TypeError, ValueError, IndexError, OverflowError):
+                continue
+        rows.extend(parsed)
+        cursor = window_end
+        if not batch:
+            continue
+    frame = pd.DataFrame(
+        rows,
+        columns=["time", "open", "high", "low", "close", "volume",
+                 "quote_volume", "trade_count", "taker_buy_base", "taker_buy_quote"],
+    )
+    if frame.empty:
+        raise RuntimeError(f"No Binance {INTERVAL} candles returned for {symbol}")
+    return frame.drop_duplicates("time").sort_values("time").reset_index(drop=True)
 
 
 def add_features(frame, btc_returns=None):
@@ -209,7 +283,7 @@ def add_features(frame, btc_returns=None):
     return x
 
 
-FEATURES = [
+BASE_FEATURES = [
     "ret_1h", "ret_3h", "ret_6h", "ret_12h", "ret_24h", "ret_72h", "ret_168h",
     "rv_24h", "rv_72h", "rv_ratio", "atr_pct_14", "ema_gap_12_26",
     "ema_slope_12_6", "rsi_14", "bb_width_20", "range_pos_24", "range_pos_72",
@@ -218,16 +292,50 @@ FEATURES = [
     "weekday_sin", "weekday_cos", "btc_ret_1h", "relative_ret_1h",
     "relative_ret_24h", "btc_corr_72h",
 ]
+CROSS_VENUE_FEATURES = [
+    "binance_ret_1h_lag1", "binance_ret_4h_lag1",
+    "binance_taker_imbalance_lag1", "binance_taker_imbalance_4h_lag1",
+    "binance_quote_volume_z_lag1", "binance_trade_count_z_lag1",
+    "cross_venue_return_gap_lag1",
+]
+FEATURES = BASE_FEATURES + CROSS_VENUE_FEATURES
 
 
-def build_panel(frames, cost):
+def add_cross_venue_features(bingx_frame, binance_frame):
+    b = binance_frame.sort_values("time").set_index("time")
+    close = b["close"].astype(float)
+    quote_volume = b["quote_volume"].astype(float)
+    trades = b["trade_count"].astype(float)
+    quote = quote_volume.replace(0, np.nan)
+    taker_imbalance = (2*b["taker_buy_quote"].astype(float)/quote)-1
+    vol_mean = quote_volume.rolling(24, min_periods=18).mean()
+    vol_std = quote_volume.rolling(24, min_periods=18).std()
+    trade_mean = trades.rolling(24, min_periods=18).mean()
+    trade_std = trades.rolling(24, min_periods=18).std()
+    binance_ret_1h = close.pct_change()
+    binance_ret_4h = close.pct_change(4)
+    bingx_ret_1h = bingx_frame.sort_values("time").set_index("time")["close"].pct_change()
+    features = pd.DataFrame(index=b.index)
+    features["binance_ret_1h_lag1"] = binance_ret_1h.shift(1)
+    features["binance_ret_4h_lag1"] = binance_ret_4h.shift(1)
+    features["binance_taker_imbalance_lag1"] = taker_imbalance.shift(1)
+    features["binance_taker_imbalance_4h_lag1"] = taker_imbalance.rolling(4, min_periods=3).mean().shift(1)
+    features["binance_quote_volume_z_lag1"] = ((quote_volume-vol_mean)/vol_std.replace(0, np.nan)).shift(1)
+    features["binance_trade_count_z_lag1"] = ((trades-trade_mean)/trade_std.replace(0, np.nan)).shift(1)
+    features["cross_venue_return_gap_lag1"] = (binance_ret_1h-bingx_ret_1h).shift(1)
+    return features
+
+
+def build_panel(frames, cost, binance_frames):
     btc = frames.get("BTC-USDT")
     btc_returns = None
     if btc is not None:
         btc_returns = btc.set_index("time")["close"].pct_change()
     pieces = []
     for symbol, raw in frames.items():
-        f = add_features(raw, btc_returns)
+        f = add_features(raw, btc_returns).set_index("time")
+        cross = add_cross_venue_features(raw, binance_frames[symbol])
+        f = f.join(cross, how="left").reset_index()
         f["symbol"] = symbol
         for horizon in (1, 4, 12, 24):
             future = f["close"].shift(-horizon)/f["close"]-1
@@ -237,8 +345,7 @@ def build_panel(frames, cost):
             )
         pieces.append(f)
     panel = pd.concat(pieces, ignore_index=True)
-    panel = panel.replace([np.inf, -np.inf], np.nan)
-    return panel
+    return panel.replace([np.inf, -np.inf], np.nan)
 
 
 def _metrics(y_true, probabilities, forward_returns, cost, threshold):
@@ -278,20 +385,29 @@ def run_research(args):
     print(f"UNIVERSE_COUNT={len(universe)}", flush=True)
     print("UNIVERSE="+",".join(x["symbol"] for x in universe), flush=True)
     frames = {}
+    binance_frames = {}
     for item in universe:
         symbol = item["symbol"]
-        print(f"FETCH {symbol}", flush=True)
-        raw = fetch_klines(symbol, start, now)
-        # Exclude the currently forming hourly candle.
+        binance_symbol = symbol.replace("-", "")
+        print(f"FETCH {symbol} on BingX and Binance", flush=True)
+        try:
+            raw = fetch_klines(symbol, start, now)
+            bn_raw = fetch_binance_klines(binance_symbol, start, now)
+        except Exception as exc:
+            print(f"SKIP_DATA_ERROR {symbol}: {exc}", flush=True)
+            continue
+        # Exclude the currently forming hourly candle on both venues.
         raw = raw.loc[raw["time"]+INTERVAL_MS <= now].copy().reset_index(drop=True)
-        if len(raw) < args.days*24*0.9:
-            print(f"SKIP_INCOMPLETE {symbol} rows={len(raw)}", flush=True)
+        bn_raw = bn_raw.loc[bn_raw["time"]+INTERVAL_MS <= now].copy().reset_index(drop=True)
+        if min(len(raw), len(bn_raw)) < args.days*24*0.9:
+            print(f"SKIP_INCOMPLETE {symbol} bingx={len(raw)} binance={len(bn_raw)}", flush=True)
             continue
         frames[symbol] = raw
-        print(f"FETCHED {symbol} rows={len(raw)}", flush=True)
+        binance_frames[symbol] = bn_raw
+        print(f"FETCHED {symbol} bingx={len(raw)} binance={len(bn_raw)}", flush=True)
     if len(frames) < 5:
         raise RuntimeError(f"Only {len(frames)} symbols have sufficient history; need at least 5")
-    panel = build_panel(frames, args.cost_bps/10_000)
+    panel = build_panel(frames, args.cost_bps/10_000, binance_frames)
     evaluation_start = now - args.days*86_400_000
     panel = panel.loc[panel["time"] >= evaluation_start].copy()
     panel = panel.dropna(subset=FEATURES, how="any")
@@ -374,17 +490,17 @@ def run_research(args):
 
     report = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
-        "method": "Read-only BingX USDT-M 1h OHLCV cross-sectional research; current listed universe ranked by current 24h quote volume; time-ordered 60/20/20 split with horizon purge; logistic and histogram gradient boosting; no execution/portfolio simulation.",
+        "method": "Read-only cross-venue BingX+Binance USDT-M 1h research; current liquid crypto perpetual universe intersected with active Binance USDT-M perpetuals; includes prior Binance taker-buy imbalance and volume/trade-count features; time-ordered 60/20/20 split with horizon purge; logistic and histogram gradient boosting; no execution/portfolio simulation.",
         "evaluation_days": args.days,
         "requested_universe": args.universe,
         "actual_symbols": list(frames),
         "symbol_quote_volume_24h": universe,
-        "features": FEATURES,
+        "features": FEATURES,\n        "cross_venue_data_source": "Binance USD-M public 1h klines: quote volume, trade count and taker-buy quote volume; prior completed candle features only.",
         "label_cost_bps": args.cost_bps,
         "signal_probability_threshold": args.threshold,
         "data_limitations": [
             "Current listed contracts only: survivorship/listing-history bias remains.",
-            "OHLCV only: historical order book, trade-by-trade aggressor flow, liquidations and open-interest snapshots are not reconstructed.",
+            "Historical Binance candles provide taker-buy volume and trade-count proxies, but not full trade-by-trade order flow. Historical order books, liquidations and long-run open-interest snapshots are not reconstructed.",
             "No portfolio sizing, overlapping-signal capital allocation, funding, exchange-specific fills or liquidation simulation in this screening report.",
             "Model scores are research diagnostics, not trading probabilities until calibrated and independently replicated."
         ],
