@@ -320,3 +320,39 @@ def test_grouped_metrics_preserve_signal_counts_and_net_results():
     assert result["SELL"]["net_r"] == 0.9
     assert result["BUY"]["signals_generated"] == 1
     assert result["BUY"]["closed_trades"] == 0
+
+def test_paired_closed_comparison_uses_only_matching_closed_signal_pairs():
+    from scripts.backtest_strategy_b import paired_closed_comparison
+
+    trades = [
+        {"pair_id": "a", "entry_mode": "market", "status": "tp2", "net_r": 2.0},
+        {"pair_id": "a", "entry_mode": "level", "status": "sl", "net_r": -1.0},
+        {"pair_id": "b", "entry_mode": "market", "status": "sl", "net_r": -1.0},
+        {"pair_id": "b", "entry_mode": "level", "status": "unfilled_level"},
+        {"pair_id": "c", "entry_mode": "market", "status": "tp2", "net_r": 1.0},
+    ]
+
+    result = paired_closed_comparison(trades)
+    assert result["matched_closed_pairs"] == 1
+    assert result["mean_market_minus_level_net_r"] == 3.0
+    assert result["market_wins"] == 1
+    assert result["level_wins"] == 0
+
+
+def test_market_execution_rebases_sl_and_targets_to_actual_fill():
+    import pandas as pd
+
+    from scripts.backtest_strategy_b import simulate_strategy_b_trade
+
+    minute = pd.DataFrame([
+        {"open": 100.0, "high": 104.0, "low": 100.0, "close": 103.0},
+    ])
+    signal = {
+        "side": "BUY", "entry_mode": "market",
+        "entry": 100.0, "sl": 99.0, "tp1": 101.8, "tp2": 103.0,
+    }
+
+    result = simulate_strategy_b_trade(signal, minute, 0, 100.0)
+    assert result["status"] == "tp2"
+    assert result["entry"] > 100.0
+    assert result["net_r"] > 0
