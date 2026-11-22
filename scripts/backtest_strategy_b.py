@@ -159,7 +159,7 @@ def fetch_history(symbol, interval, start_ms, end_ms, now_ms, source):
 
 
 def metric_pack(trades):
-    closed = [t for t in trades if t["status"] not in ("unresolved", "skipped_drift")]
+    closed = [t for t in trades if t["status"] not in ("unresolved", "skipped_drift", "skipped_zone", "unfilled_level")]
     wins = [t["net_r"] for t in closed if t["net_r"] > 0]
     losses = [t["net_r"] for t in closed if t["net_r"] < 0]
     net_values = [t["net_r"] for t in closed]
@@ -189,6 +189,112 @@ def metric_pack(trades):
         "max_drawdown_r": round(max_dd, 3),
     }
 
+
+def confirmation_passed(side, candle):
+    """Apply the same closed-5m EMA/MACD/RSI alignment as the live builder."""
+    close, ema20, ema50 = (float(candle[k]) for k in ("close", "ema20", "ema50"))
+    macd, macd_signal, rsi = (float(candle[k]) for k in ("macd", "macd_signal", "rsi"))
+    if side == "BUY":
+        return close > ema20 > ema50 and macd > macd_signal and 50 <= rsi <= 72
+    return close < ema20 < ema50 and macd < macd_signal and 28 <= rsi <= 50
+
+
+def resolve_signal_entry(signal, minute_frame, frames, close_times, signal_index, max_wait_minutes=8):
+    """Resolve a level entry only after zone touch and a later closed 5m confirmation."""
+    if signal_index + 1 >= len(minute_frame):
+        return None
+    if signal.get("entry_mode") != "level":
+        return {"entry_index": signal_index + 1,
+                "raw_entry": float(minute_frame.iloc[signal_index + 1]["open"]),
+                "entry_mode": "market"}
+    zone_low = float(signal.get("entry_zone_low") or 0)
+    zone_high = float(signal.get("entry_zone_high") or 0)
+    if zone_low <= 0 or zone_high < zone_low:
+        return None
+    touch_close_time = None
+    last_index = min(len(minute_frame) - 2, signal_index + int(max_wait_minutes))
+    for j in range(signal_index + 1, last_index + 1):
+        bar = minute_frame.iloc[j]
+        if touch_close_time is None:
+            if float(bar["low"]) <= zone_high and float(bar["high"]) >= zone_low:
+                touch_close_time = int(bar["close_time"])
+            continue
+        available_5m = closed_window(frames["5m"], close_times["5m"], int(bar["close_time"]), 300)
+        if available_5m.empty:
+            continue
+        confirm = available_5m.iloc[-1]
+        if int(confirm["close_time"]) <= touch_close_time:
+            continue
+        if not confirmation_passed(signal["side"], confirm):
+            continue
+        entry_index = j + 1
+        raw_entry = float(minute_frame.iloc[entry_index]["open"])
+        if not zone_low <= raw_entry <= zone_high:
+            return {"status": "skipped_zone", "entry_index": entry_index,
+                    "raw_entry": raw_entry, "entry_mode": "level"}
+        return {"entry_index": entry_index, "raw_entry": raw_entry, "entry_mode": "level"}
+    return {"status": "unfilled_level", "entry_index": last_index, "entry_mode": "level"}
+
+
+def simulate_strategy_b_trade(signal, minute_frame, entry_index, raw_entry):
+    """Simulate the resolved fill using original SL/TP levels and conservative intrabar ordering."""
+    side = signal["side"]
+    raw_entry = float(raw_entry)
+    reference_risk = abs(float(signal["entry"]) - float(signal["sl"]))
+    drift_r = abs(raw_entry - float(signal["entry"])) / max(reference_risk, 1e-12)
+    max_drift_r = 1.0 if signal.get("entry_mode") == "level" else 0.5
+    if drift_r > max_drift_r:
+        return {"status": "skipped_drift", "exit_index": entry_index, "raw_entry": raw_entry}
+    adverse = (STRATEGY_CONSTANTS["DEFAULT_SYNTHETIC_SPREAD_PCT"] / 2.0 + STRATEGY_CONSTANTS["DEFAULT_SLIPPAGE_PCT"]) / 100.0
+    entry = raw_entry * (1 + adverse if side == "BUY" else 1 - adverse)
+    sl, tp1, tp2 = float(signal["sl"]), float(signal["tp1"]), float(signal["tp2"])
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return None
+    tp1_hit = False
+    exit_index = None
+    exit_kind = None
+    exit_levels = None
+    for j in range(entry_index, len(minute_frame)):
+        bar = minute_frame.iloc[j]
+        high, low = float(bar["high"]), float(bar["low"])
+        if side == "BUY":
+            stop_hit, first_hit, second_hit = low <= sl, high >= tp1, high >= tp2
+        else:
+            stop_hit, first_hit, second_hit = high >= sl, low <= tp1, low <= tp2
+        if stop_hit:
+            stop_fill = sl
+            bar_open = float(bar["open"])
+            if side == "BUY" and bar_open < sl:
+                stop_fill = bar_open
+            elif side == "SELL" and bar_open > sl:
+                stop_fill = bar_open
+            exit_kind = "tp1_then_sl" if tp1_hit else "sl"
+            exit_levels = [tp1, stop_fill] if tp1_hit else [stop_fill]
+            exit_index = j
+            break
+        if not tp1_hit and first_hit:
+            tp1_hit = True
+        if tp1_hit and second_hit:
+            exit_kind, exit_levels, exit_index = "tp2", [tp1, tp2], j
+            break
+    if exit_index is None:
+        return {"status": "unresolved", "exit_index": len(minute_frame) - 1,
+                "entry": entry, "raw_entry": raw_entry, "entry_index": entry_index}
+    weights = [0.7, 0.3] if len(exit_levels) == 2 else [1.0]
+    gross_pnl = 0.0
+    exit_notional = 0.0
+    fee_rate = STRATEGY_CONSTANTS["TAKER_FEE_RATE"]
+    for level, weight in zip(exit_levels, weights):
+        fill = level * (1 - adverse if side == "BUY" else 1 + adverse)
+        pnl = (fill - entry) if side == "BUY" else (entry - fill)
+        gross_pnl += weight * pnl
+        exit_notional += weight * fill
+    gross_r = gross_pnl / risk
+    fee_r = fee_rate * (entry + exit_notional) / risk
+    return {"status": exit_kind, "gross_r": gross_r, "fee_r": fee_r,
+            "net_r": gross_r - fee_r, "exit_index": exit_index,
+            "entry": entry, "raw_entry": raw_entry, "entry_index": entry_index}
 
 def run(args):
     if args.warmup_days < 35:
@@ -291,10 +397,19 @@ def run(args):
 
             # Live validation permits up to 0.5R drift for market entries and
             # up to 1.0R for level entries.
-            market_data.MAX_ENTRY_DRIFT_R = (
-                1.0 if signal.get("entry_mode") == "level" else 0.5
+            resolved = resolve_signal_entry(
+                signal, minute, frames, close_times, i,
+                max_wait_minutes=args.level_entry_wait_minutes,
             )
-            outcome = market_data.simulate_trade(signal, minute, i)
+            if resolved is None:
+                continue
+            if resolved.get("status"):
+                outcome = {"status": resolved["status"], "exit_index": resolved["entry_index"],
+                           "raw_entry": resolved.get("raw_entry")}
+            else:
+                outcome = simulate_strategy_b_trade(
+                    signal, minute, resolved["entry_index"], resolved["raw_entry"]
+                )
             if outcome is None:
                 continue
             last_signal_ms[side_key] = stamp + COOLDOWN_MS
@@ -302,7 +417,11 @@ def run(args):
                 "symbol": symbol,
                 "side": signal["side"],
                 "time": datetime.fromtimestamp(stamp / 1000, tz=timezone.utc).isoformat(),
-                "entry": round(float(signal["entry"]), 10),
+                "entry": round(float(outcome.get("raw_entry", signal["entry"])), 10),
+                "signal_entry": round(float(signal["entry"]), 10),
+                "entry_mode": signal.get("entry_mode", "market"),
+                "entry_zone_low": signal.get("entry_zone_low"),
+                "entry_zone_high": signal.get("entry_zone_high"),
                 "sl": round(float(signal["sl"]), 10),
                 "tp1": round(float(signal["tp1"]), 10),
                 "tp2": round(float(signal["tp2"]), 10),
@@ -339,9 +458,9 @@ def run(args):
             "spread_pct": 0.04,
             "slippage_pct_per_side": 0.03,
             "taker_fee_pct_per_side": 0.05,
-            "max_entry_drift_r": {
-                "market": 0.5, "level": 1.0
-            },
+            "max_entry_drift_r": {"market": 0.5, "level": 1.0},
+            "level_entry_confirmation": "closed 5m candle after zone touch; same EMA/MACD/RSI checks as live builder",
+            "level_entry_max_wait_minutes": args.level_entry_wait_minutes,
         },
         "data_coverage": coverage_report,
         "evaluations_by_symbol": dict(evaluations),
@@ -398,6 +517,7 @@ if __name__ == "__main__":
     parser.add_argument("--warmup-days", type=int, default=60)
     parser.add_argument("--symbols", default="BTC-USDT,ETH-USDT,SOL-USDT")
     parser.add_argument("--source", choices=("bingx", "binance"), default="bingx")
+    parser.add_argument("--level-entry-wait-minutes", type=int, default=8)
     args = parser.parse_args()
     if not 1 <= args.days <= 60:
         parser.error("--days must be between 1 and 60")
