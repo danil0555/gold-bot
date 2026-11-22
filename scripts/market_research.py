@@ -442,8 +442,16 @@ def build_panel(frames, cost, binance_frames):
             # The signal is known only after candle t closes. Model the earliest
             # executable entry at the next candle open, then hold for horizon hours.
             entry = f["open"].shift(-1)
+            entry_time = f["time"].shift(-1)
             exit_price = f["close"].shift(-horizon)
-            future = exit_price / entry - 1
+            exit_time = f["time"].shift(-horizon)
+            expected_entry_time = f["time"] + INTERVAL_MS
+            expected_exit_time = f["time"] + horizon * INTERVAL_MS
+            continuous_target = (
+                (entry_time == expected_entry_time)
+                & (exit_time == expected_exit_time)
+            )
+            future = (exit_price / entry - 1).where(continuous_target)
             f[f"fwd_{horizon}h"] = future
             # Keep every known outcome; never select rows by future move size.
             f[f"label_{horizon}h"] = np.where(
@@ -569,8 +577,7 @@ def _feature_group_map(features):
 
 def _run_group_ablation(
     train, valid, test, features, label_col, return_col, cost_bps,
-    fallback_threshold, baseline_valid_probabilities, baseline_test_probabilities,
-    baseline_threshold,
+    fallback_threshold, baseline_test_probabilities, baseline_threshold,
 ):
     """Remove one feature family at a time; tune on validation and score once on held-out test."""
     from sklearn.impute import SimpleImputer
@@ -807,7 +814,6 @@ def run_research(args):
             ],
             "models": {},
         }
-        hgb_valid_probabilities = np.array([])
         hgb_test_probabilities = np.array([])
         hgb_selected_threshold = args.threshold
         for name, model in models.items():
@@ -839,7 +845,6 @@ def run_research(args):
                 "market_regime_breakdown":regime_breakdown,
             }
             if name == "hist_gradient_boosting":
-                hgb_valid_probabilities = valid_proba
                 hgb_test_probabilities = p_up
                 hgb_selected_threshold = selected_threshold
             if name == "logistic":
@@ -850,8 +855,8 @@ def run_research(args):
                 ]
         horizon_result["group_ablation_hist_gradient_boosting"] = _run_group_ablation(
             train, valid, test, active_features, label_col, ret_col,
-            args.cost_bps, args.threshold, hgb_valid_probabilities,
-            hgb_test_probabilities, hgb_selected_threshold,
+            args.cost_bps, args.threshold, hgb_test_probabilities,
+            hgb_selected_threshold,
         )
         # A transparent momentum baseline, evaluated on the same test rows.
         momentum = np.where(test["ret_24h"].to_numpy() >= 0, 1, 0)
