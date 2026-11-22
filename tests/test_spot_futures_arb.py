@@ -71,6 +71,15 @@ def test_stress_scenario_is_not_better_than_base_scenario():
     assert result["stressed_net_usdt"] < result["expected_net_at_current_basis_assumption_usdt"]
 
 
+def test_order_book_parser_accepts_bingx_swap_timestamp_field_T():
+    bids, asks, stamp = parse_order_book({
+        "code": 0, "data": {"bids": [["100", "2"]], "asks": [["101", "3"]], "T": 123456789}
+    }, "swap")
+    assert bids == [(100.0, 2.0)]
+    assert asks == [(101.0, 3.0)]
+    assert stamp == 123456789
+
+
 def test_order_book_parser_requires_timestamp_and_depth():
     with pytest.raises(MarketDataError):
         parse_order_book({"code": 0, "data": {"bids": [], "asks": []}}, "test")
