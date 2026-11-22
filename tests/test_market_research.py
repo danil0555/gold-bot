@@ -69,7 +69,13 @@ def test_panel_labels_use_forward_returns_and_cost_barrier():
     row = panel.loc[panel["symbol"] == "BTC-USDT"].iloc[100]
     expected = btc.loc[101, "close"] / btc.loc[100, "close"] - 1
     assert abs(row["fwd_1h"] - expected) < 1e-12
-    assert row["label_1h"] in (0.0, 1.0, np.nan) or pd.isna(row["label_1h"])
+    # A positive move smaller than the cost barrier is still part of the
+    # directional dataset; costs belong in PnL evaluation, not sample filtering.
+    assert row["label_1h"] == 1.0
+    small_move = panel.loc[(panel["symbol"] == "BTC-USDT") & (panel["fwd_1h"].abs() < 0.0012)]
+    assert len(small_move) > 0
+    assert small_move["label_1h"].notna().all()
+    assert (small_move["label_1h"] == (small_move["fwd_1h"] > 0).astype(float)).all()
     assert pd.isna(panel.loc[panel.index[-1], "fwd_24h"])
     assert set(CROSS_VENUE_FEATURES).issubset(panel.columns)
     assert abs(row["binance_taker_imbalance_lag1"] - 0.1) < 1e-9
