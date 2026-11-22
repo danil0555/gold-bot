@@ -2008,7 +2008,7 @@ async def spot_futures_arbitrage_handler(message: Message):
                 "Сейчас нет связки, прошедшей все фильтры доходности и стресс-теста.\n\n"
                 f"Лучшая сценарная оценка: <b>{html.escape(best['symbol'])}</b>\n"
                 f"Базис входа: <b>{best['entry_basis_pct']:+.3f}%</b>\n"
-                f"Funding сейчас: <b>{best['funding_rate_current'] * 100:+.4f}%</b> за расчётный период\n"
+                f"Funding сейчас: <b>{best['funding_rate_current'] * 100:+.4f}%</b> / {best.get('funding_interval_hours', 8)} ч\n"
                 f"Чистый результат при схождении базиса к 0%: "
                 f"<b>{best['expected_net_at_basis_target_usdt']:+.2f} USDT</b>\n"
                 f"Стресс при расширении базиса ещё на 50 б.п.: "
@@ -2026,7 +2026,7 @@ async def spot_futures_arbitrage_handler(message: Message):
                 "",
                 f"🟢 <b>{html.escape(report['symbol'])}</b> — BUY SPOT + SHORT PERPETUAL",
                 f"Базис входа: <b>{report['entry_basis_pct']:+.3f}%</b>",
-                f"Funding сейчас: <b>{rate_pct:+.4f}%</b> за период",
+                f"Funding сейчас: <b>{rate_pct:+.4f}%</b> / {report.get('funding_interval_hours', 8)} ч",
                 f"Оценка funding: <b>{report['expected_funding_usdt']:+.2f} USDT</b> "
                 f"({report['funding_periods_assumed']} расчёта, haircut 50%)",
                 f"Комиссии полного цикла: <b>{report['estimated_round_trip_fees_usdt']:.2f} USDT</b>",
