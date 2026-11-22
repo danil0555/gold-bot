@@ -191,6 +191,7 @@ def discover_universe(limit=30, min_quote_volume=5_000_000):
 
 
 def fetch_klines(symbol, start_ms, end_ms):
+    """Fetch BingX candles including quote volume, trade count and taker-buy quote volume."""
     rows = []
     cursor = int(start_ms)
     while cursor < end_ms:
@@ -206,27 +207,37 @@ def fetch_klines(symbol, start_ms, end_ms):
             try:
                 if isinstance(row, (list, tuple)) and len(row) >= 6:
                     stamp = int(float(row[0]))
-                    values = [float(row[i]) for i in range(1, 6)]
+                    core = [float(row[i]) for i in range(1, 6)]
+                    quote_volume = float(row[7]) if len(row) > 7 else core[3]*core[4]
+                    trade_count = float(row[8]) if len(row) > 8 else np.nan
+                    taker_buy_base = float(row[9]) if len(row) > 9 else np.nan
+                    taker_buy_quote = float(row[10]) if len(row) > 10 else np.nan
                 elif isinstance(row, dict):
                     stamp = int(float(row.get("time", row.get("openTime", row.get("timestamp", 0)))))
-                    values = [float(row[k]) for k in ("open", "high", "low", "close", "volume")]
+                    core = [float(row[k]) for k in ("open", "high", "low", "close", "volume")]
+                    quote_volume = float(row.get("quoteVolume", row.get("quoteAssetVolume", core[3]*core[4])))
+                    trade_count = float(row.get("count", row.get("tradeCount", np.nan)))
+                    taker_buy_base = float(row.get("takerBuyBaseVolume", np.nan))
+                    taker_buy_quote = float(row.get("takerBuyQuoteVolume", np.nan))
                 else:
                     continue
                 if stamp < 10_000_000_000:
                     stamp *= 1000
-                if cursor <= stamp < window_end and all(math.isfinite(v) for v in values):
-                    parsed.append((stamp, *values))
+                if cursor <= stamp < window_end and all(math.isfinite(v) for v in core):
+                    parsed.append((stamp, *core, quote_volume, trade_count, taker_buy_base, taker_buy_quote))
             except (TypeError, ValueError, OverflowError, KeyError):
                 continue
         rows.extend(parsed)
         cursor = window_end
         if not batch:
             continue
-    frame = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume"])
+    frame = pd.DataFrame(
+        rows, columns=["time", "open", "high", "low", "close", "volume",
+                       "quote_volume", "trade_count", "taker_buy_base", "taker_buy_quote"]
+    )
     if frame.empty:
         raise RuntimeError(f"No {INTERVAL} candles returned for {symbol}")
-    return (frame.drop_duplicates("time").sort_values("time")
-            .reset_index(drop=True))
+    return frame.drop_duplicates("time").sort_values("time").reset_index(drop=True)
 
 
 def fetch_binance_klines(symbol, start_ms, end_ms):
@@ -327,6 +338,32 @@ def add_features(frame, btc_returns=None):
     return x
 
 
+BINGX_FLOW_FEATURES = [
+    "bingx_taker_imbalance_lag1", "bingx_taker_imbalance_4h_lag1",
+    "bingx_quote_volume_z_lag1", "bingx_trade_count_z_lag1",
+]
+
+
+def add_bingx_flow_features(frame):
+    """Causal, prior-completed-candle order-flow proxies from BingX klines."""
+    x = frame.sort_values("time").copy()
+    close = x["close"].astype(float)
+    quote = x.get("quote_volume", close*x["volume"].astype(float)).astype(float)
+    trades = x.get("trade_count", pd.Series(np.nan, index=x.index)).astype(float)
+    taker_buy = x.get("taker_buy_quote", pd.Series(np.nan, index=x.index)).astype(float)
+    imbalance = (2*taker_buy/quote.replace(0, np.nan))-1
+    quote_mean = quote.rolling(24, min_periods=18).mean()
+    quote_std = quote.rolling(24, min_periods=18).std()
+    trade_mean = trades.rolling(24, min_periods=18).mean()
+    trade_std = trades.rolling(24, min_periods=18).std()
+    out = pd.DataFrame(index=x["time"])
+    out["bingx_taker_imbalance_lag1"] = imbalance.shift(1).to_numpy()
+    out["bingx_taker_imbalance_4h_lag1"] = imbalance.rolling(4, min_periods=3).mean().shift(1).to_numpy()
+    out["bingx_quote_volume_z_lag1"] = ((quote-quote_mean)/quote_std.replace(0, np.nan)).shift(1).to_numpy()
+    out["bingx_trade_count_z_lag1"] = ((trades-trade_mean)/trade_std.replace(0, np.nan)).shift(1).to_numpy()
+    return out
+
+
 BASE_FEATURES = [
     "ret_1h", "ret_3h", "ret_6h", "ret_12h", "ret_24h", "ret_72h", "ret_168h",
     "rv_24h", "rv_72h", "rv_ratio", "atr_pct_14", "ema_gap_12_26",
@@ -343,6 +380,7 @@ CROSS_VENUE_FEATURES = [
     "cross_venue_return_gap_lag1",
 ]
 FEATURES = BASE_FEATURES + CROSS_VENUE_FEATURES
+BINGX_FEATURES = BASE_FEATURES + BINGX_FLOW_FEATURES
 
 
 def add_cross_venue_features(bingx_frame, binance_frame):
@@ -385,8 +423,14 @@ def build_panel(frames, cost, binance_frames):
     pieces = []
     for symbol, raw in frames.items():
         f = add_features(raw, btc_returns).set_index("time")
-        cross = add_cross_venue_features(raw, binance_frames[symbol])
-        f = f.join(cross, how="left")
+        flow = add_bingx_flow_features(raw)
+        f = f.join(flow, how="left")
+        if symbol in binance_frames:
+            cross = add_cross_venue_features(raw, binance_frames[symbol])
+            f = f.join(cross, how="left")
+        else:
+            for column in CROSS_VENUE_FEATURES:
+                f[column] = np.nan
         if btc_context is not None:
             f = f.join(btc_context, how="left")
         else:
@@ -492,27 +536,29 @@ def run_research(args):
         binance_symbol = symbol.replace("-", "")
         print(f"FETCH {symbol} on BingX and Binance", flush=True)
         try:
-            # Probe Binance archive first so non-crypto BingX instruments are skipped cheaply.
-            bn_raw = fetch_binance_klines(binance_symbol, start, now)
             raw = fetch_klines(symbol, start, now)
+            bn_raw = None if args.bingx_only else fetch_binance_klines(binance_symbol, start, now)
         except Exception as exc:
             print(f"SKIP_DATA_ERROR {symbol}: {exc}", flush=True)
             continue
-        # Exclude the currently forming hourly candle on both venues.
+        # Exclude the currently forming hourly candle.
         raw = raw.loc[raw["time"]+INTERVAL_MS <= now].copy().reset_index(drop=True)
-        bn_raw = bn_raw.loc[bn_raw["time"]+INTERVAL_MS <= now].copy().reset_index(drop=True)
-        if min(len(raw), len(bn_raw)) < args.days*24*0.9:
-            print(f"SKIP_INCOMPLETE {symbol} bingx={len(raw)} binance={len(bn_raw)}", flush=True)
+        if not args.bingx_only and bn_raw is not None:
+            bn_raw = bn_raw.loc[bn_raw["time"]+INTERVAL_MS <= now].copy().reset_index(drop=True)
+        if len(raw) < args.days*24*0.9 or (bn_raw is not None and len(bn_raw) < args.days*24*0.9):
+            print(f"SKIP_INCOMPLETE {symbol} bingx={len(raw)} binance={len(bn_raw) if bn_raw is not None else 'not_requested'}", flush=True)
             continue
         frames[symbol] = raw
-        binance_frames[symbol] = bn_raw
-        print(f"FETCHED {symbol} bingx={len(raw)} binance={len(bn_raw)}", flush=True)
+        if bn_raw is not None:
+            binance_frames[symbol] = bn_raw
+        print(f"FETCHED {symbol} bingx={len(raw)} binance={len(bn_raw) if bn_raw is not None else 'not_requested'}", flush=True)
     if len(frames) < 5:
         raise RuntimeError(f"Only {len(frames)} symbols have sufficient history; need at least 5")
     panel = build_panel(frames, args.cost_bps/10_000, binance_frames)
+    active_features = BINGX_FEATURES if args.bingx_only else FEATURES
     evaluation_start = now - args.days*86_400_000
     panel = panel.loc[panel["time"] >= evaluation_start].copy()
-    panel = panel.dropna(subset=FEATURES, how="any")
+    panel = panel.dropna(subset=active_features, how="any")
     unique_times = np.sort(panel["time"].unique())
     if len(unique_times) < 24*30:
         raise RuntimeError(f"Insufficient aligned history after features: {len(unique_times)} timestamps")
@@ -542,9 +588,9 @@ def run_research(args):
         if len(train) < 500 or len(test) < 100:
             results[f"{horizon}h"] = {"status":"insufficient_samples","train":len(train),"validation":len(valid),"test":len(test)}
             continue
-        X_train, y_train = train[FEATURES], train[label_col].astype(int)
-        X_valid, y_valid = valid[FEATURES], valid[label_col].astype(int)
-        X_test, y_test = test[FEATURES], test[label_col].astype(int)
+        X_train, y_train = train[active_features], train[label_col].astype(int)
+        X_valid, y_valid = valid[active_features], valid[label_col].astype(int)
+        X_test, y_test = test[active_features], test[label_col].astype(int)
         models = {
             "logistic": make_pipeline(
                 SimpleImputer(strategy="median"), StandardScaler(),
@@ -602,7 +648,7 @@ def run_research(args):
             if name == "logistic":
                 coefs = model[-1].coef_[0]
                 horizon_result["models"][name]["largest_abs_coefficients"] = [
-                    {"feature":FEATURES[i],"coefficient":round(float(coefs[i]),5)}
+                    {"feature":active_features[i],"coefficient":round(float(coefs[i]),5)}
                     for i in np.argsort(np.abs(coefs))[::-1][:10]
                 ]
         # A transparent momentum baseline, evaluated on the same test rows.
@@ -617,14 +663,15 @@ def run_research(args):
 
     report = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
-        "method": "Read-only cross-venue BingX+Binance USDT-M 1h research; current liquid BingX contracts with matching Binance USD-M archive coverage; includes prior Binance taker-buy imbalance and volume/trade-count features; time-ordered 60/20/20 split with horizon purge; validation-only threshold selection; held-out BTC trend/volatility regime breakdown; logistic and histogram gradient boosting; no execution/portfolio simulation.",
+        "method": ("BingX-only public 1h research" if args.bingx_only else "Read-only cross-venue BingX+Binance USDT-M 1h research") + "; time-ordered 60/20/20 split with horizon purge; validation-only threshold selection; held-out BTC trend/volatility regime breakdown; logistic and histogram gradient boosting; no execution/portfolio simulation.",
         "evaluation_days": args.days,
         "requested_universe": args.universe,
         "actual_symbols": list(frames),
         "universe_candidates": len(universe),
         "symbol_quote_volume_24h": [item for item in universe if item["symbol"] in frames],
-        "features": FEATURES,
-        "cross_venue_data_source": "Binance Vision USD-M public 1h monthly/daily ZIP archives: quote volume, trade count and taker-buy quote volume; prior completed candle features only.",
+        "features": active_features,
+        "market_data_source": "BingX public USDT-M klines including quote volume, trade count and taker-buy quote volume; prior completed candle flow features only.",
+        "cross_venue_data_source": None if args.bingx_only else "Binance Vision USD-M public 1h monthly/daily ZIP archives; research-only under published non-commercial terms.",
         "label_cost_bps": args.cost_bps,
         "signal_probability_threshold": args.threshold,
         "data_limitations": [
@@ -665,6 +712,7 @@ if __name__ == "__main__":
     parser.add_argument("--min-quote-volume", type=float, default=5_000_000)
     parser.add_argument("--cost-bps", type=float, default=12.0)
     parser.add_argument("--threshold", type=float, default=0.58)
+    parser.add_argument("--bingx-only", action="store_true", help="Use only BingX data; no Binance Vision archives")
     parser.add_argument("--output-dir", default="research-output")
     args = parser.parse_args()
     if not 30 <= args.days <= 365:
