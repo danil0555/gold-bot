@@ -690,7 +690,15 @@ def run_research(args):
     panel = build_panel(frames, args.cost_bps/10_000, binance_frames, funding_frames)
     active_features = (BINGX_FEATURES if args.with_funding else BINGX_BASE_FEATURES) if args.bingx_only else FEATURES
     evaluation_start = now - args.days*86_400_000
+    print("PANEL_TIME_DIAGNOSTICS=" + json.dumps({
+        "now_ms": now, "evaluation_start_ms": evaluation_start,
+        "panel_rows_before_window": int(len(panel)),
+        "min_time_ms": int(panel["time"].min()) if len(panel) else None,
+        "max_time_ms": int(panel["time"].max()) if len(panel) else None,
+        "symbols": int(panel["symbol"].nunique()) if len(panel) else 0,
+    }), flush=True)
     panel = panel.loc[panel["time"] >= evaluation_start].copy()
+    print("PANEL_ROWS_IN_WINDOW=" + str(len(panel)), flush=True)
     # Preserve rows with partial optional-field gaps; select features using only
     # the first 60% training window and impute gaps inside each model pipeline.
     unique_times = np.sort(panel["time"].unique())
