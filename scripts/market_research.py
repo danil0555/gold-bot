@@ -24,7 +24,7 @@ KLINE_PATH = "/openApi/swap/v3/quote/klines"
 INTERVAL = "1h"
 INTERVAL_MS = 3_600_000
 PAGE_CANDLES = 800
-REQUEST_PAUSE = 0.12
+REQUEST_PAUSE = 1.05
 LAST_REQUEST = 0.0
 STABLE_BASES = {"USDC", "USDE", "FDUSD", "TUSD", "USDP", "DAI", "BUSD"}
 
@@ -53,7 +53,7 @@ def get_json(path, params=None, retries=4):
         if pause > 0:
             time.sleep(pause)
         request = urllib.request.Request(
-            url, headers={"User-Agent": "gold-bot-market-research/1.0"}
+            url, headers={"User-Agent": "gold-bot-market-research/1.0", "X-SOURCE-KEY": "BX-AI-SKILL"}
         )
         try:
             with urllib.request.urlopen(request, timeout=25) as response:
