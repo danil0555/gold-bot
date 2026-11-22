@@ -45,3 +45,43 @@ def test_websocket_payload_decoder_supports_gzip_and_plain_text():
     assert decode_ws_payload(packed) == payload
     assert decode_ws_payload(json.dumps(payload)) == payload
     assert decode_ws_payload("Ping") == "Ping"
+
+
+
+def test_minute_candle_updates_are_persisted_and_closed_flag_is_time_based():
+    agg = MarketMinuteAggregator(":memory:")
+    try:
+        now_ms = int(__import__("time").time() * 1000)
+        candle = {
+            "K": {
+                "t": now_ms - 60_000,
+                "T": now_ms + 1_000,
+                "o": "100", "h": "103", "l": "99", "c": "102", "v": "12.5",
+            }
+        }
+        assert agg.save_candle("BTC-USDT", candle) is True
+        row = agg.db.execute(
+            "SELECT open,high,low,close,volume,is_closed FROM minute_candles"
+        ).fetchone()
+        assert row == (100.0, 103.0, 99.0, 102.0, 12.5, 0)
+
+        candle["K"]["T"] = now_ms - 3_000
+        assert agg.save_candle("BTC-USDT", candle) is True
+        row = agg.db.execute(
+            "SELECT is_closed FROM minute_candles WHERE symbol='BTC-USDT'"
+        ).fetchone()
+        assert row == (1,)
+    finally:
+        agg.close()
+
+
+def test_minute_candle_rejects_invalid_ohlcv():
+    agg = MarketMinuteAggregator(":memory:")
+    try:
+        assert agg.save_candle("BTC-USDT", {"K": {
+            "t": 1_800_000_000_000, "T": 1_800_000_059_999,
+            "o": "100", "h": "98", "l": "99", "c": "101", "v": "1",
+        }}) is False
+        assert agg.db.execute("SELECT count(*) FROM minute_candles").fetchone()[0] == 0
+    finally:
+        agg.close()
