@@ -163,7 +163,7 @@ def test_feature_coverage_selection_uses_training_only_and_keeps_partial_rows():
     panel = pd.DataFrame({
         "time": frame["time"],
         "good": np.sin(np.arange(260) / 7),
-        "sparse": np.where(np.arange(260) % 3 == 0, np.nan, 1.0),
+        "sparse": np.where(np.arange(260) % 2 == 0, np.nan, 1.0),
         "future_only": np.where(np.arange(260) >= 200, np.arange(260), np.nan),
     })
     end = int(frame["time"].iloc[180])
