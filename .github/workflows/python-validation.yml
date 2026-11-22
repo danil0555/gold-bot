@@ -6,7 +6,7 @@ concurrency:
 
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/live-market-data-collector]
+    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/live-market-data-collector, research/live-market-data-candles]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -35,10 +35,10 @@ jobs:
       - name: Run deterministic strategy and research tests
         run: python -m pytest -q tests/test_addon_strategies.py tests/test_spot_futures_arb.py tests/test_backtest_spot_futures_arb.py tests/test_scalping_100.py tests/test_market_research.py tests/test_market_data_collector.py
       - name: Smoke test live BingX market-data collector
-        if: github.ref == 'refs/heads/research/live-market-data-collector'
+        if: github.ref == 'refs/heads/research/live-market-data-collector' || github.ref == 'refs/heads/research/live-market-data-candles'
         run: |
           python scripts/market_data_collector.py --symbols BTC-USDT,ETH-USDT --duration-hours 0.01 --db-path /tmp/market_microstructure.sqlite3 --derivatives-interval 60
-          python -c "import sqlite3; c=sqlite3.connect('/tmp/market_microstructure.sqlite3'); n=c.execute('select count(*) from minute_features').fetchone()[0]; d=c.execute('select coalesce(sum(depth_samples),0) from minute_features').fetchone()[0]; t=c.execute('select coalesce(sum(trades_count),0) from minute_features').fetchone()[0]; oi=c.execute('select count(*) from derivatives_snapshots').fetchone()[0]; print('minute_rows=',n,'depth_samples=',d,'trades=',t,'derivatives_rows=',oi); assert n>0 and d>0 and t>0 and oi>0"
+          python -c "import sqlite3; c=sqlite3.connect('/tmp/market_microstructure.sqlite3'); n=c.execute('select count(*) from minute_features').fetchone()[0]; d=c.execute('select coalesce(sum(depth_samples),0) from minute_features').fetchone()[0]; t=c.execute('select coalesce(sum(trades_count),0) from minute_features').fetchone()[0]; oi=c.execute('select count(*) from derivatives_snapshots').fetchone()[0]; candles=c.execute('select count(*) from minute_candles').fetchone()[0]; print('minute_rows=',n,'depth_samples=',d,'trades=',t,'derivatives_rows=',oi,'candle_rows=',candles); assert n>0 and d>0 and t>0 and oi>0 and candles>0"
         timeout-minutes: 3
       - name: Run read-only public BingX spot-perpetual smoke scan
         if: github.event_name == 'pull_request' || github.ref == 'refs/heads/research/spot-futures-arbitrage'
