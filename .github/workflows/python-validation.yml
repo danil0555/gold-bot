@@ -35,7 +35,7 @@ jobs:
       - name: Run deterministic addon and arbitrage tests
         run: python -m pytest -q tests/test_addon_strategies.py tests/test_spot_futures_arb.py
       - name: Run read-only public BingX spot-perpetual smoke scan
-        if: github.ref == 'refs/heads/research/spot-futures-arbitrage'
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/research/spot-futures-arbitrage'
         run: python -m scripts.spot_futures_arb --symbols BTC-USDT,ETH-USDT,SOL-USDT --notional 1000 --funding-periods 3
         timeout-minutes: 5
       - name: Run read-only BingX historical backtest (7 days)
