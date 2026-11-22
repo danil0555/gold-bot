@@ -67,8 +67,9 @@ def test_panel_labels_use_forward_returns_and_cost_barrier():
         },
     )
     row = panel.loc[panel["symbol"] == "BTC-USDT"].iloc[100]
-    expected = btc.loc[101, "close"] / btc.loc[100, "close"] - 1
+    expected = btc.loc[101, "close"] / btc.loc[101, "open"] - 1
     assert abs(row["fwd_1h"] - expected) < 1e-12
+    assert abs(row["fwd_1h"] - (btc.loc[101, "close"] / btc.loc[101, "open"] - 1)) < 1e-12
     assert row["label_1h"] == 1.0
     small_move = panel.loc[(panel["symbol"] == "BTC-USDT") & (panel["fwd_1h"].abs() < 0.0012)]
     assert len(small_move) > 0
@@ -244,3 +245,26 @@ def test_funding_history_fetch_uses_bounded_non_overflow_windows(monkeypatch):
     assert all(call[1]["limit"] == 1000 for call in calls)
     assert all(call[1]["endTime"] - call[1]["startTime"] <= 30 * 86_400_000 for call in calls)
     assert len(result) == 3
+
+
+
+def test_funding_history_coverage_reports_observed_event_span_and_gaps():
+    from scripts.market_research import _funding_history_coverage
+
+    start = 1_700_000_000_000
+    frame = pd.DataFrame({
+        "funding_time": [start, start + 8*3_600_000, start + 16*3_600_000],
+        "funding_rate": [0.0001, 0.0002, 0.00015],
+    })
+    result = _funding_history_coverage({"BTC-USDT": frame})
+    assert result["BTC-USDT"]["events"] == 3
+    assert result["BTC-USDT"]["median_interval_hours"] == 8.0
+    assert result["BTC-USDT"]["max_interval_hours"] == 8.0
+
+
+def test_funding_feature_group_is_available_for_incremental_ablation():
+    from scripts.market_research import _feature_group_map
+
+    groups = _feature_group_map(["funding_rate_lag1", "funding_rate_change_lag1", "ret_1h"])
+    assert groups["funding_rate_lag1"] == "funding"
+    assert groups["funding_rate_change_lag1"] == "funding"
