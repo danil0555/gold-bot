@@ -3,7 +3,7 @@ import zipfile
 import numpy as np
 import pandas as pd
 
-from scripts.market_research import add_features, build_panel, parse_binance_kline_archive, BASE_FEATURES, CROSS_VENUE_FEATURES
+from scripts.market_research import add_features, build_panel, parse_binance_kline_archive, _select_threshold, BASE_FEATURES, CROSS_VENUE_FEATURES
 
 
 def sample_frame(periods=260, offset=0.0):
@@ -69,6 +69,8 @@ def test_panel_labels_use_forward_returns_and_cost_barrier():
     assert pd.isna(panel.loc[panel.index[-1], "fwd_24h"])
     assert set(CROSS_VENUE_FEATURES).issubset(panel.columns)
     assert abs(row["binance_taker_imbalance_lag1"] - 0.1) < 1e-9
+    assert np.isfinite(row["btc_ret_24h"])
+    assert np.isfinite(row["btc_rv_24h"])
 
 
 
@@ -104,3 +106,23 @@ def test_binance_cross_venue_features_use_previous_completed_candle():
     pd.testing.assert_frame_equal(
         base.loc[:149, cols], altered.loc[:149, cols], check_dtype=False
     )
+
+
+
+def test_validation_threshold_selection_returns_out_of_sample_ready_cutoff():
+    y = np.array([1] * 100 + [0] * 100)
+    probabilities = np.array([0.82] * 100 + [0.18] * 100)
+    returns = np.array([0.02] * 100 + [-0.02] * 100)
+    threshold, report = _select_threshold(y, probabilities, returns, 0.0012, 0.58)
+    assert 0.52 <= threshold <= 0.75
+    assert report["method"] == "validation_mean_net_return_minus_one_standard_error"
+    assert report["validation_metrics"]["signals"] == 200
+
+
+def test_validation_threshold_falls_back_when_too_few_validation_signals():
+    y = np.array([1, 0, 1, 0])
+    probabilities = np.array([0.9, 0.1, 0.9, 0.1])
+    returns = np.array([0.01, -0.01, 0.01, -0.01])
+    threshold, report = _select_threshold(y, probabilities, returns, 0.0012, 0.58)
+    assert threshold == 0.58
+    assert report["method"] == "fixed_fallback_no_validation_threshold_met"
