@@ -25,8 +25,8 @@ def test_trade_aggressor_side_and_depth_are_aggregated_into_minute():
     agg = MarketMinuteAggregator(":memory:")
     try:
         minute = 1_800_000_000_000
-        agg.process_trade({"s":"BTC-USDT","T":minute+1000,"p":"100","q":"2","m":False})
-        agg.process_trade({"s":"BTC-USDT","T":minute+2000,"p":"101","q":"1","m":True})
+        agg.process_trade({"s":"BTC-USDT","t":"trade-1","T":minute+1000,"p":"100","q":"2","m":False})
+        agg.process_trade({"s":"BTC-USDT","t":"trade-2","T":minute+2000,"p":"101","q":"1","m":True})
         agg.process_depth("BTC-USDT", minute+3000, {
             "bids":[["99","2"]], "asks":[["101","1"]]
         })
