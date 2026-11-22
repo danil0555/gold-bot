@@ -16,6 +16,10 @@ def sample_frame(periods=260, offset=0.0):
         "low": close * 0.996,
         "close": close,
         "volume": 1000 + (np.arange(periods) % 17) * 20,
+        "quote_volume": close * (1000 + (np.arange(periods) % 17) * 20),
+        "trade_count": 200 + (np.arange(periods) % 11) * 4,
+        "taker_buy_base": (1000 + (np.arange(periods) % 17) * 20) * 0.55,
+        "taker_buy_quote": close * (1000 + (np.arange(periods) % 17) * 20) * 0.55,
     })
 
 
