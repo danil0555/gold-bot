@@ -5,6 +5,10 @@ on:
     branches: [research/strategy-b-historical-backtest, research/binance-data-and-level-entry]
   workflow_dispatch:
 
+concurrency:
+  group: strategy-b-research-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   strategy-b-backtest:
     runs-on: ubuntu-latest
