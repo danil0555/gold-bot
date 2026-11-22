@@ -32,7 +32,7 @@ def test_feature_builder_produces_causal_finite_recent_features():
     features = add_features(frame, btc_returns)
     assert set(BASE_FEATURES).issubset(features.columns)
     assert features.iloc[-1][BASE_FEATURES].notna().all()
-    assert np.isfinite(features.iloc[-1][FEATURES].to_numpy(dtype=float)).all()
+    assert np.isfinite(features.iloc[-1][BASE_FEATURES].to_numpy(dtype=float)).all()
 
 
 def test_feature_values_before_future_change_are_unchanged():
