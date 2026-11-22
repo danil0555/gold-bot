@@ -137,3 +137,38 @@ def test_bingx_rate_limit_failure_preserves_exchange_message(monkeypatch):
 
     with pytest.raises(RuntimeError, match="IP cooldown active"):
         market_data.fetch_interval("BTC-USDT", "1m", 0, 60_000)
+
+
+
+def test_binance_kline_pagination_and_normalization(monkeypatch):
+    import json
+    from contextlib import contextmanager
+    from urllib.parse import parse_qs, urlparse
+
+    from scripts import backtest_strategy_b as backtest
+
+    base = 1_700_000_000_000
+    step = 60_000
+    requested = []
+
+    @contextmanager
+    def fake_urlopen(request, timeout=25):
+        query = parse_qs(urlparse(request.full_url).query)
+        cursor = int(query["startTime"][0])
+        requested.append(cursor)
+        rows = []
+        for i in range(3):
+            stamp = cursor + i * step
+            rows.append([stamp, "100", "101", "99", "100.5", "12",
+                         stamp + step - 1, "0", 10, "6", "0", "0"])
+        class Response:
+            def read(self):
+                return json.dumps(rows).encode()
+        yield Response()
+
+    monkeypatch.setattr(backtest.urllib.request, "urlopen", fake_urlopen)
+    frame = backtest.fetch_binance_history("XRP-USDT", "1m", base, base + 6 * step)
+    assert len(frame) == 3
+    assert requested == [base]
+    assert frame.iloc[0]["close"] == 100.5
+    assert frame.iloc[0]["volume"] == 12.0
