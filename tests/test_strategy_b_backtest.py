@@ -70,3 +70,68 @@ def test_bingx_pagination_continues_after_interval_page_cap(monkeypatch):
     assert frame["open_time"].iloc[-1] == 799 * step
     assert len(requested_windows) == 2
     assert requested_windows[1][0] == 400 * step
+
+
+
+def test_bingx_rate_limit_uses_long_cooldown_and_recovers(monkeypatch):
+    import json
+    from contextlib import contextmanager
+
+    from scripts import backtest_addons as market_data
+
+    responses = [
+        {"code": 100410, "msg": "rate limit", "data": []},
+        {"code": 100410, "msg": "rate limit", "data": []},
+        {"code": 100410, "msg": "rate limit", "data": []},
+        {"code": 0, "msg": "", "data": [{
+            "openTime": 0, "open": "100", "high": "101", "low": "99",
+            "close": "100", "volume": "10", "closeTime": 59_999,
+        }]},
+    ]
+    sleeps = []
+
+    @contextmanager
+    def fake_urlopen(request, timeout=25):
+        payload = responses.pop(0)
+
+        class Response:
+            def read(self):
+                return json.dumps(payload).encode()
+
+        yield Response()
+
+    monkeypatch.setattr(market_data.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(market_data.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(market_data.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(market_data, "LAST_API_REQUEST", 100.0)
+
+    frame = market_data.fetch_interval("BTC-USDT", "1m", 0, 60_000)
+
+    assert len(frame) == 1
+    assert [60, 120, 240] == [value for value in sleeps if value in (60, 120, 240)]
+
+
+def test_bingx_rate_limit_failure_preserves_exchange_message(monkeypatch):
+    import json
+    from contextlib import contextmanager
+
+    import pytest
+    from scripts import backtest_addons as market_data
+
+    @contextmanager
+    def fake_urlopen(request, timeout=25):
+        class Response:
+            def read(self):
+                return json.dumps({
+                    "code": 100410, "msg": "IP cooldown active", "data": []
+                }).encode()
+
+        yield Response()
+
+    monkeypatch.setattr(market_data.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(market_data.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(market_data.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(market_data, "LAST_API_REQUEST", 100.0)
+
+    with pytest.raises(RuntimeError, match="IP cooldown active"):
+        market_data.fetch_interval("BTC-USDT", "1m", 0, 60_000)
