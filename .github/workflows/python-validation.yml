@@ -1,4 +1,4 @@
-name: Python validation
+name: Python validation and spot-futures research
 
 concurrency:
   group: addon-validation-${{ github.ref }}
@@ -39,6 +39,6 @@ jobs:
         run: python -m scripts.spot_futures_arb --symbols BTC-USDT,ETH-USDT,SOL-USDT --notional 1000 --funding-periods 3
         timeout-minutes: 5
       - name: Run read-only BingX historical backtest (7 days)
-        if: github.event_name == 'push'
+        if: github.ref == 'refs/heads/fix/addon-strategies-diagnostics-20261121'
         run: python scripts/backtest_addons.py --days 7 --symbols BTC-USDT,ETH-USDT,SOL-USDT
         timeout-minutes: 20
