@@ -397,8 +397,9 @@ def build_panel(frames, cost, binance_frames):
         for horizon in (1, 4, 12, 24):
             future = f["close"].shift(-horizon)/f["close"]-1
             f[f"fwd_{horizon}h"] = future
+            # Keep every known outcome; do not condition the sample on future move size.
             f[f"label_{horizon}h"] = np.where(
-                future > cost, 1.0, np.where(future < -cost, 0.0, np.nan)
+                future.notna(), (future > 0).astype(float), np.nan
             )
         pieces.append(f)
     panel = pd.concat(pieces, ignore_index=True)
@@ -461,6 +462,19 @@ def _select_threshold(y_true, probabilities, forward_returns, cost, fallback):
     }
 
 
+def _select_available_features(panel, candidates, training_end_ms, min_coverage=0.60):
+    """Select usable columns from the training period only; never discard rows globally."""
+    training = panel.loc[panel["time"] < training_end_ms, candidates]
+    coverage = training.notna().mean()
+    selected = [
+        name for name in candidates
+        if float(coverage.get(name, 0.0)) >= min_coverage
+        and training[name].nunique(dropna=True) > 1
+    ]
+    report = {name: round(float(coverage.get(name, 0.0)), 4) for name in candidates}
+    return selected, report
+
+
 def _market_regime_breakdown(test, probabilities, threshold, cost):
     """Report held-out outcomes by BTC trend and volatility regime."""
     out = {}
@@ -474,6 +488,50 @@ def _market_regime_breakdown(test, probabilities, threshold, cost):
         )
         out[str(regime)] = metrics
     return out
+
+
+def _score_individual_features(train, valid, test, features, label_col, return_col, cost, fallback_threshold):
+    """Train one-feature diagnostics; choose thresholds on validation, report once on test."""
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    scores = []
+    for feature in features:
+        observed = train[feature].dropna()
+        if len(observed) < 100 or observed.nunique() < 2:
+            continue
+        model = make_pipeline(
+            SimpleImputer(strategy="median"), StandardScaler(),
+            LogisticRegression(max_iter=800, class_weight="balanced", C=0.2)
+        )
+        model.fit(train[[feature]], train[label_col].astype(int))
+        classes = list(model[-1].classes_)
+        if len(valid):
+            p_valid = model.predict_proba(valid[[feature]])[:, classes.index(1)]
+            threshold, threshold_report = _select_threshold(
+                valid[label_col].to_numpy(), p_valid, valid[return_col].to_numpy(),
+                cost, fallback_threshold
+            )
+        else:
+            threshold = fallback_threshold
+            threshold_report = {"method": "fixed_fallback_no_validation_rows", "threshold": threshold}
+        p_test = model.predict_proba(test[[feature]])[:, classes.index(1)]
+        metrics = _metrics(
+            test[label_col].to_numpy(), p_test, test[return_col].to_numpy(), cost, threshold
+        )
+        correlation = test[feature].corr(test[return_col], method="spearman")
+        scores.append({
+            "feature": feature,
+            "train_non_null_pct": round(float(train[feature].notna().mean()*100), 2),
+            "test_non_null_pct": round(float(test[feature].notna().mean()*100), 2),
+            "standardized_logistic_coefficient": round(float(model[-1].coef_[0][0]), 5),
+            "test_spearman_vs_forward_return": round(float(correlation), 5) if pd.notna(correlation) else None,
+            "threshold_selection": threshold_report,
+            "test_metrics_12bps": metrics,
+        })
+    return scores
 
 
 def run_research(args):
@@ -511,13 +569,32 @@ def run_research(args):
         raise RuntimeError(f"Only {len(frames)} symbols have sufficient history; need at least 5")
     panel = build_panel(frames, args.cost_bps/10_000, binance_frames)
     evaluation_start = now - args.days*86_400_000
+    print("PANEL_TIME_DIAGNOSTICS=" + json.dumps({
+        "now_ms": now, "evaluation_start_ms": evaluation_start,
+        "panel_rows_before_window": int(len(panel)),
+        "min_time_ms": int(panel["time"].min()) if len(panel) else None,
+        "max_time_ms": int(panel["time"].max()) if len(panel) else None,
+        "symbols": int(panel["symbol"].nunique()) if len(panel) else 0,
+    }), flush=True)
     panel = panel.loc[panel["time"] >= evaluation_start].copy()
-    panel = panel.dropna(subset=FEATURES, how="any")
+    print("PANEL_ROWS_IN_WINDOW=" + str(len(panel)), flush=True)
     unique_times = np.sort(panel["time"].unique())
     if len(unique_times) < 24*30:
-        raise RuntimeError(f"Insufficient aligned history after features: {len(unique_times)} timestamps")
+        raise RuntimeError(f"Insufficient aligned timestamps before feature filtering: {len(unique_times)}")
     cut1 = int(np.quantile(unique_times, 0.60))
     cut2 = int(np.quantile(unique_times, 0.80))
+    requested_features = list(FEATURES)
+    active_features, feature_coverage = _select_available_features(
+        panel, requested_features, cut1, min_coverage=0.60
+    )
+    if len(active_features) < 8:
+        raise RuntimeError(
+            "Insufficient usable features from training data: "
+            f"{len(active_features)}; coverage={feature_coverage}"
+        )
+    print("FEATURE_COVERAGE=" + json.dumps(
+        {"selected": active_features, "coverage": feature_coverage}, ensure_ascii=False
+    ), flush=True)
     train_context = panel.loc[panel["time"] < cut1, "btc_rv_24h"].dropna()
     btc_vol_cut = float(train_context.quantile(0.70)) if not train_context.empty else math.inf
     panel["btc_trend_regime"] = np.select(
@@ -542,9 +619,9 @@ def run_research(args):
         if len(train) < 500 or len(test) < 100:
             results[f"{horizon}h"] = {"status":"insufficient_samples","train":len(train),"validation":len(valid),"test":len(test)}
             continue
-        X_train, y_train = train[FEATURES], train[label_col].astype(int)
-        X_valid, y_valid = valid[FEATURES], valid[label_col].astype(int)
-        X_test, y_test = test[FEATURES], test[label_col].astype(int)
+        X_train, y_train = train[active_features], train[label_col].astype(int)
+        X_valid, y_valid = valid[active_features], valid[label_col].astype(int)
+        X_test, y_test = test[active_features], test[label_col].astype(int)
         models = {
             "logistic": make_pipeline(
                 SimpleImputer(strategy="median"), StandardScaler(),
@@ -561,6 +638,10 @@ def run_research(args):
         horizon_result = {
             "train_rows": int(len(train)), "validation_rows": int(len(valid)),
             "test_rows": int(len(test)), "test_symbols": int(test["symbol"].nunique()),
+            "individual_feature_scores": _score_individual_features(
+                train, valid, test, active_features, label_col, ret_col,
+                args.cost_bps/10_000, args.threshold
+            ),
             "train_period_utc": [
                 datetime.fromtimestamp(train["time"].min()/1000, tz=timezone.utc).isoformat(),
                 datetime.fromtimestamp(train["time"].max()/1000, tz=timezone.utc).isoformat()
@@ -623,9 +704,13 @@ def run_research(args):
         "actual_symbols": list(frames),
         "universe_candidates": len(universe),
         "symbol_quote_volume_24h": [item for item in universe if item["symbol"] in frames],
-        "features": FEATURES,
+        "features": active_features,
+        "requested_features": requested_features,
+        "training_feature_coverage": feature_coverage,
+        "feature_selection_rule": "At least 60% non-null coverage and non-constant values in the earliest 60% training period; missing rows imputed inside each model pipeline.",
         "cross_venue_data_source": "Binance Vision USD-M public 1h monthly/daily ZIP archives: quote volume, trade count and taker-buy quote volume; prior completed candle features only.",
         "label_cost_bps": args.cost_bps,
+        "target_definition": "Binary up/down direction on every row with a known future return; no samples are excluded based on future move size. Costs are applied only in validation/test net-return metrics.",
         "signal_probability_threshold": args.threshold,
         "data_limitations": [
             "Current listed contracts only: survivorship/listing-history bias remains.",
