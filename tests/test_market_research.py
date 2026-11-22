@@ -1,7 +1,9 @@
+import io
+import zipfile
 import numpy as np
 import pandas as pd
 
-from scripts.market_research import add_features, build_panel, BASE_FEATURES, CROSS_VENUE_FEATURES
+from scripts.market_research import add_features, build_panel, parse_binance_kline_archive, BASE_FEATURES, CROSS_VENUE_FEATURES
 
 
 def sample_frame(periods=260, offset=0.0):
@@ -67,3 +69,38 @@ def test_panel_labels_use_forward_returns_and_cost_barrier():
     assert pd.isna(panel.loc[panel.index[-1], "fwd_24h"])
     assert set(CROSS_VENUE_FEATURES).issubset(panel.columns)
     assert abs(row["binance_taker_imbalance_lag1"] - 0.1) < 1e-9
+
+
+
+def test_binance_public_archive_parser_handles_header_and_taker_buy_fields():
+    csv_text = (
+        "open_time,open,high,low,close,volume,close_time,quote_volume,number_of_trades,"
+        "taker_buy_base_asset_volume,taker_buy_quote_asset_volume,ignore\n"
+        "1700000000000,100,101,99,100.5,10,1700003599999,1005,42,6,603,0\n"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("BTCUSDT-1h-2023-11.csv", csv_text)
+    parsed = parse_binance_kline_archive(buffer.getvalue())
+    assert len(parsed) == 1
+    assert parsed.iloc[0]["time"] == 1_700_000_000_000
+    assert parsed.iloc[0]["quote_volume"] == 1005
+    assert parsed.iloc[0]["trade_count"] == 42
+    assert parsed.iloc[0]["taker_buy_quote"] == 603
+
+
+def test_binance_cross_venue_features_use_previous_completed_candle():
+    bingx = sample_frame()
+    original = sample_binance_frame()
+    changed = original.copy()
+    changed.loc[150:, ["close", "quote_volume", "trade_count", "taker_buy_quote"]] *= 2
+    base = build_panel(
+        {"BTC-USDT": bingx}, 0.0012, {"BTC-USDT": original}
+    )
+    altered = build_panel(
+        {"BTC-USDT": bingx}, 0.0012, {"BTC-USDT": changed}
+    )
+    cols = list(CROSS_VENUE_FEATURES)
+    pd.testing.assert_frame_equal(
+        base.loc[:149, cols], altered.loc[:149, cols], check_dtype=False
+    )
