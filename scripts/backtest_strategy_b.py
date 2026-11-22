@@ -134,6 +134,64 @@ def fetch_binance_history(symbol, interval, start_ms, end_ms):
         raise RuntimeError(f"No Binance candles returned for {symbol} {interval}")
     return frame.drop_duplicates("open_time").sort_values("open_time").reset_index(drop=True)
 
+def fetch_gate_history(symbol, interval, start_ms, end_ms):
+    """Fetch public Gate USDT perpetual candles; volume is normalized from quote turnover."""
+    step_ms = TF_MS[interval]
+    step_sec = step_ms // 1000
+    cursor_sec = int(start_ms // 1000)
+    end_sec = int(end_ms // 1000)
+    rows = []
+    base_url = "https://api.gateio.ws/api/v4/futures/usdt/candlesticks"
+    contract = symbol.replace("-", "_").upper()
+    while cursor_sec < end_sec:
+        window_end = min(cursor_sec + step_sec * 1900, end_sec)
+        query = urllib.parse.urlencode({
+            "contract": contract, "interval": interval,
+            "from": cursor_sec, "to": window_end,
+        })
+        request = urllib.request.Request(base_url + "?" + query, headers={
+            "Accept": "application/json",
+            "User-Agent": "gold-bot-readonly-backtest/1.0",
+        })
+        try:
+            with urllib.request.urlopen(request, timeout=25) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in (418, 429):
+                raise RuntimeError(f"Gate API rate/access limit HTTP {exc.code}; stopping safely") from exc
+            raise
+        if isinstance(payload, dict):
+            raise RuntimeError(f"Gate kline error for {symbol} {interval}: {payload}")
+        parsed = []
+        for row in payload or []:
+            try:
+                open_sec = int(float(row["t"]))
+                close = float(row["c"])
+                turnover = float(row.get("sum", 0) or 0)
+                volume = turnover / close if close > 0 and turnover > 0 else float(row.get("v", 0) or 0)
+                open_time = open_sec * 1000
+                if cursor_sec <= open_sec < window_end and close > 0:
+                    parsed.append((open_time, float(row["o"]), float(row["h"]),
+                                   float(row["l"]), close, volume, open_time + step_ms - 1))
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                continue
+        if not parsed:
+            break
+        rows.extend(parsed)
+        next_cursor = max(item[0] for item in parsed) // 1000 + step_sec
+        if next_cursor <= cursor_sec:
+            raise RuntimeError(f"Non-advancing Gate pagination for {symbol} {interval}")
+        cursor_sec = next_cursor
+        if len(parsed) < 1900:
+            break
+        time.sleep(0.15)
+    frame = pd.DataFrame(rows, columns=[
+        "open_time", "open", "high", "low", "close", "volume", "close_time"
+    ])
+    if frame.empty:
+        raise RuntimeError(f"No Gate USDT futures candles returned for {symbol} {interval}")
+    return frame.drop_duplicates("open_time").sort_values("open_time").reset_index(drop=True)
+
 def enrich_once(frame, enrich_fn):
     required = {
         "ema20", "ema50", "ema200", "rsi", "atr", "adx", "macd",
@@ -146,7 +204,7 @@ def enrich_once(frame, enrich_fn):
 
 
 def fetch_history(symbol, interval, start_ms, end_ms, now_ms, source):
-    raw = fetch_binance_history(symbol, interval, start_ms, end_ms) if source == "binance" else market_data.fetch_interval(symbol, interval, start_ms, end_ms)
+    raw = (fetch_gate_history(symbol, interval, start_ms, end_ms) if source == "gate" else fetch_binance_history(symbol, interval, start_ms, end_ms) if source == "binance" else market_data.fetch_interval(symbol, interval, start_ms, end_ms))
     frame = market_data.filter_closed_candles(raw, now_ms)
     expected = max(1, int((end_ms - start_ms) / TF_MS[interval]))
     coverage = len(frame) / expected
@@ -440,7 +498,7 @@ def run(args):
         "strategy": "B",
         "source": "exact build_signal_b and indicator functions extracted from main.py",
         "market_data_source": args.source,
-        "market_data_note": ("Binance USD-M futures candles; price/volume may differ from BingX live feed." if args.source == "binance" else "BingX USDT-M futures candles."),
+        "market_data_note": ("Gate USDT perpetual candles; volume normalized from quote turnover and may differ from BingX." if args.source == "gate" else "Binance USD-M futures candles; price/volume may differ from BingX live feed." if args.source == "binance" else "BingX USDT-M futures candles."),
         "period_days": args.days,
         "warmup_days": args.warmup_days,
         "symbols": symbols,
@@ -519,7 +577,7 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--warmup-days", type=int, default=60)
     parser.add_argument("--symbols", default="BTC-USDT,ETH-USDT,SOL-USDT")
-    parser.add_argument("--source", choices=("bingx", "binance"), default="bingx")
+    parser.add_argument("--source", choices=("bingx", "binance", "gate"), default="bingx")
     parser.add_argument("--level-entry-wait-minutes", type=int, default=8)
     args = parser.parse_args()
     if not 1 <= args.days <= 60:
