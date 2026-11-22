@@ -490,6 +490,50 @@ def _market_regime_breakdown(test, probabilities, threshold, cost):
     return out
 
 
+def _score_individual_features(train, valid, test, features, label_col, return_col, cost, fallback_threshold):
+    """Train one-feature diagnostics; choose thresholds on validation, report once on test."""
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    scores = []
+    for feature in features:
+        observed = train[feature].dropna()
+        if len(observed) < 100 or observed.nunique() < 2:
+            continue
+        model = make_pipeline(
+            SimpleImputer(strategy="median"), StandardScaler(),
+            LogisticRegression(max_iter=800, class_weight="balanced", C=0.2)
+        )
+        model.fit(train[[feature]], train[label_col].astype(int))
+        classes = list(model[-1].classes_)
+        if len(valid):
+            p_valid = model.predict_proba(valid[[feature]])[:, classes.index(1)]
+            threshold, threshold_report = _select_threshold(
+                valid[label_col].to_numpy(), p_valid, valid[return_col].to_numpy(),
+                cost, fallback_threshold
+            )
+        else:
+            threshold = fallback_threshold
+            threshold_report = {"method": "fixed_fallback_no_validation_rows", "threshold": threshold}
+        p_test = model.predict_proba(test[[feature]])[:, classes.index(1)]
+        metrics = _metrics(
+            test[label_col].to_numpy(), p_test, test[return_col].to_numpy(), cost, threshold
+        )
+        correlation = test[feature].corr(test[return_col], method="spearman")
+        scores.append({
+            "feature": feature,
+            "train_non_null_pct": round(float(train[feature].notna().mean()*100), 2),
+            "test_non_null_pct": round(float(test[feature].notna().mean()*100), 2),
+            "standardized_logistic_coefficient": round(float(model[-1].coef_[0][0]), 5),
+            "test_spearman_vs_forward_return": round(float(correlation), 5) if pd.notna(correlation) else None,
+            "threshold_selection": threshold_report,
+            "test_metrics_12bps": metrics,
+        })
+    return scores
+
+
 def run_research(args):
     now = int(time.time()*1000)
     # Extra history is fetched for indicator warm-up; only the requested period is evaluated.
@@ -586,6 +630,10 @@ def run_research(args):
         horizon_result = {
             "train_rows": int(len(train)), "validation_rows": int(len(valid)),
             "test_rows": int(len(test)), "test_symbols": int(test["symbol"].nunique()),
+            "individual_feature_scores": _score_individual_features(
+                train, valid, test, active_features, label_col, ret_col,
+                args.cost_bps/10_000, args.threshold
+            ),
             "train_period_utc": [
                 datetime.fromtimestamp(train["time"].min()/1000, tz=timezone.utc).isoformat(),
                 datetime.fromtimestamp(train["time"].max()/1000, tz=timezone.utc).isoformat()
