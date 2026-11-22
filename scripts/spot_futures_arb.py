@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import time
+import threading
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -25,6 +26,13 @@ DEFAULT_SWAP_TAKER_FEE = 0.0005
 DEFAULT_FUNDING_HAIRCUT = 0.50
 DEFAULT_STRESS_WIDENING_BPS = 50.0
 MAX_QUOTE_AGE_MS = 3_000
+_REQUEST_LOCK = threading.Lock()
+_LAST_REQUEST_BY_PATH: dict[str, float] = {}
+_REQUEST_INTERVAL_SEC = {
+    "/openApi/spot/v1/market/depth": 1.05,
+    "/openApi/swap/v2/quote/depth": 1.05,
+    "/openApi/swap/v2/quote/premiumIndex": 0.02,
+}
 
 
 class MarketDataError(RuntimeError):
@@ -211,6 +219,12 @@ def calculate_cash_carry(
 def _request(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     query = urllib.parse.urlencode(params or {})
     url = BASE_URL + path + (("?" + query) if query else "")
+    minimum_interval = _REQUEST_INTERVAL_SEC.get(path, 0.0)
+    with _REQUEST_LOCK:
+        elapsed = time.monotonic() - _LAST_REQUEST_BY_PATH.get(path, 0.0)
+        if elapsed < minimum_interval:
+            time.sleep(minimum_interval - elapsed)
+        _LAST_REQUEST_BY_PATH[path] = time.monotonic()
     request = urllib.request.Request(url, headers={
         "Accept": "application/json",
         "User-Agent": "gold-bot-spot-futures-research/1.0",
@@ -253,6 +267,7 @@ def fetch_symbol_snapshot(symbol: str, now_ms: int | None = None) -> dict[str, A
         "symbol": symbol, "spot_bids": spot_bids, "spot_asks": spot_asks,
         "swap_bids": swap_bids, "swap_asks": swap_asks,
         "funding_rate": rate, "next_funding_time": next_funding,
+        "funding_interval_hours": int(funding_data.get("fundingIntervalHours") or 8),
         "spot_book_time": spot_ts, "swap_book_time": swap_ts,
     }
 
@@ -276,6 +291,7 @@ def scan_symbols(symbols: tuple[str, ...] = DEFAULT_SYMBOLS,
                 swap_taker_fee=swap_taker_fee,
             )
             report["next_funding_time"] = snap["next_funding_time"]
+            report["funding_interval_hours"] = snap["funding_interval_hours"]
             report["spot_book_time"] = snap["spot_book_time"]
             report["swap_book_time"] = snap["swap_book_time"]
             report["eligible_candidate"] = (
