@@ -495,7 +495,8 @@ def run_research(args):
         "requested_universe": args.universe,
         "actual_symbols": list(frames),
         "symbol_quote_volume_24h": universe,
-        "features": FEATURES,\n        "cross_venue_data_source": "Binance USD-M public 1h klines: quote volume, trade count and taker-buy quote volume; prior completed candle features only.",
+        "features": FEATURES,
+        "cross_venue_data_source": "Binance USD-M public 1h klines: quote volume, trade count and taker-buy quote volume; prior completed candle features only.",
         "label_cost_bps": args.cost_bps,
         "signal_probability_threshold": args.threshold,
         "data_limitations": [
