@@ -435,8 +435,9 @@ def run_research(args):
         binance_symbol = symbol.replace("-", "")
         print(f"FETCH {symbol} on BingX and Binance", flush=True)
         try:
-            raw = fetch_klines(symbol, start, now)
+            # Probe Binance archive first so non-crypto BingX instruments are skipped cheaply.
             bn_raw = fetch_binance_klines(binance_symbol, start, now)
+            raw = fetch_klines(symbol, start, now)
         except Exception as exc:
             print(f"SKIP_DATA_ERROR {symbol}: {exc}", flush=True)
             continue
@@ -538,7 +539,7 @@ def run_research(args):
         "evaluation_days": args.days,
         "requested_universe": args.universe,
         "actual_symbols": list(frames),
-        "symbol_quote_volume_24h": universe,
+        "universe_candidates": len(universe),\n        "symbol_quote_volume_24h": [item for item in universe if item["symbol"] in frames],
         "features": FEATURES,
         "cross_venue_data_source": "Binance Vision USD-M public 1h monthly/daily ZIP archives: quote volume, trade count and taker-buy quote volume; prior completed candle features only.",
         "label_cost_bps": args.cost_bps,
