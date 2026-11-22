@@ -3,7 +3,7 @@ import zipfile
 import numpy as np
 import pandas as pd
 
-from scripts.market_research import add_features, build_panel, parse_binance_kline_archive, _select_threshold, BASE_FEATURES, CROSS_VENUE_FEATURES
+from scripts.market_research import add_features, build_panel, parse_binance_kline_archive, _select_threshold, add_bingx_flow_features, BASE_FEATURES, BINGX_FLOW_FEATURES, CROSS_VENUE_FEATURES
 
 
 def sample_frame(periods=260, offset=0.0):
@@ -126,3 +126,28 @@ def test_validation_threshold_falls_back_when_too_few_validation_signals():
     threshold, report = _select_threshold(y, probabilities, returns, 0.0012, 0.58)
     assert threshold == 0.58
     assert report["method"] == "fixed_fallback_no_validation_threshold_met"
+
+
+
+def test_bingx_flow_features_are_lagged_and_finite():
+    frame = sample_frame()
+    features = add_bingx_flow_features(frame)
+    assert set(BINGX_FLOW_FEATURES).issubset(features.columns)
+    assert features.iloc[-1][BINGX_FLOW_FEATURES].notna().all()
+    changed = frame.copy()
+    changed.loc[150:, ["close", "quote_volume", "trade_count", "taker_buy_quote"]] *= 2
+    changed_features = add_bingx_flow_features(changed)
+    pd.testing.assert_frame_equal(
+        features.loc[:149, BINGX_FLOW_FEATURES],
+        changed_features.loc[:149, BINGX_FLOW_FEATURES],
+        check_dtype=False,
+    )
+
+
+def test_bingx_only_panel_has_flow_features_without_binance_data():
+    btc = sample_frame()
+    alt = sample_frame(offset=10.0)
+    panel = build_panel({"BTC-USDT": btc, "ALT-USDT": alt}, 0.0012, {})
+    assert set(BINGX_FLOW_FEATURES).issubset(panel.columns)
+    assert panel.loc[panel["symbol"] == "BTC-USDT"].iloc[-2][BINGX_FLOW_FEATURES].notna().all()
+    assert panel["binance_taker_imbalance_lag1"].isna().all()
