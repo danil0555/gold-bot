@@ -36,6 +36,7 @@ def test_bingx_pagination_continues_after_interval_page_cap(monkeypatch):
     from scripts import backtest_addons as market_data
 
     step = 300_000
+    base = 1_700_000_000_000
     requested_windows = []
 
     @contextmanager
@@ -63,13 +64,13 @@ def test_bingx_pagination_continues_after_interval_page_cap(monkeypatch):
     monkeypatch.setattr(market_data.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(market_data, "LAST_API_REQUEST", 100.0)
 
-    frame = market_data.fetch_interval("BTC-USDT", "5m", 0, 800 * step)
+    frame = market_data.fetch_interval("BTC-USDT", "5m", base, base + 800 * step)
 
     assert len(frame) == 800
-    assert frame["open_time"].iloc[0] == 0
-    assert frame["open_time"].iloc[-1] == 799 * step
+    assert frame["open_time"].iloc[0] == base
+    assert frame["open_time"].iloc[-1] == base + 799 * step
     assert len(requested_windows) == 2
-    assert requested_windows[1][0] == 400 * step
+    assert requested_windows[1][0] == base + 400 * step
 
 
 
@@ -79,13 +80,14 @@ def test_bingx_rate_limit_uses_long_cooldown_and_recovers(monkeypatch):
 
     from scripts import backtest_addons as market_data
 
+    base = 1_700_000_000_000
     responses = [
         {"code": 100410, "msg": "rate limit", "data": []},
         {"code": 100410, "msg": "rate limit", "data": []},
         {"code": 100410, "msg": "rate limit", "data": []},
         {"code": 0, "msg": "", "data": [{
-            "openTime": 0, "open": "100", "high": "101", "low": "99",
-            "close": "100", "volume": "10", "closeTime": 59_999,
+            "openTime": base, "open": "100", "high": "101", "low": "99",
+            "close": "100", "volume": "10", "closeTime": base + 59_999,
         }]},
     ]
     sleeps = []
@@ -105,7 +107,7 @@ def test_bingx_rate_limit_uses_long_cooldown_and_recovers(monkeypatch):
     monkeypatch.setattr(market_data.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(market_data, "LAST_API_REQUEST", 100.0)
 
-    frame = market_data.fetch_interval("BTC-USDT", "1m", 0, 60_000)
+    frame = market_data.fetch_interval("BTC-USDT", "1m", base, base + 60_000)
 
     assert len(frame) == 1
     assert [60, 120, 240] == [value for value in sleeps if value in (60, 120, 240)]
