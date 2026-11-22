@@ -150,3 +150,22 @@ def test_feature_coverage_selection_uses_training_only_and_keeps_partial_rows():
     assert coverage["sparse"] < 0.60
     assert coverage["future_only"] == 0.0
     assert len(panel) == 260
+
+
+
+def test_individual_feature_score_uses_validation_threshold_and_reports_test_metrics():
+    from scripts.market_research import _score_individual_features
+
+    rng = np.random.default_rng(17)
+    x = rng.normal(size=700)
+    y = (x + rng.normal(scale=0.35, size=700) > 0).astype(int)
+    returns = np.where(y == 1, 0.006, -0.006) + rng.normal(scale=0.001, size=700)
+    frame = pd.DataFrame({"signal": x, "label": y, "forward": returns})
+    train, valid, test = frame.iloc[:450], frame.iloc[450:575], frame.iloc[575:]
+    scores = _score_individual_features(
+        train, valid, test, ["signal"], "label", "forward", 0.0012, 0.58
+    )
+    assert len(scores) == 1
+    assert scores[0]["feature"] == "signal"
+    assert scores[0]["test_metrics_12bps"]["observations"] == 125
+    assert "test_spearman_vs_forward_return" in scores[0]
