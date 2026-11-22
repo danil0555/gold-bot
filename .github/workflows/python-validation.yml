@@ -40,7 +40,7 @@ jobs:
         timeout-minutes: 5
       - name: Run 60-day read-only spot-perpetual historical backtest
         if: github.event_name == 'pull_request' || github.ref == 'refs/heads/research/spot-futures-arbitrage'
-        run: python -m scripts.backtest_spot_futures_arb --days 60 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --notional 1000
+        run: python -m scripts.backtest_spot_futures_arb --days 180 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --notional 1000
         timeout-minutes: 15
       - name: Run read-only BingX historical backtest (7 days)
         if: github.ref == 'refs/heads/fix/addon-strategies-diagnostics-20261121'
