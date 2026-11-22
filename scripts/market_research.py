@@ -439,11 +439,13 @@ def build_panel(frames, cost, binance_frames):
         f = f.reset_index()
         f["symbol"] = symbol
         for horizon in (1, 4, 12, 24):
-            future = f["close"].shift(-horizon)/f["close"]-1
+            # The signal is known only after candle t closes. Model the earliest
+            # executable entry at the next candle open, then hold for horizon hours.
+            entry = f["open"].shift(-1)
+            exit_price = f["close"].shift(-horizon)
+            future = exit_price / entry - 1
             f[f"fwd_{horizon}h"] = future
-            # Binary direction target for every completed outcome. Do not filter
-            # samples by whether the FUTURE move exceeded transaction costs:
-            # that would create outcome-dependent selection / look-ahead bias.
+            # Keep every known outcome; never select rows by future move size.
             f[f"label_{horizon}h"] = np.where(
                 future.notna(), (future > 0).astype(float), np.nan
             )
@@ -876,7 +878,8 @@ def run_research(args):
         "market_data_source": "BingX public USDT-M klines including quote volume, trade count and taker-buy quote volume; prior completed candle flow features only.",
         "cross_venue_data_source": None if args.bingx_only else "Binance Vision USD-M public 1h monthly/daily ZIP archives; research-only under published non-commercial terms.",
         "label_cost_bps": args.cost_bps,
-        "target_definition": "Binary up/down direction on every row with a known future return; no samples are excluded based on future move size. Costs are applied only in validation/test net-return metrics.",
+        "target_definition": "Binary up/down direction on every row with a known future return; no samples are excluded based on future move size. Signal is formed after candle close, entry is modeled at the next candle open, and exit is the close after the requested holding horizon. Costs are applied only in validation/test net-return metrics.",
+        "execution_assumption": "Completed-candle signal -> next-candle open entry -> close after 1/4/12/24 hours; spread, slippage and fees are approximated by fixed round-trip cost scenarios, not order-book replay.",
         "signal_probability_threshold": args.threshold,
         "data_limitations": [
             "Current listed contracts only: survivorship/listing-history bias remains.",
