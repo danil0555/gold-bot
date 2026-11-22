@@ -441,8 +441,11 @@ def build_panel(frames, cost, binance_frames):
         for horizon in (1, 4, 12, 24):
             future = f["close"].shift(-horizon)/f["close"]-1
             f[f"fwd_{horizon}h"] = future
+            # Binary direction target for every completed outcome. Do not filter
+            # samples by whether the FUTURE move exceeded transaction costs:
+            # that would create outcome-dependent selection / look-ahead bias.
             f[f"label_{horizon}h"] = np.where(
-                future > cost, 1.0, np.where(future < -cost, 0.0, np.nan)
+                future.notna(), (future > 0).astype(float), np.nan
             )
         pieces.append(f)
     panel = pd.concat(pieces, ignore_index=True)
@@ -704,7 +707,7 @@ def run_research(args):
         "features": active_features,\n        "requested_features": requested_features,\n        "training_feature_coverage": feature_coverage,\n        "feature_selection_rule": "At least 60% non-null coverage and non-constant values in the earliest 60% training period; missing rows imputed inside each model pipeline.",
         "market_data_source": "BingX public USDT-M klines including quote volume, trade count and taker-buy quote volume; prior completed candle flow features only.",
         "cross_venue_data_source": None if args.bingx_only else "Binance Vision USD-M public 1h monthly/daily ZIP archives; research-only under published non-commercial terms.",
-        "label_cost_bps": args.cost_bps,
+        "label_cost_bps": args.cost_bps,\n        "target_definition": "Binary up/down direction on every row with a known future return; no samples are excluded based on future move size. Costs are applied only in validation/test net-return metrics.",
         "signal_probability_threshold": args.threshold,
         "data_limitations": [
             "Current listed contracts only: survivorship/listing-history bias remains.",
