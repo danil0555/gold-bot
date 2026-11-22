@@ -2,7 +2,7 @@ name: Strategy B historical backtest
 
 on:
   push:
-    branches: [research/strategy-b-historical-backtest, research/binance-data-and-level-entry]
+    branches: [research/strategy-b-historical-backtest, research/binance-data-and-level-entry, research/strategy-b-expanded-universe]
   workflow_dispatch:
 
 concurrency:
@@ -26,6 +26,6 @@ jobs:
         run: python -m compileall -q .
       - name: Run deterministic tests
         run: python -m pytest -q tests/test_strategy_b_backtest.py tests/test_addon_strategies.py
-      - name: Run 60-day Strategy B historical simulation
-        run: python -m scripts.backtest_strategy_b --days 60 --warmup-days 60 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT --source okx --replay-symbol XRP-USDT --replay-time-utc 2026-11-22T05:37:00+00:00
+      - name: Run 60-day Strategy B expanded-universe historical simulation
+        run: python -m scripts.backtest_strategy_b --days 60 --warmup-days 60 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --source okx --replay-symbol XRP-USDT --replay-time-utc 2026-11-22T05:37:00+00:00
         timeout-minutes: 40
