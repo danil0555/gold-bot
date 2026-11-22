@@ -569,7 +569,15 @@ def run_research(args):
         raise RuntimeError(f"Only {len(frames)} symbols have sufficient history; need at least 5")
     panel = build_panel(frames, args.cost_bps/10_000, binance_frames)
     evaluation_start = now - args.days*86_400_000
+    print("PANEL_TIME_DIAGNOSTICS=" + json.dumps({
+        "now_ms": now, "evaluation_start_ms": evaluation_start,
+        "panel_rows_before_window": int(len(panel)),
+        "min_time_ms": int(panel["time"].min()) if len(panel) else None,
+        "max_time_ms": int(panel["time"].max()) if len(panel) else None,
+        "symbols": int(panel["symbol"].nunique()) if len(panel) else 0,
+    }), flush=True)
     panel = panel.loc[panel["time"] >= evaluation_start].copy()
+    print("PANEL_ROWS_IN_WINDOW=" + str(len(panel)), flush=True)
     unique_times = np.sort(panel["time"].unique())
     if len(unique_times) < 24*30:
         raise RuntimeError(f"Insufficient aligned timestamps before feature filtering: {len(unique_times)}")
