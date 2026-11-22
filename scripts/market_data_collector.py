@@ -205,9 +205,15 @@ class MarketMinuteAggregator:
             avg("imb5"), avg("imb20"), avg("micro"), len(spreads), w["mids"][-1] if w["mids"] else None,
         )
         self.db.execute("""
-            INSERT OR REPLACE INTO minute_features VALUES (
-                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
-            )
+            INSERT OR REPLACE INTO minute_features (
+                symbol,minute_ts,trades_count,buy_trades,sell_trades,
+                buy_quote_usdt,sell_quote_usdt,cvd_quote_usdt,taker_imbalance,
+                avg_spread_bps,min_spread_bps,max_spread_bps,
+                avg_bid_depth5_usdt,avg_ask_depth5_usdt,
+                avg_bid_depth20_usdt,avg_ask_depth20_usdt,
+                avg_book_imbalance5,avg_book_imbalance20,
+                avg_microprice_offset_bps,depth_samples,last_mid
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, row)
 
     def flush_before(self, timestamp_ms):
