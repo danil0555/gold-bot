@@ -240,6 +240,42 @@ def fetch_klines(symbol, start_ms, end_ms):
     return frame.drop_duplicates("time").sort_values("time").reset_index(drop=True)
 
 
+def fetch_funding_rates(symbol, start_ms, end_ms):
+    """Fetch settled BingX funding events using the public market-data endpoint."""
+    rows = []
+    cursor = int(start_ms)
+    while cursor < end_ms:
+        payload = get_json(
+            "/openApi/swap/v2/quote/fundingRate",
+            {"symbol": symbol, "startTime": cursor, "endTime": int(end_ms), "limit": 1000},
+        )
+        batch = _rows(payload)
+        parsed = []
+        for item in batch:
+            if not isinstance(item, dict):
+                continue
+            try:
+                stamp = int(item.get("fundingTime", item.get("time", 0)))
+                rate = float(item["fundingRate"])
+                if stamp > 0 and math.isfinite(rate) and cursor <= stamp <= end_ms:
+                    parsed.append((stamp, rate))
+            except (TypeError, ValueError, KeyError, OverflowError):
+                continue
+        if not parsed:
+            break
+        rows.extend(parsed)
+        next_cursor = max(stamp for stamp, _ in parsed) + 1
+        if next_cursor <= cursor:
+            break
+        cursor = next_cursor
+        if len(batch) < 1000:
+            break
+    frame = pd.DataFrame(rows, columns=["funding_time", "funding_rate"])
+    if frame.empty:
+        return frame
+    return frame.drop_duplicates("funding_time").sort_values("funding_time").reset_index(drop=True)
+
+
 def fetch_binance_klines(symbol, start_ms, end_ms):
     """Fetch Binance USD-M 1h klines from official monthly/daily public ZIP archives."""
     start_date = datetime.fromtimestamp(start_ms/1000, tz=timezone.utc).date()
@@ -364,6 +400,36 @@ def add_bingx_flow_features(frame):
     return out
 
 
+FUNDING_FEATURES = [
+    "funding_rate_lag1", "funding_rate_change_lag1", "funding_rate_z_90_lag1",
+]
+
+
+def add_bingx_funding_features(frame, funding_frame):
+    """Attach only already-settled funding observations; lag by one completed candle."""
+    x = frame.sort_values("time")
+    out = pd.DataFrame(index=x["time"])
+    if funding_frame is None or funding_frame.empty:
+        for column in FUNDING_FEATURES:
+            out[column] = np.nan
+        return out
+    events = funding_frame.sort_values("funding_time").drop_duplicates("funding_time").copy()
+    rate = events["funding_rate"].astype(float)
+    rolling_mean = rate.rolling(90, min_periods=12).mean()
+    rolling_std = rate.rolling(90, min_periods=12).std()
+    events["funding_rate_change"] = rate.diff()
+    events["funding_rate_z_90"] = (rate-rolling_mean)/rolling_std.replace(0, np.nan)
+    merged = pd.merge_asof(
+        x[["time"]].sort_values("time"),
+        events[["funding_time", "funding_rate", "funding_rate_change", "funding_rate_z_90"]].sort_values("funding_time"),
+        left_on="time", right_on="funding_time", direction="backward",
+    )
+    out["funding_rate_lag1"] = merged["funding_rate"].shift(1).to_numpy()
+    out["funding_rate_change_lag1"] = merged["funding_rate_change"].shift(1).to_numpy()
+    out["funding_rate_z_90_lag1"] = merged["funding_rate_z_90"].shift(1).to_numpy()
+    return out
+
+
 BASE_FEATURES = [
     "ret_1h", "ret_3h", "ret_6h", "ret_12h", "ret_24h", "ret_72h", "ret_168h",
     "rv_24h", "rv_72h", "rv_ratio", "atr_pct_14", "ema_gap_12_26",
@@ -380,7 +446,8 @@ CROSS_VENUE_FEATURES = [
     "cross_venue_return_gap_lag1",
 ]
 FEATURES = BASE_FEATURES + CROSS_VENUE_FEATURES
-BINGX_FEATURES = BASE_FEATURES + BINGX_FLOW_FEATURES
+BINGX_BASE_FEATURES = BASE_FEATURES + BINGX_FLOW_FEATURES
+BINGX_FEATURES = BINGX_BASE_FEATURES + FUNDING_FEATURES
 
 
 def add_cross_venue_features(bingx_frame, binance_frame):
@@ -408,7 +475,8 @@ def add_cross_venue_features(bingx_frame, binance_frame):
     return features
 
 
-def build_panel(frames, cost, binance_frames):
+def build_panel(frames, cost, binance_frames, funding_frames=None):
+    funding_frames = funding_frames or {}
     btc = frames.get("BTC-USDT")
     btc_returns = None
     btc_context = None
@@ -425,6 +493,8 @@ def build_panel(frames, cost, binance_frames):
         f = add_features(raw, btc_returns).set_index("time")
         flow = add_bingx_flow_features(raw)
         f = f.join(flow, how="left")
+        funding_features = add_bingx_funding_features(raw, funding_frames.get(symbol))
+        f = f.join(funding_features, how="left")
         if symbol in binance_frames:
             cross = add_cross_venue_features(raw, binance_frames[symbol])
             f = f.join(cross, how="left")
@@ -531,6 +601,7 @@ def run_research(args):
     print("UNIVERSE="+",".join(x["symbol"] for x in universe), flush=True)
     frames = {}
     binance_frames = {}
+    funding_frames = {}
     for item in universe:
         symbol = item["symbol"]
         binance_symbol = symbol.replace("-", "")
@@ -538,6 +609,7 @@ def run_research(args):
         try:
             raw = fetch_klines(symbol, start, now)
             bn_raw = None if args.bingx_only else fetch_binance_klines(binance_symbol, start, now)
+            funding_raw = fetch_funding_rates(symbol, start, now) if args.with_funding else None
         except Exception as exc:
             print(f"SKIP_DATA_ERROR {symbol}: {exc}", flush=True)
             continue
@@ -548,14 +620,19 @@ def run_research(args):
         if len(raw) < args.days*24*0.9 or (bn_raw is not None and len(bn_raw) < args.days*24*0.9):
             print(f"SKIP_INCOMPLETE {symbol} bingx={len(raw)} binance={len(bn_raw) if bn_raw is not None else 'not_requested'}", flush=True)
             continue
+        if args.with_funding and (funding_raw is None or len(funding_raw) < 12):
+            print(f"SKIP_FUNDING_HISTORY {symbol}: insufficient settled funding rows", flush=True)
+            continue
         frames[symbol] = raw
         if bn_raw is not None:
             binance_frames[symbol] = bn_raw
-        print(f"FETCHED {symbol} bingx={len(raw)} binance={len(bn_raw) if bn_raw is not None else 'not_requested'}", flush=True)
+        if funding_raw is not None:
+            funding_frames[symbol] = funding_raw
+        print(f"FETCHED {symbol} bingx={len(raw)} binance={len(bn_raw) if bn_raw is not None else 'not_requested'} funding={len(funding_raw) if funding_raw is not None else 'not_requested'}", flush=True)
     if len(frames) < 5:
         raise RuntimeError(f"Only {len(frames)} symbols have sufficient history; need at least 5")
-    panel = build_panel(frames, args.cost_bps/10_000, binance_frames)
-    active_features = BINGX_FEATURES if args.bingx_only else FEATURES
+    panel = build_panel(frames, args.cost_bps/10_000, binance_frames, funding_frames)
+    active_features = (BINGX_FEATURES if args.with_funding else BINGX_BASE_FEATURES) if args.bingx_only else FEATURES
     evaluation_start = now - args.days*86_400_000
     panel = panel.loc[panel["time"] >= evaluation_start].copy()
     panel = panel.dropna(subset=active_features, how="any")
@@ -670,7 +747,8 @@ def run_research(args):
         "universe_candidates": len(universe),
         "symbol_quote_volume_24h": [item for item in universe if item["symbol"] in frames],
         "features": active_features,
-        "market_data_source": "BingX public USDT-M klines including quote volume, trade count and taker-buy quote volume; prior completed candle flow features only.",
+        "market_data_source": "BingX public USDT-M klines and, when enabled, settled historical funding events; prior completed candle features only.",
+        "funding_data_source": "BingX public settled funding history" if args.with_funding else None,
         "cross_venue_data_source": None if args.bingx_only else "Binance Vision USD-M public 1h monthly/daily ZIP archives; research-only under published non-commercial terms.",
         "label_cost_bps": args.cost_bps,
         "signal_probability_threshold": args.threshold,
@@ -715,6 +793,7 @@ if __name__ == "__main__":
     parser.add_argument("--cost-bps", type=float, default=12.0)
     parser.add_argument("--threshold", type=float, default=0.58)
     parser.add_argument("--bingx-only", action="store_true", help="Use only BingX data; no Binance Vision archives")
+    parser.add_argument("--with-funding", action="store_true", help="Include settled BingX funding history")
     parser.add_argument("--output-dir", default="research-output")
     args = parser.parse_args()
     if not 30 <= args.days <= 365:
