@@ -84,6 +84,19 @@ def simulate_single_tp(signal, minute_frame, signal_index, target_r):
     }
 
 
+
+def update_busy_until(outcome, current_busy_until, last_index):
+    """Keep a simulated position active until its real exit or dataset end.
+
+    A skipped entry never occupies a position. An unresolved trade remains open
+    through the final candle and must block later same-symbol entries.
+    """
+    if outcome is None or outcome.get("status") == "skipped_drift":
+        return current_busy_until
+    if outcome.get("status") == "unresolved":
+        return max(int(current_busy_until), int(last_index))
+    return max(int(current_busy_until), int(outcome["exit_index"]))
+
 def prepare_history(args):
     now = int(time.time() * 1000)
     eval_start = now - args.days * 86_400_000
@@ -170,9 +183,9 @@ def run_target(args, target_r, ns, histories):
                 continue
             counters["signals"] += 1
             counters[outcome["status"]] += 1
+            busy_until = update_busy_until(outcome, busy_until, len(m1) - 1)
             if outcome["status"] in ("skipped_drift", "unresolved"):
                 continue
-            busy_until = int(outcome["exit_index"])
             outcome["entry_time"] = int(m1.iloc[i + 1]["open_time"])
             outcome["exit_time"] = int(m1.iloc[outcome["exit_index"]]["open_time"])
             outcome["stop_distance_pct"] = (
