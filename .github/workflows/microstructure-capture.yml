@@ -1,0 +1,76 @@
+name: Read-only BingX microstructure capture
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_hours:
+        description: "Capture duration (2.5 to 4.5 hours; enough for rolling lookback)"
+        required: true
+        type: number
+        default: 4
+      symbols:
+        description: "USDT-M symbols, comma-separated"
+        required: true
+        type: string
+        default: "BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT"
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install read-only collector dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Validate capture settings
+        env:
+          DURATION_HOURS: ${{ inputs.duration_hours }}
+          SYMBOLS: ${{ inputs.symbols }}
+        run: |
+          python - <<'PY'
+          import os
+          hours = float(os.environ["DURATION_HOURS"])
+          symbols = [s.strip() for s in os.environ["SYMBOLS"].split(",") if s.strip()]
+          if not 2.5 <= hours <= 4.5:
+              raise SystemExit("duration_hours must be between 2.5 and 4.5")
+          if not 2 <= len(symbols) <= 20 or any(not s.endswith("-USDT") for s in symbols):
+              raise SystemExit("Provide 2 to 20 USDT-M symbols")
+          print(f"Validated read-only capture: {hours} hours, {len(symbols)} symbols")
+          PY
+      - name: Capture public BingX trades, depth, candles and derivatives
+        run: |
+          python -m scripts.market_data_collector \
+            --symbols "${{ inputs.symbols }}" \
+            --duration-hours "${{ inputs.duration_hours }}" \
+            --derivatives-interval 30 \
+            --db-path /tmp/market_microstructure.sqlite3
+      - name: Build event-study report
+        run: |
+          python -m scripts.microstructure_event_study \
+            --db /tmp/market_microstructure.sqlite3 \
+            --cost-bps 12 \
+            --output /tmp/microstructure_event_study.json
+      - name: Upload raw research database
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bingx-microstructure-capture
+          path: /tmp/market_microstructure.sqlite3
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Upload event-study report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bingx-microstructure-event-study
+          path: /tmp/microstructure_event_study.json
+          retention-days: 14
+          if-no-files-found: warn
