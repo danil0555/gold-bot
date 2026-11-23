@@ -6,7 +6,7 @@ concurrency:
 
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model, research/market-feature-ablation]
+    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model, research/market-feature-ablation, research/market-walkforward-regimes]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -33,7 +33,7 @@ jobs:
           BACKUP_DIR: /tmp/trading_bot_ci_backups
         run: python -c "import main; assert main.REAL_TRADING_ENABLED is False; assert main.ENABLE_ADDON_STRATEGIES is False; assert main.RISK_PERCENT == 2.0; assert main.FUTURES_LEVERAGE == 5; print('runtime import OK; real orders OFF; add-ons OFF')"
       - name: Run deterministic strategy and research tests
-        run: python -m pytest -q tests/test_addon_strategies.py tests/test_spot_futures_arb.py tests/test_backtest_spot_futures_arb.py tests/test_scalping_100.py tests/test_market_research.py
+        run: python -m pytest -q tests/test_addon_strategies.py tests/test_spot_futures_arb.py tests/test_backtest_spot_futures_arb.py tests/test_scalping_100.py tests/test_market_research.py tests/test_market_walkforward.py
       - name: Run read-only public BingX spot-perpetual smoke scan
         if: github.event_name == 'pull_request' || github.ref == 'refs/heads/research/spot-futures-arbitrage'
         run: python -m scripts.spot_futures_arb --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --notional 1000 --funding-periods 3
@@ -64,6 +64,17 @@ jobs:
         with:
           name: market-research-bingx-only-180d
           path: research-output/market_research_180d.json
+          if-no-files-found: warn
+      - name: Run 180-day BingX walk-forward regime research
+        if: github.ref == 'refs/heads/research/market-walkforward-regimes'
+        run: python scripts/market_walkforward.py --days 180 --universe 30 --min-quote-volume 5000000 --cost-bps 12 --threshold 0.58 --train-days 60 --validation-days 30 --test-days 30 --step-days 30
+        timeout-minutes: 70
+      - name: Upload walk-forward regime report
+        if: always() && github.ref == 'refs/heads/research/market-walkforward-regimes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-walkforward-regimes-180d
+          path: research-output/market_walkforward_regimes.json
           if-no-files-found: warn
       - name: Upload research report
         if: always() && github.ref == 'refs/heads/research/market-discovery-engine'
