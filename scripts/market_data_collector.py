@@ -144,6 +144,7 @@ class MarketMinuteAggregator:
         self.pending = {}
         self.seen_trade_ids = set()
         self.trade_id_order = deque(maxlen=50_000)
+        self.kline_diagnostics_seen = set()
 
     def _window(self, symbol, timestamp_ms):
         minute_ts = int(timestamp_ms // 60_000 * 60_000)
@@ -247,8 +248,14 @@ class MarketMinuteAggregator:
         """Persist the latest BingX 1m kline update; research queries must use closed rows only."""
         kline = candle.get("K", candle) if isinstance(candle, dict) else {}
         try:
-            minute_ts = int(kline.get("t", kline.get("openTime", 0)))
             close_ts = int(kline.get("T", kline.get("closeTime", 0)))
+            raw_open_ts = kline.get("t", kline.get("openTime"))
+            # BingX swap WS messages observed in production smoke tests may
+            # omit K.t while retaining K.T and OHLCV. For a 1m stream, derive
+            # the candle start from its documented close timestamp.
+            minute_ts = int(raw_open_ts) if raw_open_ts not in (None, "") else (
+                close_ts // 60_000 * 60_000 if close_ts > 0 else 0
+            )
             values = [float(kline[key]) for key in ("o", "h", "l", "c", "v")]
             open_price, high, low, close, volume = values
             if minute_ts <= 0 or close_ts <= minute_ts or not all(map(math.isfinite, values)):
@@ -258,11 +265,16 @@ class MarketMinuteAggregator:
             if high < max(open_price, close, low) or low > min(open_price, close, high):
                 return False
             is_closed = int(close_ts < int(time.time()*1000) - 2_000)
+            # Keep only completed candles: the stream updates the active bar
+            # repeatedly, so persisting each partial update causes needless
+            # SQLite writes and risks treating an unfinished bar as history.
+            if not is_closed:
+                return True
             self.db.execute("""
                 INSERT OR REPLACE INTO minute_candles
                 (symbol,minute_ts,close_ts,open,high,low,close,volume,is_closed)
                 VALUES (?,?,?,?,?,?,?,?,?)
-            """, (str(symbol).upper(), minute_ts, close_ts, open_price, high, low, close, volume, is_closed))
+            """, (str(symbol).upper(), minute_ts, close_ts, open_price, high, low, close, volume, 1))
             self.db.commit()
             return True
         except (TypeError, ValueError, KeyError, OverflowError):
@@ -405,11 +417,16 @@ async def websocket_loop(session, aggregator, symbols):
                         candles = data if isinstance(data, list) else [data]
                         for candle in candles:
                             accepted = aggregator.save_candle(symbol, candle)
-                            aggregator.event(
-                                "kline_update",
-                                f"dataType={data_type} accepted={accepted} "
-                                f"keys={sorted(candle.keys()) if isinstance(candle, dict) else type(candle).__name__}",
-                            )
+                            if symbol not in aggregator.kline_diagnostics_seen:
+                                aggregator.kline_diagnostics_seen.add(symbol)
+                                kline_obj = candle.get("K", candle) if isinstance(candle, dict) else {}
+                                aggregator.event(
+                                    "kline_update_first",
+                                    f"dataType={data_type} accepted={accepted} "
+                                    f"has_open_ts={isinstance(kline_obj, dict) and ('t' in kline_obj or 'openTime' in kline_obj)} "
+                                    f"close_ts={kline_obj.get('T', kline_obj.get('closeTime')) if isinstance(kline_obj, dict) else None} "
+                                    f"keys={sorted(kline_obj.keys()) if isinstance(kline_obj, dict) else type(kline_obj).__name__}",
+                                )
                     elif isinstance(data, dict) and "K" in data:
                         # Defensive fallback: retain kline-shaped messages even if
                         # BingX omits or changes dataType formatting.
