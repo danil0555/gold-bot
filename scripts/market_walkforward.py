@@ -20,6 +20,7 @@ import pandas as pd
 from scripts.market_research import (
     BINGX_FEATURES,
     INTERVAL_MS,
+    _clustered_standard_error,
     _metrics,
     _select_available_features,
     _select_threshold,
@@ -60,7 +61,7 @@ def add_cross_sectional_context(panel):
     """Cross-sectional breadth/dispersion available at the same completed hour."""
     out = panel.copy()
     grouped = out.groupby("time", sort=False)["ret_24h"]
-    out["market_breadth_24h"] = grouped.transform(lambda values: (values > 0).mean())
+    out["market_breadth_24h"] = grouped.transform(lambda values: (values.dropna() > 0).mean() if values.notna().any() else np.nan)
     out["market_dispersion_24h"] = grouped.transform("std")
     return out
 
@@ -81,6 +82,32 @@ def assign_regimes(panel, training_mask):
         ["risk_on_breadth", "risk_off_breadth"], default="mixed_breadth",
     )
     return out, vol_cut
+
+
+def metrics_with_row_thresholds(y_true, probabilities, forward_returns, costs, thresholds, timestamps):
+    """Aggregate folds without replacing each fold's selected threshold by an average."""
+    y = np.asarray(y_true, dtype=int)
+    p = np.asarray(probabilities, dtype=float)
+    r = np.asarray(forward_returns, dtype=float)
+    t = np.asarray(thresholds, dtype=float)
+    direction = np.where(p >= t, 1, np.where(p <= 1 - t, -1, 0))
+    mask = direction != 0
+    net = direction[mask] * r[mask] - costs
+    se, clusters = _clustered_standard_error(net, np.asarray(timestamps)[mask], block_hours=72)
+    return {
+        "observations": int(len(y)),
+        "signals": int(mask.sum()),
+        "coverage_pct": round(float(mask.mean() * 100), 2) if len(mask) else 0.0,
+        "direction_accuracy_pct": round(float(((p >= 0.5).astype(int) == y).mean() * 100), 2) if len(y) else None,
+        "signal_direction_accuracy_pct": round(float((direction[mask] == np.where(r[mask] > 0, 1, -1)).mean() * 100), 2) if mask.any() else None,
+        "mean_net_return_pct": round(float(net.mean() * 100), 5) if len(net) else None,
+        "median_net_return_pct": round(float(np.median(net) * 100), 5) if len(net) else None,
+        "positive_net_signal_pct": round(float((net > 0).mean() * 100), 2) if len(net) else None,
+        "net_profit_factor": round(float(net[net > 0].sum() / abs(net[net < 0].sum())), 4) if (net < 0).any() and (net > 0).any() else None,
+        "uncertainty_method": "72h_time_block_clustered",
+        "cluster_count": clusters,
+        "clustered_standard_error_pct": round(se * 100, 5) if se is not None else None,
+    }
 
 
 def _time_text(value):
@@ -251,20 +278,20 @@ def run(args):
             returns = scored[return_col].to_numpy()
             aggregate_costs = {}
             for bps in (args.cost_bps, 20, 30):
-                aggregate_costs[f"{bps}bps"] = _metrics(
-                    y, p, returns, bps / 10_000, float(np.median(threshold)),
-                    timestamps=scored["time"].to_numpy(),
+                aggregate_costs[f"{bps}bps"] = metrics_with_row_thresholds(
+                    y, p, returns, bps / 10_000, threshold,
+                    scored["time"].to_numpy(),
                 )
             regime_reports = {}
             for col in ("btc_regime", "breadth_regime"):
                 regime_reports[col] = {}
                 for regime, group in scored.groupby(col):
-                    regime_reports[col][str(regime)] = _metrics(
+                    regime_reports[col][str(regime)] = metrics_with_row_thresholds(
                         group[label_col].astype(int).to_numpy(),
                         group["probability_up"].to_numpy(),
                         group[return_col].to_numpy(),
-                        args.cost_bps / 10_000, float(np.median(group["threshold"])),
-                        timestamps=group["time"].to_numpy(),
+                        args.cost_bps / 10_000, group["threshold"].to_numpy(),
+                        group["time"].to_numpy(),
                     )
             model_aggregates[name] = {
                 "cost_sensitivity": aggregate_costs,
