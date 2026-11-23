@@ -22,8 +22,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
-      - name: Check out repository
+      - name: Check out directional research branch
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Verify selected research branch and scripts
+        env:
+          SELECTED_BRANCH: ${{ github.ref_name }}
+        run: |
+          test "$SELECTED_BRANCH" = "research/directional-microstructure-scoring"
+          test -f scripts/market_data_collector.py
+          test -f scripts/microstructure_event_study.py
+          git log -1 --format='Checked out commit: %h %s'
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
