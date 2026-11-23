@@ -70,11 +70,15 @@ jobs:
             --cost-bps 12 \
             --output /tmp/microstructure_event_study.json
       - name: Audit capture data quality
-        if: always() && hashFiles('/tmp/market_microstructure.sqlite3') != ''
+        if: always()
         run: |
-          python -m scripts.microstructure_data_quality \\
-            --db /tmp/market_microstructure.sqlite3 \\
-            --output /tmp/microstructure_data_quality.json
+          if [ -f /tmp/market_microstructure.sqlite3 ]; then
+            python -m scripts.microstructure_data_quality \
+              --db /tmp/market_microstructure.sqlite3 \
+              --output /tmp/microstructure_data_quality.json
+          else
+            echo "No capture database was produced; skipping quality audit."
+          fi
       - name: Upload data-quality report
         if: always()
         uses: actions/upload-artifact@v4
