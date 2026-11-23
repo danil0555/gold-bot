@@ -305,10 +305,15 @@ def simulate_portfolio(trades, deposit, risk_percent, leverage, max_positions):
 
 
 def run(args):
+    selected = [part.strip().upper() for part in args.strategies.split(",") if part.strip()]
+    unknown = sorted(set(selected) - set(STRATEGIES))
+    if not selected or unknown:
+        raise ValueError(f"invalid --strategies; unknown={unknown}; available={sorted(STRATEGIES)}")
+    active_strategies = {name: STRATEGIES[name] for name in selected}
     ns = load_builders()
     now = int(time.time() * 1000)
     eval_start = now - args.days * 86_400_000
-    totals = {name: defaultdict(float) for name in STRATEGIES}
+    totals = {name: defaultdict(float) for name in active_strategies}
     rows_out = []
     original_enrich = ns["enrich_scalper_series"]
     def cached_enrich(frame):
@@ -354,16 +359,14 @@ def run(args):
         if len(eligible) == 0:
             raise RuntimeError(f"No evaluation candles for {symbol}")
         start_i = int(eligible[0])
-        busy_until = {name: -1 for name in STRATEGIES}
-        last_setup_key = {name: None for name in STRATEGIES}
+        busy_until = {name: -1 for name in active_strategies}
+        last_setup_key = {name: None for name in active_strategies}
         last_c5 = None
         total_steps = max(1, len(m1) - 1 - start_i)
         for i in range(start_i, len(m1) - 1):
             if (i - start_i) % 1000 == 0:
                 print(f"PROGRESS {symbol} {i-start_i}/{total_steps} "
-                      f"C={int(totals['C_BREAKOUT_RETEST']['signals'])} "
-                      f"D={int(totals['D_IMPULSE']['signals'])} "
-                      f"E={int(totals['E_OVERHEAT_REVERSAL']['signals'])}", flush=True)
+                      f"strategies={','.join(f'{name}:{int(stat[\"signals\"])}' for name, stat in totals.items())}", flush=True)
             stamp = int(m1.iloc[i]["close_time"])
             available = {
                 tf: closed_window(frame, close_time_arrays[tf], stamp, 300)
@@ -371,7 +374,7 @@ def run(args):
             }
             if any(len(available[tf]) < 60 for tf in available):
                 continue
-            for strategy, (fn_name, trigger_tf) in STRATEGIES.items():
+            for strategy, (fn_name, trigger_tf) in active_strategies.items():
                 if i <= busy_until[strategy]:
                     continue
                 if trigger_tf == "5m":
@@ -423,7 +426,7 @@ def run(args):
     portfolio = simulate_portfolio(rows_out, args.deposit, args.risk_percent,
                                    args.leverage, args.max_positions)
     report = {
-        "period_days": args.days, "symbols": args.symbols.split(","),
+        "period_days": args.days, "symbols": args.symbols.split(","), "strategies": selected,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "account": {"deposit_usdt": args.deposit, "risk_percent": args.risk_percent,
                     "leverage_cap": args.leverage, "max_positions": args.max_positions},
@@ -470,6 +473,7 @@ if __name__ == "__main__":
     parser.add_argument("--risk-percent", type=float, default=2.0)
     parser.add_argument("--leverage", type=float, default=5.0)
     parser.add_argument("--max-positions", type=int, default=5)
+    parser.add_argument("--strategies", default=",".join(STRATEGIES), help="Comma-separated strategy names; default: all")
     args = parser.parse_args()
     if not 1 <= args.days <= 30:
         parser.error("--days must be between 1 and 30")
