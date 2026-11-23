@@ -122,3 +122,23 @@ def test_kline_without_open_timestamp_uses_minute_bucket_of_close_timestamp():
         assert row == (close_ts // 60_000 * 60_000, close_ts, 1)
     finally:
         agg.close()
+
+
+
+def test_live_swap_kline_without_t_uses_previous_minute_for_boundary_T():
+    agg = MarketMinuteAggregator(":memory:")
+    try:
+        now_ms = int(__import__("time").time() * 1000)
+        close_boundary = (now_ms // 60_000 - 2) * 60_000
+        # Observed live payload shape: OHLCV and T at top level, no K.t.
+        payload = {
+            "T": close_boundary,
+            "o": "100", "h": "103", "l": "99", "c": "102", "v": "12.5",
+        }
+        assert agg.save_candle("BTC-USDT", payload) is True
+        row = agg.db.execute(
+            "SELECT minute_ts,close_ts,is_closed FROM minute_candles"
+        ).fetchone()
+        assert row == (close_boundary - 60_000, close_boundary, 1)
+    finally:
+        agg.close()
