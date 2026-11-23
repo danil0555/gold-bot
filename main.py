@@ -32,6 +32,10 @@ import pandas as pd
 
 from dotenv import load_dotenv
 
+from scripts.reliability import (
+    RETRYABLE_HTTP_STATUS, contiguous_candle_tail, retry_after_seconds,
+)
+
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
@@ -415,6 +419,12 @@ def ensure_part3_schema() -> None:
 class MarketError(Exception):
     pass
 
+class RetryableMarketError(MarketError):
+    def __init__(self, message: str, retry_after: float):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 async def api_get(session: aiohttp.ClientSession, path: str, params: dict[str, Any]) -> Any:
     global _last_api_request, _api_cooldown_until
     url = BASE + path
@@ -428,12 +438,24 @@ async def api_get(session: aiohttp.ClientSession, path: str, params: dict[str, A
                 if wait > 0:
                     await asyncio.sleep(wait)
 
-                async with session.get(url, params=params,
-                                       timeout=aiohttp.ClientTimeout(total=25)) as response:
+                async with session.get(
+                    url, params=params, timeout=aiohttp.ClientTimeout(total=25)
+                ) as response:
                     _last_api_request = time.monotonic()
                     raw_text = await response.text()
                     if response.status != 200:
+                        if response.status in RETRYABLE_HTTP_STATUS:
+                            delay = retry_after_seconds(
+                                response.headers.get("Retry-After"), attempt
+                            )
+                            _api_cooldown_until = max(
+                                _api_cooldown_until, time.monotonic() + delay
+                            )
+                            raise RetryableMarketError(
+                                f"HTTP {response.status}: {raw_text[:250]}", delay
+                            )
                         raise MarketError(f"HTTP {response.status}: {raw_text[:250]}")
+
                     try:
                         payload = await response.json(content_type=None)
                     except Exception as exc:
@@ -444,7 +466,10 @@ async def api_get(session: aiohttp.ClientSession, path: str, params: dict[str, A
                         if code not in (None, 0, "0"):
                             error_text = f"BingX {code}: {payload.get('msg', '')}"
                             if str(code) in ("100410", "100429"):
-                                _api_cooldown_until = time.monotonic() + min(30, 3 * (2 ** attempt))
+                                delay = min(30.0, 3.0 * (2 ** attempt))
+                                _api_cooldown_until = max(
+                                    _api_cooldown_until, time.monotonic() + delay
+                                )
                                 last_error = MarketError(error_text)
                                 system_status["api_status"] = "Rate limit (cooldown)"
                             else:
@@ -464,6 +489,14 @@ async def api_get(session: aiohttp.ClientSession, path: str, params: dict[str, A
 
         except asyncio.CancelledError:
             raise
+        except RetryableMarketError as exc:
+            last_error = MarketError(str(exc))
+            system_status["api_status"] = "Rate limit / временная ошибка HTTP"
+            system_status["last_error"] = str(exc)
+            if attempt < 3:
+                await asyncio.sleep(exc.retry_after)
+                continue
+            raise last_error from exc
         except MarketError as exc:
             system_status["api_status"] = f"Ошибка ({exc})"
             system_status["last_error"] = str(exc)
@@ -478,7 +511,6 @@ async def api_get(session: aiohttp.ClientSession, path: str, params: dict[str, A
             raise last_error from exc
 
     raise last_error or MarketError("Неизвестная ошибка BingX API")
-
 def extract_data(payload: Any) -> Any:
     if isinstance(payload, dict):
         return payload.get("data", payload.get("result", payload))
@@ -537,8 +569,12 @@ def normalize_candles(payload: Any, interval: str, min_rows: int = MIN_CANDLE_RO
     current_ms = now_ms()
     df = df[df["close_time"] < current_ms - 2000].reset_index(drop=True)
 
-    if len(df) < min_rows:
-        raise MarketError(f"Недостаточно закрытых свечей: {len(df)}, требуется {min_rows}")
+    try:
+        df = contiguous_candle_tail(df, TF_MS[interval], min_rows)
+    except ValueError as exc:
+        raise MarketError(
+            f"Недостаточно непрерывных закрытых свечей для {interval}: {exc}"
+        ) from exc
     return df
 
 def _is_cached_frame_fresh(market: str, symbol: str, interval: str, min_rows: int) -> pd.DataFrame | None:
