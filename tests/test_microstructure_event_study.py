@@ -1,8 +1,11 @@
+import sqlite3
+
 import numpy as np
 import pandas as pd
 
 from scripts.microstructure_event_study import (
     add_past_only_events,
+    load_panel,
     clustered_se,
     summarize_events,
 )
@@ -56,3 +59,38 @@ def test_clustered_se_requires_four_independent_time_blocks():
     se, clusters = clustered_se(values, timestamps, block_hours=24)
     assert se is None
     assert clusters == 1
+
+
+
+def test_load_panel_keeps_symbol_when_joining_derivatives(tmp_path):
+    db_path = tmp_path / "microstructure.sqlite3"
+    with sqlite3.connect(db_path) as db:
+        db.executescript("""
+            CREATE TABLE minute_candles (
+                symbol TEXT, minute_ts INTEGER, close REAL, is_closed INTEGER
+            );
+            CREATE TABLE minute_features (
+                symbol TEXT, minute_ts INTEGER, taker_imbalance REAL
+            );
+            CREATE TABLE derivatives_snapshots (
+                symbol TEXT, ts_ms INTEGER, open_interest_base REAL,
+                funding_rate REAL, mark_price REAL, index_price REAL
+            );
+        """)
+        db.executemany(
+            "INSERT INTO minute_candles VALUES (?,?,?,1)",
+            [("BTC-USDT", 60_000, 100.0), ("BTC-USDT", 120_000, 101.0)],
+        )
+        db.executemany(
+            "INSERT INTO minute_features VALUES (?,?,?)",
+            [("BTC-USDT", 60_000, 0.1), ("BTC-USDT", 120_000, 0.2)],
+        )
+        db.execute(
+            "INSERT INTO derivatives_snapshots VALUES (?,?,?,?,?,?)",
+            ("BTC-USDT", 60_000, 1000.0, 0.0001, 100.0, 100.0),
+        )
+
+    panel = load_panel(str(db_path))
+    assert "symbol" in panel.columns
+    assert panel["symbol"].tolist() == ["BTC-USDT", "BTC-USDT"]
+    assert panel["open_interest_base"].iloc[0] == 1000.0
