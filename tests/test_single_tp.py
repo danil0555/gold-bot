@@ -62,3 +62,31 @@ def test_closed_trade_blocks_until_its_exit_candle():
 
     closed = {"status": "tp", "exit_index": 42}
     assert update_busy_until(closed, 10, 500) == 42
+
+
+
+def test_unresolved_position_reserves_portfolio_slot_and_margin_without_realizing_pnl():
+    from scripts.backtest_scalping_100 import simulate_portfolio
+
+    trades = [
+        {
+            "symbol": "BTC-USDT", "status": "unresolved",
+            "entry_time": 1, "exit_time": 100,
+            "stop_distance_pct": 1.0,
+        },
+        {
+            "symbol": "ETH-USDT", "status": "tp",
+            "entry_time": 2, "exit_time": 3,
+            "stop_distance_pct": 1.0, "net_r": 2.0,
+        },
+    ]
+    result = simulate_portfolio(
+        trades, deposit=100.0, risk_percent=2.0, leverage=5.0, max_positions=1
+    )
+
+    assert result["accepted_trades"] == 0
+    assert result["skipped_max_positions"] == 1
+    assert result["open_positions_at_end"] == 1
+    assert result["open_notional_at_end_usdt"] == 10.0
+    assert result["ending_equity_usdt"] == 100.0
+    assert result["net_pnl_usdt"] == 0.0
