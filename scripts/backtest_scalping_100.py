@@ -365,8 +365,11 @@ def run(args):
         total_steps = max(1, len(m1) - 1 - start_i)
         for i in range(start_i, len(m1) - 1):
             if (i - start_i) % 1000 == 0:
-                print(f"PROGRESS {symbol} {i-start_i}/{total_steps} "
-                      f"strategies={','.join(f'{name}:{int(stat[\"signals\"])}' for name, stat in totals.items())}", flush=True)
+                progress = ",".join(
+                    "{}:{}".format(name, int(stat["signals"]))
+                    for name, stat in totals.items()
+                )
+                print(f"PROGRESS {symbol} {i-start_i}/{total_steps} strategies={progress}", flush=True)
             stamp = int(m1.iloc[i]["close_time"])
             available = {
                 tf: closed_window(frame, close_time_arrays[tf], stamp, 300)
