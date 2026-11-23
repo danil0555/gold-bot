@@ -110,6 +110,25 @@ def metrics_with_row_thresholds(y_true, probabilities, forward_returns, costs, t
     }
 
 
+def enforce_validation_abstention(threshold, threshold_report):
+    """Do not emit test-period signals when validation has no positive conservative edge."""
+    if threshold_report.get("method") != "validation_mean_net_return_minus_one_standard_error":
+        return 1.01, {
+            **threshold_report,
+            "deployment_decision": "abstain",
+            "reason": "validation_threshold_not_supported_by_sufficient_signals",
+        }
+    score = threshold_report.get("validation_score_pct")
+    clusters = threshold_report.get("validation_cluster_count", 0)
+    if score is None or score <= 0 or clusters < 4:
+        return 1.01, {
+            **threshold_report,
+            "deployment_decision": "abstain",
+            "reason": "no_positive_validation_edge_after_uncertainty_penalty_or_too_few_time_clusters",
+        }
+    return threshold, {**threshold_report, "deployment_decision": "validation_candidate_only"}
+
+
 def _time_text(value):
     return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat()
 
@@ -146,6 +165,9 @@ def _evaluate_fold(train, valid, test, features, label_col, return_col, cost_bps
             valid[label_col].to_numpy(), valid_prob, valid[return_col].to_numpy(),
             cost_bps / 10_000, fallback_threshold,
             timestamps=valid["time"].to_numpy(),
+        )
+        threshold, threshold_report = enforce_validation_abstention(
+            threshold, threshold_report
         )
         test_prob = model.predict_proba(test[features])[:, classes.index(1)]
         cost_metrics = {}
