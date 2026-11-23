@@ -7,7 +7,7 @@ concurrency:
 
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/futures-scalping-30d, research/single-tp-validation]
+    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/futures-scalping-30d, research/single-tp-validation, research/reliability-hardening]
   pull_request:
     branches: [main]
   workflow_dispatch:
