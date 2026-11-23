@@ -136,44 +136,59 @@ def clustered_se(values: np.ndarray, timestamps: np.ndarray, block_hours: int = 
 
 
 def summarize_events(panel: pd.DataFrame, cost_bps: float = 12.0, gap_minutes: int = 5):
-    event_cols = [
-        "event_sell_absorption", "event_buy_absorption",
-        "event_bid_support", "event_oi_expansion_sell_pressure",
-    ]
+    # These are explicit directional hypotheses, not claims that the event
+    # definitions are already profitable. Supply absorption is a SHORT setup;
+    # aggressive sell pressure with expanding OI is also tested as SHORT.
+    event_directions = {
+        "event_sell_absorption": 1,
+        "event_buy_absorption": -1,
+        "event_bid_support": 1,
+        "event_oi_expansion_sell_pressure": -1,
+    }
     results = {}
-    for event in event_cols:
+    for event, direction in event_directions.items():
         raw = panel.loc[panel[event].fillna(False)].copy()
         selected = _thin_events(raw, gap_minutes)
         horizons = {}
         for horizon in (1, 5, 15):
             values = selected[f"fwd_{horizon}m"].dropna()
             valid = selected.loc[values.index]
-            net_bps = values.to_numpy() * 10_000 - cost_bps
+            gross_bps = values.to_numpy() * direction * 10_000
+            net_bps = gross_bps - cost_bps
             se, clusters = clustered_se(net_bps, valid["minute_ts"].to_numpy())
             winners = net_bps[net_bps > 0]
             losers = net_bps[net_bps < 0]
             horizons[f"{horizon}m"] = {
                 "observations": int(len(net_bps)),
+                "mean_gross_bps": round(float(gross_bps.mean()), 3) if len(gross_bps) else None,
+                "median_gross_bps": round(float(np.median(gross_bps)), 3) if len(gross_bps) else None,
                 "mean_net_bps": round(float(net_bps.mean()), 3) if len(net_bps) else None,
-                "median_gross_bps": round(float(np.median(values.to_numpy()) * 10_000), 3) if len(values) else None,
+                "median_net_bps": round(float(np.median(net_bps)), 3) if len(net_bps) else None,
                 "positive_net_pct": round(float((net_bps > 0).mean() * 100), 2) if len(net_bps) else None,
                 "profit_factor": round(float(winners.sum() / abs(losers.sum())), 4)
                     if len(winners) and len(losers) else None,
                 "cluster_count_24h": clusters,
                 "clustered_se_bps": round(se, 3) if se is not None else None,
+                "inference_status": (
+                    "insufficient_independent_clusters" if clusters < 4
+                    else "clustered_uncertainty_available"
+                ),
             }
         results[event] = {
+            "hypothesis_direction": "LONG" if direction > 0 else "SHORT",
             "raw_events": int(len(raw)),
             "events_after_5m_thinning": int(len(selected)),
             "horizons": horizons,
         }
     return {
-        "method": "past-only rolling quantile event definitions; next closed minute candle returns; 5-minute per-symbol event thinning; fixed round-trip cost deduction; 24h time-block clustered uncertainty",
+        "method": "past-only rolling quantile event definitions; directional next-closed-minute returns; 5-minute per-symbol event thinning; fixed round-trip cost deduction; 24h time-block clustered uncertainty",
+        "directional_scoring": "LONG hypotheses use forward returns; SHORT hypotheses use negated forward returns before costs",
+        "minimum_independent_24h_clusters": 4,
         "cost_bps": cost_bps,
         "lookback_minutes": 120,
         "min_history_minutes": 60,
         "events": results,
-        "warning": "Exploratory event study only. Do not trade these events. Require long captures, adequate independent time clusters, multiple-regime holdouts, and execution simulation before strategy consideration.",
+        "warning": "Exploratory event study only. Direction labels are hypotheses, not validated trade instructions. Do not trade these events. Require multiple independent time clusters, multiple-regime holdouts, and execution simulation before strategy consideration.",
     }
 
 
