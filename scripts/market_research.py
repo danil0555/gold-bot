@@ -706,6 +706,8 @@ def _score_individual_features(train, valid, test, features, label_col, return_c
     from sklearn.preprocessing import StandardScaler
 
     scores = []
+    valid_times = valid["time"].to_numpy() if "time" in valid.columns else None
+    test_times = test["time"].to_numpy() if "time" in test.columns else None
     for feature in features:
         observed = train[feature].dropna()
         if len(observed) < 100 or observed.nunique() < 2:
@@ -720,7 +722,7 @@ def _score_individual_features(train, valid, test, features, label_col, return_c
             p_valid = model.predict_proba(valid[[feature]])[:, classes.index(1)]
             threshold, threshold_report = _select_threshold(
                 valid[label_col].to_numpy(), p_valid, valid[return_col].to_numpy(),
-                cost, fallback_threshold, timestamps=valid["time"].to_numpy()
+                cost, fallback_threshold, timestamps=valid_times
             )
         else:
             threshold = fallback_threshold
@@ -728,7 +730,7 @@ def _score_individual_features(train, valid, test, features, label_col, return_c
         p_test = model.predict_proba(test[[feature]])[:, classes.index(1)]
         metrics = _metrics(
             test[label_col].to_numpy(), p_test, test[return_col].to_numpy(), cost, threshold,
-            timestamps=test["time"].to_numpy(),
+            timestamps=test_times,
         )
         correlation = test[feature].corr(test[return_col], method="spearman")
         scores.append({
