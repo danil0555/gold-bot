@@ -14,14 +14,21 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-# When executed as a file, Python places scripts/ (not the repository
-# root) at sys.path[0], so import the sibling module directly.
-from backtest_scalping_100 import (
-    INTERVAL_MS, WARMUP_DAYS, fetch_interval, filter_closed_candles,
-    closed_window, simulate_portfolio,
-    TAKER_FEE_RATE, SLIPPAGE_PCT, SPREAD_PCT, MAX_ENTRY_DRIFT_R,
-    load_builders,
-)
+# Support both package import from pytest and direct file execution.
+try:
+    from scripts.backtest_scalping_100 import (
+        INTERVAL_MS, WARMUP_DAYS, fetch_interval, filter_closed_candles,
+        closed_window, simulate_portfolio,
+        TAKER_FEE_RATE, SLIPPAGE_PCT, SPREAD_PCT, MAX_ENTRY_DRIFT_R,
+        load_builders,
+    )
+except ModuleNotFoundError:
+    from backtest_scalping_100 import (
+        INTERVAL_MS, WARMUP_DAYS, fetch_interval, filter_closed_candles,
+        closed_window, simulate_portfolio,
+        TAKER_FEE_RATE, SLIPPAGE_PCT, SPREAD_PCT, MAX_ENTRY_DRIFT_R,
+        load_builders,
+    )
 
 SYMBOLS_DEFAULT = "BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT"
 
