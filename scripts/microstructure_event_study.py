@@ -40,6 +40,11 @@ def load_panel(db_path: str) -> pd.DataFrame:
             if snap.empty:
                 parts.append(group)
                 continue
+            # `symbol` is already present in the left-hand panel. Keep the
+            # right-hand snapshot symbol out of merge_asof; otherwise pandas
+            # suffixes both columns to symbol_x/symbol_y and downstream
+            # per-symbol sorting fails.
+            snap = snap.drop(columns=["symbol"], errors="ignore")
             merged = pd.merge_asof(
                 group.sort_values("minute_ts"),
                 snap,
