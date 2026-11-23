@@ -110,7 +110,7 @@ def test_kline_without_open_timestamp_uses_minute_bucket_of_close_timestamp():
     agg = MarketMinuteAggregator(":memory:")
     try:
         now_ms = int(__import__("time").time() * 1000)
-        close_ts = (now_ms // 60_000) * 60_000 - 1
+        close_ts = (now_ms // 60_000 - 1) * 60_000 - 1
         payload = {
             "T": close_ts,
             "o": "100", "h": "103", "l": "99", "c": "102", "v": "12.5",
