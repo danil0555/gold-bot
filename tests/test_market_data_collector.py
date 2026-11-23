@@ -90,9 +90,10 @@ def test_kline_message_matches_bingx_swap_websocket_documented_shape():
     agg = MarketMinuteAggregator(":memory:")
     try:
         payload = {
-            "e": "kline", "E": 1_800_000_060_000, "s": "BTC-USDT",
+            "e": "kline", "E": int(__import__("time").time() * 1000), "s": "BTC-USDT",
             "K": {
-                "t": 1_800_000_000_000, "T": 1_800_000_059_999,
+                "t": (int(__import__("time").time() * 1000) // 60_000 - 1) * 60_000,
+                "T": (int(__import__("time").time() * 1000) // 60_000) * 60_000 - 1,
                 "o": "100", "h": "103", "l": "99", "c": "102", "v": "12.5",
             },
         }
