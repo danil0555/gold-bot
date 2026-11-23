@@ -5,6 +5,7 @@ import pytest
 from scripts.market_walkforward import (
     add_cross_sectional_context,
     assign_regimes,
+    enforce_validation_abstention,
     make_walk_forward_folds,
     metrics_with_row_thresholds,
 )
@@ -70,3 +71,43 @@ def test_aggregate_metrics_apply_each_fold_threshold_to_its_own_rows():
     )
     assert result["signals"] == 2
     assert result["mean_net_return_pct"] == 0.9
+
+
+
+def test_validation_with_negative_conservative_edge_forces_no_signals():
+    threshold, report = enforce_validation_abstention(
+        0.58,
+        {
+            "method": "validation_mean_net_return_minus_one_standard_error",
+            "validation_score_pct": -0.12,
+            "validation_cluster_count": 10,
+        },
+    )
+    assert threshold > 1.0
+    assert report["deployment_decision"] == "abstain"
+
+
+def test_validation_with_too_few_time_clusters_forces_no_signals():
+    threshold, report = enforce_validation_abstention(
+        0.58,
+        {
+            "method": "validation_mean_net_return_minus_one_standard_error",
+            "validation_score_pct": 0.20,
+            "validation_cluster_count": 2,
+        },
+    )
+    assert threshold > 1.0
+    assert report["deployment_decision"] == "abstain"
+
+
+def test_validation_positive_edge_is_only_a_candidate_not_deployment_approval():
+    threshold, report = enforce_validation_abstention(
+        0.62,
+        {
+            "method": "validation_mean_net_return_minus_one_standard_error",
+            "validation_score_pct": 0.20,
+            "validation_cluster_count": 10,
+        },
+    )
+    assert threshold == 0.62
+    assert report["deployment_decision"] == "validation_candidate_only"
