@@ -1,5 +1,5 @@
 name: Python validation and spot-futures research
-# Single-TP research branch validation rerun after import-path correction
+# Single-TP research branch validation rerun after import-path correction (pytest package import and direct script execution supported)
 
 concurrency:
   group: addon-validation-${{ github.ref }}
