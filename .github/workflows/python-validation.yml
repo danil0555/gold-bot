@@ -7,7 +7,7 @@ concurrency:
 
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/futures-scalping-30d, research/single-tp-validation, research/single-tp-validation-v2]
+    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/futures-scalping-30d, research/single-tp-validation, research/single-tp-validation-v2, research/single-tp-portfolio-unresolved-v3]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -52,7 +52,7 @@ jobs:
         run: python scripts/backtest_scalping_100.py --days 30 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --deposit 100 --risk-percent 2 --leverage 5 --max-positions 5
         timeout-minutes: 60
       - name: Run Strategy B single-take-profit sweep (30-day research)
-        if: github.ref == 'refs/heads/research/single-tp-validation' || github.ref == 'refs/heads/research/single-tp-validation-v2'
+        if: github.ref == 'refs/heads/research/single-tp-validation' || github.ref == 'refs/heads/research/single-tp-validation-v2' || github.ref == 'refs/heads/research/single-tp-portfolio-unresolved-v3'
         run: python scripts/backtest_single_tp.py --days 30 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --deposit 100 --risk-percent 2 --leverage 5 --max-positions 5 --target-rs 1.5,1.8,2.1,2.4,2.7,3.0
         timeout-minutes: 60
 
