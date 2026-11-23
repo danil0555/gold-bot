@@ -235,3 +235,32 @@ def test_feature_group_mapping_covers_all_supported_feature_families():
     assert groups["ret_1h"] == "trend_momentum"
     assert groups["binance_ret_4h_lag1"] == "cross_venue"
     assert groups["funding_rate_lag1"] == "funding"
+
+
+
+def test_clustered_standard_error_accounts_for_cross_sectional_time_dependence():
+    from scripts.market_research import _clustered_standard_error
+
+    block_ms = 72 * 3_600_000
+    values = np.repeat([0.01, -0.005, 0.02, -0.01, 0.015, -0.002], 30)
+    timestamps = np.repeat(np.arange(6) * block_ms, 30)
+    clustered, clusters = _clustered_standard_error(values, timestamps, block_hours=72)
+    iid = values.std(ddof=1) / np.sqrt(len(values))
+    assert clusters == 6
+    assert clustered is not None
+    assert clustered > iid
+
+
+def test_threshold_selection_reports_time_block_uncertainty_when_timestamps_exist():
+    block_ms = 72 * 3_600_000
+    timestamps = np.repeat(np.arange(6) * block_ms, 50)
+    y = np.tile(np.array([1] * 25 + [0] * 25), 6)
+    probabilities = np.tile(np.array([0.82] * 25 + [0.18] * 25), 6)
+    returns = np.tile(np.array([0.02] * 25 + [-0.02] * 25), 6)
+    threshold, report = _select_threshold(
+        y, probabilities, returns, 0.0012, 0.58, timestamps=timestamps
+    )
+    assert threshold >= 0.52
+    assert report["uncertainty_method"] == "72h_time_block_clustered"
+    assert report["validation_cluster_count"] == 6
+    assert report["validation_clustered_standard_error_pct"] is not None
