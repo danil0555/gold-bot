@@ -56,6 +56,8 @@ def audit_database(db_path: str) -> dict:
     symbols = sorted(set(candle_by_symbol) | set(feature_by_symbol) | set(deriv_by_symbol))
     per_symbol = {}
     warnings = []
+    if not symbols:
+        warnings.append({"code": "no_market_data_rows"})
     for symbol in symbols:
         candle_stamps = sorted(set(candle_by_symbol.get(symbol, [])))
         feature_rows = feature_by_symbol.get(symbol, [])
