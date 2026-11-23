@@ -94,3 +94,43 @@ def test_load_panel_keeps_symbol_when_joining_derivatives(tmp_path):
     assert "symbol" in panel.columns
     assert panel["symbol"].tolist() == ["BTC-USDT", "BTC-USDT"]
     assert panel["open_interest_base"].iloc[0] == 1000.0
+
+
+
+def test_event_summary_scores_short_hypotheses_with_inverted_returns():
+    panel = pd.DataFrame({
+        "symbol": ["BTC-USDT"],
+        "minute_ts": [1_800_000_000_000],
+        "event_sell_absorption": [False],
+        "event_buy_absorption": [True],
+        "event_bid_support": [False],
+        "event_oi_expansion_sell_pressure": [False],
+        "fwd_1m": [-0.002],
+        "fwd_5m": [-0.002],
+        "fwd_15m": [-0.002],
+    })
+    report = summarize_events(panel, cost_bps=12, gap_minutes=0)
+    short = report["events"]["event_buy_absorption"]
+    assert short["hypothesis_direction"] == "SHORT"
+    assert short["horizons"]["15m"]["mean_gross_bps"] == 20.0
+    assert short["horizons"]["15m"]["mean_net_bps"] == 8.0
+    assert short["horizons"]["15m"]["inference_status"] == "insufficient_independent_clusters"
+
+
+def test_event_summary_keeps_long_hypotheses_in_forward_direction():
+    panel = pd.DataFrame({
+        "symbol": ["BTC-USDT"],
+        "minute_ts": [1_800_000_000_000],
+        "event_sell_absorption": [True],
+        "event_buy_absorption": [False],
+        "event_bid_support": [False],
+        "event_oi_expansion_sell_pressure": [False],
+        "fwd_1m": [0.002],
+        "fwd_5m": [0.002],
+        "fwd_15m": [0.002],
+    })
+    report = summarize_events(panel, cost_bps=12, gap_minutes=0)
+    long = report["events"]["event_sell_absorption"]
+    assert long["hypothesis_direction"] == "LONG"
+    assert long["horizons"]["15m"]["mean_gross_bps"] == 20.0
+    assert long["horizons"]["15m"]["mean_net_bps"] == 8.0
