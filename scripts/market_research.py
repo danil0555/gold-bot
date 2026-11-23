@@ -523,7 +523,30 @@ def build_panel(frames, cost, binance_frames, funding_frames=None):
     return panel.replace([np.inf, -np.inf], np.nan)
 
 
-def _metrics(y_true, probabilities, forward_returns, cost, threshold):
+def _clustered_standard_error(values, timestamps, block_hours=72):
+    """Cluster the uncertainty by non-overlapping time blocks, not individual symbol rows."""
+    values = np.asarray(values, dtype=float)
+    timestamps = np.asarray(timestamps, dtype=float)
+    valid = np.isfinite(values) & np.isfinite(timestamps)
+    values, timestamps = values[valid], timestamps[valid]
+    if len(values) < 2:
+        return None, 0
+    block_ms = int(block_hours * 3_600_000)
+    clusters = np.floor_divide(timestamps.astype(np.int64), block_ms)
+    unique = np.unique(clusters)
+    if len(unique) < 4:
+        return None, int(len(unique))
+    mean = float(values.mean())
+    cluster_scores = np.array([
+        float(np.sum(values[clusters == cluster] - mean))
+        for cluster in unique
+    ])
+    # One-way cluster-robust variance of the overall per-signal mean.
+    variance = (len(unique) / (len(unique) - 1)) * float(np.sum(cluster_scores**2)) / (len(values)**2)
+    return math.sqrt(max(variance, 0.0)), int(len(unique))
+
+
+def _metrics(y_true, probabilities, forward_returns, cost, threshold, timestamps=None):
     y = np.asarray(y_true, dtype=int)
     p = np.asarray(probabilities, dtype=float)
     r = np.asarray(forward_returns, dtype=float)
@@ -547,31 +570,58 @@ def _metrics(y_true, probabilities, forward_returns, cost, threshold):
         "positive_net_signal_pct": round(float((net > 0).mean()*100), 2) if len(net) else None,
         "net_profit_factor": round(float(net[net>0].sum()/abs(net[net<0].sum())), 4) if (net<0).any() and (net>0).any() else None,
     })
+    if timestamps is not None and len(timestamps) == len(mask) and mask.any():
+        cluster_se, cluster_count = _clustered_standard_error(
+            net, np.asarray(timestamps)[mask], block_hours=72
+        )
+        out["uncertainty_method"] = "72h_time_block_clustered"
+        out["cluster_count"] = cluster_count
+        out["clustered_standard_error_pct"] = (
+            round(cluster_se*100, 5) if cluster_se is not None else None
+        )
     return out
 
 
-def _select_threshold(y_true, probabilities, forward_returns, cost, fallback):
-    """Choose a symmetric probability threshold on validation only."""
+def _select_threshold(y_true, probabilities, forward_returns, cost, fallback, timestamps=None):
+    """Choose a symmetric probability threshold using validation-only 72h block uncertainty."""
     candidates = [round(x, 2) for x in np.arange(0.52, 0.751, 0.02)]
     minimum_signals = max(50, int(len(y_true) * 0.005))
     scored = []
     for threshold in candidates:
-        metrics = _metrics(y_true, probabilities, forward_returns, cost, threshold)
+        metrics = _metrics(
+            y_true, probabilities, forward_returns, cost, threshold, timestamps=timestamps
+        )
         if metrics["signals"] < minimum_signals:
             continue
-        # Conservative selection: mean net return minus one standard error.
         values = np.asarray(forward_returns, dtype=float)
         p = np.asarray(probabilities, dtype=float)
         direction = np.where(p >= threshold, 1, np.where(p <= 1-threshold, -1, 0))
-        net = direction[direction != 0] * values[direction != 0] - cost
-        score = float(net.mean() - net.std(ddof=1) / math.sqrt(len(net))) if len(net) > 1 else -math.inf
-        scored.append((score, threshold, metrics))
+        mask = direction != 0
+        net = direction[mask] * values[mask] - cost
+        cluster_se = None
+        cluster_count = 0
+        if timestamps is not None and len(timestamps) == len(mask):
+            cluster_se, cluster_count = _clustered_standard_error(
+                net, np.asarray(timestamps)[mask], block_hours=72
+            )
+        if cluster_se is None:
+            cluster_se = float(net.std(ddof=1) / math.sqrt(len(net))) if len(net) > 1 else math.inf
+            uncertainty_method = "iid_fallback_insufficient_time_blocks"
+        else:
+            uncertainty_method = "72h_time_block_clustered"
+        score = float(net.mean() - cluster_se)
+        scored.append((score, threshold, metrics, cluster_se, cluster_count, uncertainty_method))
     if not scored:
         return fallback, {"method": "fixed_fallback_no_validation_threshold_met",
                           "threshold": fallback, "minimum_signals": minimum_signals}
-    score, threshold, metrics = max(scored, key=lambda item: (item[0], item[1]))
+    score, threshold, metrics, cluster_se, cluster_count, uncertainty_method = max(
+        scored, key=lambda item: (item[0], item[1])
+    )
     return threshold, {
         "method": "validation_mean_net_return_minus_one_standard_error",
+        "uncertainty_method": uncertainty_method,
+        "validation_cluster_count": cluster_count,
+        "validation_clustered_standard_error_pct": round(cluster_se*100, 5),
         "threshold": threshold,
         "minimum_signals": minimum_signals,
         "validation_score_pct": round(score*100, 5),
@@ -605,6 +655,7 @@ def _market_regime_breakdown(test, probabilities, threshold, cost):
             group["forward_return"].to_numpy(),
             cost,
             threshold,
+            timestamps=group["time"].to_numpy(),
         )
         out[str(regime)] = metrics
     return out
@@ -670,6 +721,7 @@ def _run_group_ablation(
         baseline[str(bps) + "bps"] = _metrics(
             test[label_col].to_numpy(), baseline_test_probabilities,
             test[return_col].to_numpy(), bps / 10_000, baseline_threshold,
+            timestamps=test["time"].to_numpy(),
         )
     results = {}
     for group in sorted(set(feature_groups.values())):
@@ -693,7 +745,7 @@ def _run_group_ablation(
             threshold, threshold_report = _select_threshold(
                 valid[label_col].to_numpy(), valid_prob,
                 valid[return_col].to_numpy(), cost_bps / 10_000,
-                fallback_threshold,
+                fallback_threshold, timestamps=valid["time"].to_numpy(),
             )
         else:
             threshold = fallback_threshold
@@ -704,6 +756,7 @@ def _run_group_ablation(
             metrics = _metrics(
                 test[label_col].to_numpy(), test_prob,
                 test[return_col].to_numpy(), bps / 10_000, threshold,
+                timestamps=test["time"].to_numpy(),
             )
             base_mean = baseline[key].get("mean_net_return_pct")
             test_mean = metrics.get("mean_net_return_pct")
@@ -733,6 +786,8 @@ def _score_individual_features(train, valid, test, features, label_col, return_c
     from sklearn.preprocessing import StandardScaler
 
     scores = []
+    valid_times = valid["time"].to_numpy() if "time" in valid.columns else None
+    test_times = test["time"].to_numpy() if "time" in test.columns else None
     for feature in features:
         observed = train[feature].dropna()
         if len(observed) < 100 or observed.nunique() < 2:
@@ -747,22 +802,22 @@ def _score_individual_features(train, valid, test, features, label_col, return_c
             p_valid = model.predict_proba(valid[[feature]])[:, classes.index(1)]
             threshold, threshold_report = _select_threshold(
                 valid[label_col].to_numpy(), p_valid, valid[return_col].to_numpy(),
-                cost, fallback_threshold
+                cost, fallback_threshold, timestamps=valid_times
             )
         else:
             threshold = fallback_threshold
             threshold_report = {"method": "fixed_fallback_no_validation_rows", "threshold": threshold}
         p_test = model.predict_proba(test[[feature]])[:, classes.index(1)]
         metrics = _metrics(
-            test[label_col].to_numpy(), p_test, test[return_col].to_numpy(), cost, threshold
+            test[label_col].to_numpy(), p_test, test[return_col].to_numpy(), cost, threshold,
+            timestamps=test_times,
         )
         correlation = test[feature].corr(test[return_col], method="spearman")
-        coefficient = float(model[-1].coef_[0][0])
         scores.append({
             "feature": feature,
             "train_non_null_pct": round(float(train[feature].notna().mean()*100), 2),
             "test_non_null_pct": round(float(test[feature].notna().mean()*100), 2),
-            "standardized_logistic_coefficient": round(coefficient, 5),
+            "standardized_logistic_coefficient": round(float(model[-1].coef_[0][0]), 5),
             "test_spearman_vs_forward_return": round(float(correlation), 5) if pd.notna(correlation) else None,
             "threshold_selection": threshold_report,
             "test_metrics_12bps": metrics,
@@ -910,7 +965,7 @@ def run_research(args):
             p_valid = valid_proba
             selected_threshold, threshold_report = _select_threshold(
                 y_valid.to_numpy(), p_valid, valid[ret_col].to_numpy(),
-                args.cost_bps/10_000, args.threshold
+                args.cost_bps/10_000, args.threshold, timestamps=valid["time"].to_numpy()
             ) if len(X_valid) else (args.threshold, {"method":"fixed_fallback_no_validation_rows","threshold":args.threshold})
             proba = model.predict_proba(X_test)
             p_up = proba[:, classes.index(1)]
@@ -918,7 +973,8 @@ def run_research(args):
             for bps in (args.cost_bps, 20, 30):
                 c = bps/10_000
                 costs[str(bps)+"bps"] = _metrics(
-                    y_test.to_numpy(), p_up, test[ret_col].to_numpy(), c, selected_threshold
+                    y_test.to_numpy(), p_up, test[ret_col].to_numpy(), c, selected_threshold,
+                    timestamps=test["time"].to_numpy(),
                 )
             test_for_regime = test.assign(
                 label=y_test.to_numpy(), forward_return=test[ret_col].to_numpy()
@@ -950,7 +1006,8 @@ def run_research(args):
         baseline_p = np.where(momentum == 1, 0.500001, 0.499999)
         baseline = _metrics(
             y_test.to_numpy(), baseline_p, test[ret_col].to_numpy(),
-            args.cost_bps/10_000, 0.500001
+            args.cost_bps/10_000, 0.500001,
+            timestamps=test["time"].to_numpy(),
         )
         horizon_result["momentum_24h_baseline"] = baseline
         results[f"{horizon}h"] = horizon_result
