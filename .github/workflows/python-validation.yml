@@ -52,8 +52,8 @@ jobs:
         run: python scripts/backtest_scalping_100.py --days 30 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --deposit 100 --risk-percent 2 --leverage 5 --max-positions 5
         timeout-minutes: 60
       - name: Run Strategy B single-take-profit sweep (30-day research)
-        if: github.ref == 'refs/heads/research/single-tp-validation'
+        if: github.ref == 'refs/heads/research/single-tp-validation' || github.ref == 'refs/heads/research/single-tp-validation-v2'
         run: python scripts/backtest_single_tp.py --days 30 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --deposit 100 --risk-percent 2 --leverage 5 --max-positions 5 --target-rs 1.5,1.8,2.1,2.4,2.7,3.0
         timeout-minutes: 60
 
-# Single-TP v2 keeps unresolved simulated positions open through the sample end.
+# Single-TP v2 runs corrected unresolved-position accounting through the 30-day sweep.
