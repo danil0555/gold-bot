@@ -14,7 +14,9 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from scripts.backtest_scalping_100 import (
+# When executed as a file, Python places scripts/ (not the repository
+# root) at sys.path[0], so import the sibling module directly.
+from backtest_scalping_100 import (
     INTERVAL_MS, WARMUP_DAYS, fetch_interval, filter_closed_candles,
     closed_window, simulate_portfolio,
     TAKER_FEE_RATE, SLIPPAGE_PCT, SPREAD_PCT, MAX_ENTRY_DRIFT_R,
