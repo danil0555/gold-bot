@@ -376,8 +376,17 @@ async def websocket_loop(session, aggregator, symbols):
                         continue
                     data_type = str(decoded.get("dataType", ""))
                     data = decoded.get("data")
-                    if not data:
+                    if "code" in decoded and not data:
+                        aggregator.event(
+                            "ws_subscription_ack",
+                            f"dataType={data_type or 'n/a'} code={decoded.get('code')} msg={decoded.get('msg', '')}",
+                        )
                         continue
+                    if not data:
+                        # Some kline payload variants place K at the top level.
+                        if "K" not in decoded:
+                            continue
+                        data = decoded
                     now_ms = int(time.time()*1000)
                     if data_type.endswith("@trade") and isinstance(data, list):
                         for trade in data:
@@ -391,9 +400,23 @@ async def websocket_loop(session, aggregator, symbols):
                         event_ts = int(decoded.get("ts") or now_ms)
                         aggregator.process_depth(symbol, event_ts, data)
                         aggregator.flush_before(event_ts)
-                    elif data_type.endswith("@kline_1m") and isinstance(data, dict):
+                    elif "@kline_1m" in data_type:
                         symbol = data_type.split("@", 1)[0]
-                        aggregator.save_candle(symbol, data)
+                        candles = data if isinstance(data, list) else [data]
+                        for candle in candles:
+                            accepted = aggregator.save_candle(symbol, candle)
+                            aggregator.event(
+                                "kline_update",
+                                f"dataType={data_type} accepted={accepted} "
+                                f"keys={sorted(candle.keys()) if isinstance(candle, dict) else type(candle).__name__}",
+                            )
+                    elif isinstance(data, dict) and "K" in data:
+                        # Defensive fallback: retain kline-shaped messages even if
+                        # BingX omits or changes dataType formatting.
+                        symbol = str(data.get("s") or data.get("K", {}).get("s") or "")
+                        if symbol:
+                            accepted = aggregator.save_candle(symbol, data)
+                            aggregator.event("kline_update_fallback", f"symbol={symbol} accepted={accepted}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
