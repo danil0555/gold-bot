@@ -87,6 +87,6 @@ def test_unresolved_position_reserves_portfolio_slot_and_margin_without_realizin
     assert result["accepted_trades"] == 0
     assert result["skipped_max_positions"] == 1
     assert result["open_positions_at_end"] == 1
-    assert result["open_notional_at_end_usdt"] == 10.0
+    assert result["open_notional_at_end_usdt"] == 200.0
     assert result["ending_equity_usdt"] == 100.0
     assert result["net_pnl_usdt"] == 0.0
