@@ -253,9 +253,19 @@ class MarketMinuteAggregator:
             # BingX swap WS messages observed in production smoke tests may
             # omit K.t while retaining K.T and OHLCV. For a 1m stream, derive
             # the candle start from its documented close timestamp.
-            minute_ts = int(raw_open_ts) if raw_open_ts not in (None, "") else (
-                close_ts // 60_000 * 60_000 if close_ts > 0 else 0
-            )
+            if raw_open_ts not in (None, ""):
+                minute_ts = int(raw_open_ts)
+            elif close_ts > 0:
+                # Some live swap payloads omit K.t and report T as the
+                # exclusive next-minute boundary (e.g. ...:17:00.000),
+                # rather than the documented inclusive close (...:16:59.999).
+                # In that exact-boundary variant, the candle began one minute
+                # earlier. For inclusive close timestamps, floor to its minute.
+                minute_ts = close_ts - 60_000 if close_ts % 60_000 == 0 else (
+                    close_ts // 60_000 * 60_000
+                )
+            else:
+                minute_ts = 0
             values = [float(kline[key]) for key in ("o", "h", "l", "c", "v")]
             open_price, high, low, close, volume = values
             if minute_ts <= 0 or close_ts <= minute_ts or not all(map(math.isfinite, values)):
