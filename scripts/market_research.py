@@ -594,6 +594,7 @@ def _market_regime_breakdown(test, probabilities, threshold, cost):
             group["forward_return"].to_numpy(),
             cost,
             threshold,
+            timestamps=group["time"].to_numpy(),
         )
         out[str(regime)] = metrics
     return out
@@ -917,7 +918,8 @@ def run_research(args):
         baseline_p = np.where(momentum == 1, 0.500001, 0.499999)
         baseline = _metrics(
             y_test.to_numpy(), baseline_p, test[ret_col].to_numpy(),
-            args.cost_bps/10_000, 0.500001
+            args.cost_bps/10_000, 0.500001,
+            timestamps=test["time"].to_numpy(),
         )
         horizon_result["momentum_24h_baseline"] = baseline
         results[f"{horizon}h"] = horizon_result
