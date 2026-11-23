@@ -76,20 +76,20 @@ def add_past_only_events(panel: pd.DataFrame, lookback: int = 120, min_periods: 
     # Aggressive selling with little downward price progress can indicate passive
     # demand absorbing market sells; the mirror condition tests supply absorption.
     out["event_sell_absorption"] = (
-        (out["taker_imbalance"] <= out["taker_q20"])
+        (out["taker_imbalance"] < out["taker_q20"])
         & (out["ret_1m"] >= -0.0002)
     )
     out["event_buy_absorption"] = (
-        (out["taker_imbalance"] >= out["taker_q80"])
+        (out["taker_imbalance"] > out["taker_q80"])
         & (out["ret_1m"] <= 0.0002)
     )
     out["event_bid_support"] = (
-        (out["avg_book_imbalance20"] >= out["book_q80"])
-        & (out["avg_microprice_offset_bps"] >= out["micro_q80"])
+        (out["avg_book_imbalance20"] > out["book_q80"])
+        & (out["avg_microprice_offset_bps"] > out["micro_q80"])
         & (out["avg_spread_bps"] <= out["spread_q80"])
     )
     out["event_oi_expansion_sell_pressure"] = (
-        (out["oi_change_5m"] >= out["oi_q80"])
+        (out["oi_change_5m"] > out["oi_q80"])
         & (out["taker_imbalance"] <= out["taker_q20"])
     )
     for horizon in (1, 5, 15):
