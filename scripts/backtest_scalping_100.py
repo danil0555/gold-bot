@@ -281,27 +281,35 @@ def simulate_portfolio(trades, deposit, risk_percent, leverage, max_positions):
             skipped_margin += 1
             continue
         actual_risk = notional * stop_pct
-        pnl = float(trade["net_r"]) * actual_risk
+        is_unresolved = trade.get("status") == "unresolved"
+        pnl = 0.0 if is_unresolved else float(trade["net_r"]) * actual_risk
         open_positions.append({"exit_time": int(trade["exit_time"]),
                                "notional": notional, "pnl_usdt": pnl,
-                               "symbol": trade.get("symbol")})
+                               "symbol": trade.get("symbol"),
+                               "unresolved": is_unresolved})
         max_open = max(max_open, len(open_positions))
-        accepted.append({**trade, "notional_usdt": round(notional, 6),
-                         "risk_usdt": round(actual_risk, 6), "net_pnl_usdt": round(pnl, 6)})
+        if not is_unresolved:
+            accepted.append({**trade, "notional_usdt": round(notional, 6),
+                             "risk_usdt": round(actual_risk, 6), "net_pnl_usdt": round(pnl, 6)})
     for pos in sorted(open_positions, key=lambda p: p["exit_time"]):
-        equity += pos["pnl_usdt"]
-        peak = max(peak, equity)
-        max_drawdown_pct = max(max_drawdown_pct, (peak-equity)/peak*100.0 if peak else 0.0)
+        if not pos.get("unresolved"):
+            equity += pos["pnl_usdt"]
+            peak = max(peak, equity)
+            max_drawdown_pct = max(max_drawdown_pct, (peak-equity)/peak*100.0 if peak else 0.0)
     wins = sum(t["net_pnl_usdt"] > 0 for t in accepted)
     losses = sum(t["net_pnl_usdt"] < 0 for t in accepted)
+    open_at_end = [p for p in open_positions if p.get("unresolved")]
     return {"accepted_trades": len(accepted), "wins": wins, "losses": losses,
             "win_rate_pct": round(wins/len(accepted)*100, 2) if accepted else None,
             "skipped_max_positions": skipped_slots, "skipped_margin_cap": skipped_margin,
-            "max_open_positions_observed": max_open, "ending_equity_usdt": round(equity, 4),
+            "max_open_positions_observed": max_open,
+            "open_positions_at_end": len(open_at_end),
+            "open_notional_at_end_usdt": round(sum(p["notional"] for p in open_at_end), 6),
+            "ending_equity_usdt": round(equity, 4),
             "net_pnl_usdt": round(equity-deposit, 4),
             "return_pct": round((equity/deposit-1)*100, 3),
             "max_drawdown_pct": round(max_drawdown_pct, 3), "trades": accepted,
-            "assumptions": "Up to configured % of realized equity risked per trade; shared gross notional limited to deposit x leverage; max concurrent positions enforced; net R includes modeled trading friction."}
+            "assumptions": "Closed trades realize modeled PnL; unresolved positions reserve slots and gross notional through dataset end but do not realize PnL; shared gross notional limited to deposit x leverage; net R includes modeled trading friction."}
 
 
 def run(args):
