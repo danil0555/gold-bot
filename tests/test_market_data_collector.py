@@ -59,11 +59,9 @@ def test_minute_candle_updates_are_persisted_and_closed_flag_is_time_based():
                 "o": "100", "h": "103", "l": "99", "c": "102", "v": "12.5",
             }
         }
+        # Active bars are accepted but not persisted until their close time passes.
         assert agg.save_candle("BTC-USDT", candle) is True
-        row = agg.db.execute(
-            "SELECT open,high,low,close,volume,is_closed FROM minute_candles"
-        ).fetchone()
-        assert row == (100.0, 103.0, 99.0, 102.0, 12.5, 0)
+        assert agg.db.execute("SELECT count(*) FROM minute_candles").fetchone()[0] == 0
 
         candle["K"]["T"] = now_ms - 3_000
         assert agg.save_candle("BTC-USDT", candle) is True
@@ -103,5 +101,23 @@ def test_kline_message_matches_bingx_swap_websocket_documented_shape():
             "SELECT open,high,low,close,volume FROM minute_candles"
         ).fetchone()
         assert row == (100.0, 103.0, 99.0, 102.0, 12.5)
+    finally:
+        agg.close()
+
+
+def test_kline_without_open_timestamp_uses_minute_bucket_of_close_timestamp():
+    agg = MarketMinuteAggregator(":memory:")
+    try:
+        now_ms = int(__import__("time").time() * 1000)
+        close_ts = (now_ms // 60_000) * 60_000 - 1
+        payload = {
+            "T": close_ts,
+            "o": "100", "h": "103", "l": "99", "c": "102", "v": "12.5",
+        }
+        assert agg.save_candle("BTC-USDT", payload) is True
+        row = agg.db.execute(
+            "SELECT minute_ts,close_ts,is_closed FROM minute_candles"
+        ).fetchone()
+        assert row == (close_ts // 60_000 * 60_000, close_ts, 1)
     finally:
         agg.close()
