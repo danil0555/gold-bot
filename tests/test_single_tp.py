@@ -41,3 +41,24 @@ def test_single_tp_short_uses_downside_target():
     result = simulate_single_tp(signal("SELL"), candles, 0, 1.5)
     assert result["status"] == "tp"
     assert result["gross_r"] > 1.3
+
+
+def test_unresolved_trade_blocks_new_entries_until_dataset_end():
+    from scripts.backtest_single_tp import update_busy_until
+
+    unresolved = {"status": "unresolved", "exit_index": 99}
+    assert update_busy_until(unresolved, 10, 500) == 500
+
+
+def test_skipped_entry_does_not_block_later_entries():
+    from scripts.backtest_single_tp import update_busy_until
+
+    skipped = {"status": "skipped_drift", "exit_index": 11}
+    assert update_busy_until(skipped, 10, 500) == 10
+
+
+def test_closed_trade_blocks_until_its_exit_candle():
+    from scripts.backtest_single_tp import update_busy_until
+
+    closed = {"status": "tp", "exit_index": 42}
+    assert update_busy_until(closed, 10, 500) == 42
