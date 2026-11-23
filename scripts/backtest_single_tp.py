@@ -150,6 +150,7 @@ def run_target(args, target_r, ns, histories):
     ns["TP2_R"] = target_r
     builder = ns["build_signal_b"]
     rows = []
+    unresolved_rows = []
     counters = defaultdict(int)
 
     for symbol, history in histories.items():
@@ -184,7 +185,7 @@ def run_target(args, target_r, ns, histories):
             counters["signals"] += 1
             counters[outcome["status"]] += 1
             busy_until = update_busy_until(outcome, busy_until, len(m1) - 1)
-            if outcome["status"] in ("skipped_drift", "unresolved"):
+            if outcome["status"] == "skipped_drift":
                 continue
             outcome["entry_time"] = int(m1.iloc[i + 1]["open_time"])
             outcome["exit_time"] = int(m1.iloc[outcome["exit_index"]]["open_time"])
@@ -197,10 +198,14 @@ def run_target(args, target_r, ns, histories):
                 "side": signal["side"],
                 "time": datetime.fromtimestamp(stamp / 1000, tz=timezone.utc).isoformat(),
             })
-            rows.append(outcome)
+            if outcome["status"] == "unresolved":
+                unresolved_rows.append(outcome)
+            else:
+                rows.append(outcome)
 
     portfolio = simulate_portfolio(
-        rows, args.deposit, args.risk_percent, args.leverage, args.max_positions
+        rows + unresolved_rows, args.deposit, args.risk_percent,
+        args.leverage, args.max_positions
     )
     accepted = portfolio["trades"]
     avg = lambda key: (
@@ -223,6 +228,8 @@ def run_target(args, target_r, ns, histories):
         "skipped_drift": counters["skipped_drift"],
         "unresolved": counters["unresolved"],
         "accepted_trades": portfolio["accepted_trades"],
+        "open_positions_at_end": portfolio["open_positions_at_end"],
+        "open_notional_at_end_usdt": portfolio["open_notional_at_end_usdt"],
         "win_rate_pct": portfolio["win_rate_pct"],
         "avg_gross_r": avg("gross_r"), "avg_fee_r": avg("fee_r"),
         "avg_net_r": avg("net_r"),
