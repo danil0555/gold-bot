@@ -67,7 +67,7 @@ jobs:
           if-no-files-found: warn
       - name: Run 180-day BingX walk-forward regime research
         if: github.ref == 'refs/heads/research/market-walkforward-regimes'
-        run: python scripts/market_walkforward.py --days 180 --universe 30 --min-quote-volume 5000000 --cost-bps 12 --threshold 0.58 --train-days 60 --validation-days 30 --test-days 30 --step-days 30
+        run: python -m scripts.market_walkforward --days 180 --universe 30 --min-quote-volume 5000000 --cost-bps 12 --threshold 0.58 --train-days 60 --validation-days 30 --test-days 30 --step-days 30
         timeout-minutes: 70
       - name: Upload walk-forward regime report
         if: always() && github.ref == 'refs/heads/research/market-walkforward-regimes'
