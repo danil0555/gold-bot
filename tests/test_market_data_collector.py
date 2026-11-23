@@ -85,3 +85,23 @@ def test_minute_candle_rejects_invalid_ohlcv():
         assert agg.db.execute("SELECT count(*) FROM minute_candles").fetchone()[0] == 0
     finally:
         agg.close()
+
+
+
+def test_kline_message_matches_bingx_swap_websocket_documented_shape():
+    agg = MarketMinuteAggregator(":memory:")
+    try:
+        payload = {
+            "e": "kline", "E": 1_800_000_060_000, "s": "BTC-USDT",
+            "K": {
+                "t": 1_800_000_000_000, "T": 1_800_000_059_999,
+                "o": "100", "h": "103", "l": "99", "c": "102", "v": "12.5",
+            },
+        }
+        assert agg.save_candle("BTC-USDT", payload) is True
+        row = agg.db.execute(
+            "SELECT open,high,low,close,volume FROM minute_candles"
+        ).fetchone()
+        assert row == (100.0, 103.0, 99.0, 102.0, 12.5)
+    finally:
+        agg.close()
