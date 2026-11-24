@@ -54,6 +54,45 @@ def test_derivatives_are_backward_joined_and_stale_data_is_rejected():
     assert not bool(eth.iloc[-1].liquidation_data_available)
 
 
+def test_exact_minute_returns_and_time_windows_respect_data_gaps():
+    frame = _candles()
+    missing_minutes = set(range(20, 51))
+    frame = frame[
+        ~(
+            (frame.symbol == "ETH-USDT")
+            & (frame.minute_ts.isin([m * 60_000 for m in missing_minutes]))
+        )
+    ]
+    result = add_market_context(frame)
+    eth = result[result.symbol == "ETH-USDT"].set_index("minute_ts")
+
+    # The first candle after the gap cannot use the last pre-gap candle as a 1m lag.
+    assert pd.isna(eth.loc[51 * 60_000, "return_1m"])
+    # Sparse rows across a 30-minute span must not satisfy a 20-observation window.
+    assert pd.isna(eth.loc[62 * 60_000, "rv_30m"])
+
+
+def test_btc_self_relative_return_stays_missing_until_return_exists():
+    result = add_market_context(_candles())
+    btc = result[result.symbol == "BTC-USDT"].sort_values("minute_ts")
+    assert pd.isna(btc.iloc[0].relative_return_5m)
+    assert btc.iloc[10].relative_return_5m == 0.0
+
+
+def test_zero_oi_change_is_not_misclassified_as_position_building():
+    derivatives = pd.DataFrame([
+        ("ETH-USDT", 0, 10.0, 0.0001),
+        ("ETH-USDT", 5 * 60_000, 10.0, 0.0001),
+    ], columns=["symbol", "ts_ms", "open_interest_base", "funding_rate"])
+    result = add_market_context(_candles(), derivatives)
+    eth = result[
+        (result.symbol == "ETH-USDT")
+        & (result.minute_ts == 5 * 60_000)
+    ].iloc[0]
+    assert eth.oi_change_5m_pct == pytest.approx(0.0)
+    assert eth.positioning_proxy == "unknown"
+
+
 def test_calibrator_is_frozen_and_metrics_are_well_formed():
     calibrator = fit_probability_calibrator(
         [0.1, 0.2, 0.8, 0.9], [0, 0, 1, 1], bins=4
