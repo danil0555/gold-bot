@@ -151,6 +151,16 @@ def mine_patterns(
             "patterns": [],
             "thresholds": thresholds,
             "volatility_cuts": volatility_cuts,
+            "trial_registry": {
+                "feature_count": len(features),
+                "feature_pair_count": len(features) * (len(features) - 1) // 2,
+                "state_combinations_per_pair": 4,
+                "matched_symbol_horizon_direction_groups_evaluated": 0,
+                "candidate_hypotheses_evaluated": 0,
+                "reported_patterns": 0,
+                "max_patterns_output": max_patterns,
+                "note": "Counts describe the search performed; they are not a multiple-testing correction.",
+            },
             "warning": "Need at least two features with sufficient non-constant observations.",
         }
 
@@ -163,7 +173,17 @@ def mine_patterns(
     events = pd.DataFrame(event_rows)
     if events.empty:
         return {"status": "no_events", "patterns": [], "thresholds": thresholds,
-                "feature_thresholds": thresholds, "volatility_cuts": volatility_cuts}
+                "feature_thresholds": thresholds, "volatility_cuts": volatility_cuts,
+                "trial_registry": {
+                    "feature_count": len(features),
+                    "feature_pair_count": len(features) * (len(features) - 1) // 2,
+                    "state_combinations_per_pair": 4,
+                    "matched_symbol_horizon_direction_groups_evaluated": 0,
+                    "candidate_hypotheses_evaluated": 0,
+                    "reported_patterns": 0,
+                    "max_patterns_output": max_patterns,
+                    "note": "Counts describe the search performed; they are not a multiple-testing correction.",
+                }}
 
     # Keep optional volatility fields explicit: missing data stays NaN/unknown.
     for optional_feature in ("rv_60m", "rv_30m"):
