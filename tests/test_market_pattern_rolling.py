@@ -34,10 +34,16 @@ def test_rolling_walk_forward_uses_multiple_later_non_overlapping_holdouts(monke
         "close": np.full(240, 100.0),
     })
     discovery_ranges = []
+    bounded_holdout_discoveries = []
     frozen_cut_arguments = []
 
-    def fake_discover(frame):
+    def fake_discover(frame, start_time_bounds=None):
         discovery_ranges.append((int(frame.minute_ts.min()), int(frame.minute_ts.max())))
+        if start_time_bounds is not None:
+            bounded_holdout_discoveries.append({
+                "frame_end": int(frame.minute_ts.max()),
+                "bounds": start_time_bounds,
+            })
         return [], {}
 
     def fake_evaluate(holdout, episodes, patterns, thresholds, frozen_volatility_cuts=None):
@@ -82,15 +88,26 @@ def test_rolling_walk_forward_uses_multiple_later_non_overlapping_holdouts(monke
     assert stability["folds_with_lift_above_1"] == 1
     assert stability["median_holdout_descriptive_lift"] == 0.9
     assert report["trial_registry"]["candidate_hypotheses_evaluated_across_folds"] == 432
-    # Every fold discovers training first and holdout second; no holdout begins
-    # before its own training segment ends.
+    # Every fold discovers training first and holdout second. The holdout
+    # discovery frame includes a future label tail, but event starts are bounded
+    # to the original holdout window and evaluation controls remain holdout-only.
     assert len(discovery_ranges) == 6
+    assert len(bounded_holdout_discoveries) == 3
     for index in range(0, len(discovery_ranges), 2):
         train_start, train_end = discovery_ranges[index]
-        holdout_start, holdout_end = discovery_ranges[index + 1]
-        assert train_end < holdout_start
+        label_start, label_frame_end = discovery_ranges[index + 1]
+        bounds = bounded_holdout_discoveries[index // 2]["bounds"]
+        assert train_end < bounds[0]
         assert train_start <= train_end
-        assert holdout_start <= holdout_end
+        assert label_start == bounds[0]
+        assert label_frame_end >= bounds[1]
+        assert bounded_holdout_discoveries[index // 2]["frame_end"] == label_frame_end
+
+    labeling = [fold["holdout_labeling"] for fold in report["folds"]]
+    assert labeling[0]["future_tail_complete_for_max_horizon"] is True
+    assert labeling[1]["future_tail_complete_for_max_horizon"] is True
+    assert labeling[2]["future_tail_complete_for_max_horizon"] is False
+    assert labeling[2]["future_tail_minutes_available"] < 30
 
 
 def test_rolling_walk_forward_rejects_overlapping_holdout_stride():
