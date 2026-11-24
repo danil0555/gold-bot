@@ -161,7 +161,7 @@ jobs:
       - name: Check merged sample coverage and run frozen holdout
         run: |
           ready=$(python - <<'PY'
-          import sqlite3
+          import sqlite3, sys
           db = sqlite3.connect("/tmp/market_microstructure_merged.sqlite3")
           count, days = db.execute("""
             SELECT COUNT(DISTINCT minute_ts),
@@ -170,7 +170,7 @@ jobs:
           """).fetchone()
           db.close()
           result = count >= 600 and days >= 3
-          print(f"Coverage: {count} unique minutes across {days} UTC dates; holdout_ready={result}")
+          print(f"Coverage: {count} unique minutes across {days} UTC dates; holdout_ready={result}", file=sys.stderr)
           print("true" if result else "false")
           PY
           | tail -n 1)
