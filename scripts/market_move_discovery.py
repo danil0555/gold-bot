@@ -16,12 +16,13 @@ import pandas as pd
 
 MINUTE_MS = 60_000
 DAY_MS = 86_400_000
+MAX_OI_CHANGE_INTERVAL_MS = 10 * 60_000
 
 BASE_FEATURES = (
     "ret_1m", "ret_5m", "ret_15m", "rv_30m", "rv_60m",
     "volume_surprise_z", "trades_surprise_z", "taker_imbalance",
     "book_imbalance5", "book_imbalance20", "microprice_offset_bps",
-    "spread_bps", "open_interest_change_pct", "funding_rate",
+    "spread_bps", "open_interest_change_pct", "open_interest_change_interval_ms", "funding_rate",
 )
 
 
@@ -96,8 +97,31 @@ def load_market_panel(db_path: str) -> pd.DataFrame:
                 left = left.copy()
                 left["open_interest_base"] = np.nan
                 left["funding_rate"] = np.nan
+                left["open_interest_change_pct"] = np.nan
+                left["open_interest_change_interval_ms"] = np.nan
                 pieces.append(left)
                 continue
+
+            # Calculate OI change on actual consecutive derivative snapshots,
+            # not on minute candles carrying a repeated/stale as-of value.
+            deriv = deriv.drop_duplicates(subset=["minute_ts"], keep="last").copy()
+            deriv["open_interest_base"] = pd.to_numeric(
+                deriv["open_interest_base"], errors="coerce"
+            )
+            previous_ts = deriv["minute_ts"].shift(1)
+            previous_oi = deriv["open_interest_base"].shift(1)
+            interval_ms = deriv["minute_ts"] - previous_ts
+            valid_oi_pair = (
+                deriv["open_interest_base"].gt(0)
+                & previous_oi.gt(0)
+                & interval_ms.gt(0)
+                & interval_ms.le(MAX_OI_CHANGE_INTERVAL_MS)
+            )
+            deriv["open_interest_change_pct"] = (
+                deriv["open_interest_base"] / previous_oi - 1.0
+            ).where(valid_oi_pair)
+            deriv["open_interest_change_interval_ms"] = interval_ms.where(valid_oi_pair)
+
             merged = pd.merge_asof(
                 left, deriv.sort_values("minute_ts"), on="minute_ts", direction="backward",
                 tolerance=120_000,
@@ -109,10 +133,8 @@ def load_market_panel(db_path: str) -> pd.DataFrame:
     else:
         panel["open_interest_base"] = np.nan
         panel["funding_rate"] = np.nan
-
-    panel["open_interest_change_pct"] = panel.groupby("symbol", sort=False)[
-        "open_interest_base"
-    ].pct_change()
+        panel["open_interest_change_pct"] = np.nan
+        panel["open_interest_change_interval_ms"] = np.nan
     return panel.replace([np.inf, -np.inf], np.nan)
 
 
