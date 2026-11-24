@@ -180,9 +180,9 @@
 - Исправлено отсутствие BTC self-relative context: ноль выставляется только когда соответствующий BTC return уже существует; ранние строки остаются NaN.
 - Добавлена валидация конечности и положительности close.
 - Добавлены тесты на gap после пропущенных минут, time-window coverage, ранний BTC return и нулевой OI change.
-- Коммиты аудита: `cb25b4047887be96c86254c656cf5e17753ea99f` (gap-aware features), `20c8f099f5818cbd480f76101df0c4cf9e473a13` (тесты на gaps/neutral OI), `70d3edf314273aefcbe96212e96e2873fc3dee92` (проверка фактического OI snapshot interval), `b6d3b1d0d0b30afdff97983d628e0013bc41a59e` (тест нерегулярного OI интервала).
+- Коммиты аудита: `cb25b4047887be96c86254c656cf5e17753ea99f` (gap-aware features), `20c8f099f5818cbd480f76101df0c4cf9e473a13` (тесты на gaps/neutral OI), `70d3edf314273aefcbe96212e96e2873fc3dee92` (проверка фактического OI snapshot interval), `b6d3b1d0d0b30afdff97983d628e0013bc41a59e` (тест нерегулярного OI интервала), `2a985137a60bd0c8aa93f3069bc92aa15e54e3f5` (валидация положительного OI и coverage), `95630c277308555581450bcec799926627000745` (тесты OI validity/report coverage).
 - Эти изменения находятся в ветке `research/prediction-quality-layer-v1`, PR #12 остаётся draft и не объединён. Production не затронут.
-- GitHub Actions run `45472087813` для commit `0085344797c6602ed9b208596cace890054579f5` завершился `success`: compileall, импорт runtime с безопасными defaults и полный список deterministic strategy/research tests (включая `tests/test_prediction_quality_layer.py`) прошли. Это подтверждает код и тесты на указанном SHA; последующие изменения roadmap/docs не меняли Python-код. Более новый запуск `45472191619` относится к последующему обновлению документации.
+- GitHub Actions run `45472366609` для commit `06c8f48fa359ed52a22a0d6a3e0020f8348b528e` прошёл шаги compileall, runtime import/safe defaults и полный список deterministic strategy/research tests (включая `tests/test_prediction_quality_layer.py`) со статусом `success`. Это подтверждает актуальные Python-код и тесты в указанном SHA. Предыдущий run `45472087813` также прошёл на более раннем SHA.
 - BingX capture run #6 (ID `45467461076`) при последней проверке всё ещё был `in_progress`, активен сбор публичных trades/depth/candles/derivatives; аналитические шаги ещё pending.
 
 ### Последняя зафиксированная точка (2026-11-24)
