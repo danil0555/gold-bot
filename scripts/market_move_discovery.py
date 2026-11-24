@@ -59,11 +59,13 @@ def load_market_panel(db_path: str) -> pd.DataFrame:
         panel["buy_quote_usdt"].fillna(0) + panel["sell_quote_usdt"].fillna(0)
     )
     panel["trades_count"] = panel["trades_count"].fillna(0)
-    panel["ret_1m"] = panel.groupby("symbol", sort=False)["close"].pct_change()
-    for horizon in (5, 15):
-        panel[f"ret_{horizon}m"] = (
-            panel.groupby("symbol", sort=False)["close"].pct_change(horizon)
-        )
+    # Returns are valid only across exact minute intervals; row-count lags
+    # must never silently bridge missing candles.
+    for horizon in (1, 5, 15):
+        prior_close = panel.groupby("symbol", sort=False)["close"].shift(horizon)
+        prior_ts = panel.groupby("symbol", sort=False)["minute_ts"].shift(horizon)
+        valid_gap = panel["minute_ts"].sub(prior_ts).eq(horizon * MINUTE_MS)
+        panel[f"ret_{horizon}m"] = (panel["close"] / prior_close - 1).where(valid_gap)
     panel["rv_30m"] = panel.groupby("symbol", sort=False)["ret_1m"].transform(
         lambda s: s.rolling(30, min_periods=20).std()
     )
@@ -91,6 +93,9 @@ def load_market_panel(db_path: str) -> pd.DataFrame:
             deriv = derivatives.loc[derivatives.symbol == symbol].drop(columns="symbol")
             left = group.sort_values("minute_ts")
             if deriv.empty:
+                left = left.copy()
+                left["open_interest_base"] = np.nan
+                left["funding_rate"] = np.nan
                 pieces.append(left)
                 continue
             merged = pd.merge_asof(
