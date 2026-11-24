@@ -167,13 +167,14 @@ def test_oi_change_uses_real_snapshot_interval_not_minute_row_pct_change(tmp_pat
 
     assert at_5m["open_interest_change_pct"] == pytest.approx(0.10)
     assert at_5m["open_interest_change_interval_ms"] == 300000
-    # The 10-minute interval is accepted at the configured boundary.
-    assert at_10m["open_interest_change_pct"] == pytest.approx(0.10)
-    assert at_10m["open_interest_change_interval_ms"] == 600000
-    # The 10-minute gap is longer than the 5-minute candle gap; the as-of
-    # join still works, but the OI change remains explicitly unavailable.
-    assert np.isnan(at_15m["open_interest_change_pct"])
-    assert np.isnan(at_15m["open_interest_change_interval_ms"])
+    # No fresh derivative snapshot is available at this intermediate candle.
+    assert np.isnan(at_10m["open_interest_change_pct"])
+    # A 10-minute snapshot interval is accepted at the configured boundary.
+    assert at_15m["open_interest_change_pct"] == pytest.approx(0.10)
+    assert at_15m["open_interest_change_interval_ms"] == 600000
+    # An 11-minute interval is rejected even though the current snapshot is fresh.
+    assert np.isnan(at_26m["open_interest_change_pct"])
+    assert np.isnan(at_26m["open_interest_change_interval_ms"])
 
 
 def test_oi_change_rejects_non_positive_snapshots(tmp_path):
