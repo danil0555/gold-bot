@@ -277,3 +277,10 @@
 - Methodological basis: research on backtest overfitting emphasizes that trying many candidate strategies increases false-discovery risk, and that a single walk-forward path can still be unstable. Our next step is repeated chronological test windows and, only with enough data, a more formal multiple-testing / backtest-overfitting assessment. See the 2024 comparison of out-of-sample methods (DOI 10.1016/j.knosys.2024.112477) and the discussion of selection under multiplicity.
 - Validation remains pending: the GitHub connector has not exposed a PR-triggered Actions run for the current branch commits yet. Workflow now includes PR #12's base branch in pull_request triggers; inspect the resulting run before calling tests passed.
 - Production main, live bot, production database, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
+
+
+## 2026-11-24 — empty-panel compatibility guard
+- Final review of the new volatility-cut helper found a compatibility edge case: the existing no-episodes unit fixture intentionally has feature columns but no symbol column. The helper now returns an empty cut map for panels without symbol data rather than raising KeyError.
+- The existing no-episodes regression test exercises this path and now also verifies the trial registry reports zero hypotheses.
+- Fix commit: 9c6f46675a959ab2543542deeb958e7a239ac9bd.
+- This is a source-level review and regression-test addition; CI remains unconfirmed.
