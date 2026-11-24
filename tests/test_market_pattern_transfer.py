@@ -118,6 +118,9 @@ def test_transfer_report_reserves_tail_and_bounds_event_starts(monkeypatch):
     report = build_cross_symbol_transfer_report(panel, train_fraction=0.70, min_support=2)
 
     assert len(discovery_calls) == 2
+    train_label_frame, train_kwargs = discovery_calls[0]
+    assert train_kwargs["start_time_bounds"] == (0, 109 * 60_000)
+    assert train_label_frame["minute_ts"].max() == 139 * 60_000
     holdout_label_frame, kwargs = discovery_calls[1]
     assert kwargs["start_time_bounds"] == (
         report["split"]["holdout_start_utc_ms"],
