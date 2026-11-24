@@ -227,6 +227,70 @@ def evaluate_cross_symbol_transfer(
     }
 
 
+def _build_holdout_label_panel(
+    full_panel: pd.DataFrame,
+    holdout_panel: pd.DataFrame,
+    requested_tail_minutes: int = PURGE_MINUTES,
+) -> pd.DataFrame:
+    """Add per-symbol future candles solely to complete holdout event labels."""
+    if requested_tail_minutes < 0:
+        raise ValueError("requested_tail_minutes must be >= 0")
+    pieces = [holdout_panel.copy()]
+    for symbol, group in holdout_panel.groupby("symbol", sort=False):
+        last_holdout_ts = int(pd.to_numeric(group["minute_ts"], errors="coerce").max())
+        tail = full_panel.loc[
+            full_panel["symbol"].astype(str).eq(str(symbol))
+            & pd.to_numeric(full_panel["minute_ts"], errors="coerce").gt(last_holdout_ts)
+            & pd.to_numeric(full_panel["minute_ts"], errors="coerce").le(
+                last_holdout_ts + requested_tail_minutes * 60_000
+            )
+        ]
+        if not tail.empty:
+            pieces.append(tail.copy())
+    combined = pd.concat(pieces, ignore_index=True)
+    return combined.drop_duplicates(["symbol", "minute_ts"], keep="last").sort_values(
+        ["symbol", "minute_ts"]
+    ).reset_index(drop=True)
+
+
+def _label_tail_coverage(
+    full_panel: pd.DataFrame,
+    holdout_panel: pd.DataFrame,
+    requested_tail_minutes: int = PURGE_MINUTES,
+) -> dict:
+    """Measure contiguous future-minute coverage separately for each holdout symbol."""
+    details = []
+    for symbol, group in holdout_panel.groupby("symbol", sort=False):
+        last_ts = int(pd.to_numeric(group["minute_ts"], errors="coerce").max())
+        available = set(
+            pd.to_numeric(
+                full_panel.loc[
+                    full_panel["symbol"].astype(str).eq(str(symbol)), "minute_ts"
+                ], errors="coerce"
+            ).dropna().astype("int64").tolist()
+        )
+        contiguous = 0
+        for offset in range(1, requested_tail_minutes + 1):
+            if last_ts + offset * 60_000 not in available:
+                break
+            contiguous += 1
+        details.append({
+            "symbol": str(symbol),
+            "last_holdout_timestamp_utc_ms": last_ts,
+            "contiguous_tail_minutes": contiguous,
+            "complete": contiguous >= requested_tail_minutes,
+        })
+    minimum = min((item["contiguous_tail_minutes"] for item in details), default=0)
+    return {
+        "requested_minutes": int(requested_tail_minutes),
+        "minimum_contiguous_minutes_across_symbols": int(minimum),
+        "symbols_checked": len(details),
+        "symbols_with_complete_tail": sum(item["complete"] for item in details),
+        "complete_for_all_symbols": bool(details) and all(item["complete"] for item in details),
+        "per_symbol": details,
+    }
+
+
 def build_cross_symbol_transfer_report(
     panel: pd.DataFrame, train_fraction: float = 0.70,
     purge_minutes: int = PURGE_MINUTES, min_support: int = 5,
@@ -242,21 +306,35 @@ def build_cross_symbol_transfer_report(
     train_end = split_ts - purge_minutes * 60_000
     train = panel.loc[panel["minute_ts"] < train_end].copy()
     holdout = panel.loc[panel["minute_ts"] >= split_ts].copy()
+    if train.empty or holdout.empty:
+        raise ValueError("chronological split produced an empty segment")
     train_episodes, _ = discover_episodes(train)
-    holdout_episodes, _ = discover_episodes(holdout)
+    holdout_start = int(holdout["minute_ts"].min())
+    holdout_end = int(holdout["minute_ts"].max())
+    label_panel = _build_holdout_label_panel(panel, holdout, PURGE_MINUTES)
+    # The extra rows complete forward labels only. Event starts are explicitly
+    # bounded to the original holdout interval; controls still use holdout only.
+    holdout_episodes, _ = discover_episodes(
+        label_panel, start_time_bounds=(holdout_start, holdout_end)
+    )
     report = evaluate_cross_symbol_transfer(
         train, holdout, train_episodes, holdout_episodes, min_support=min_support
     )
     report["split"] = {
         "train_start_utc_ms": int(train["minute_ts"].min()),
         "train_end_utc_ms": int(train["minute_ts"].max()),
-        "holdout_start_utc_ms": int(holdout["minute_ts"].min()),
-        "holdout_end_utc_ms": int(holdout["minute_ts"].max()),
+        "holdout_start_utc_ms": holdout_start,
+        "holdout_end_utc_ms": holdout_end,
         "purge_minutes": int(purge_minutes),
         "train_rows": int(len(train)), "holdout_rows": int(len(holdout)),
+        "label_tail": _label_tail_coverage(panel, holdout, PURGE_MINUTES),
+        "label_only_rows": int(len(label_panel) - len(holdout)),
+        "label_tail_policy": (
+            "up to 30 future minutes per symbol are used only to complete event labels; "
+            "event starts remain bounded to the original holdout; controls use holdout rows only"
+        ),
     }
     return report
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
