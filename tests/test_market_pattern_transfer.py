@@ -47,7 +47,7 @@ def test_cross_symbol_transfer_never_transfers_to_same_symbol(monkeypatch):
             {"feature": "feature_b", "state": "low", "threshold": -1.9},
         ], "event_support": 8,
     }
-    monkeypatch.setattr(transfer, "mine_patterns", lambda *a, **k: {"patterns": [pattern]})
+    monkeypatch.setattr(transfer, "mine_patterns", lambda *a, **k: {"status": "ok", "patterns": [pattern], "trial_registry": {"candidate_hypotheses_evaluated": 48, "reported_patterns": 1}})
     monkeypatch.setattr(
         transfer, "_build_control_frame",
         lambda *a, **k: pd.DataFrame({
@@ -77,6 +77,11 @@ def test_cross_symbol_transfer_never_transfers_to_same_symbol(monkeypatch):
     assert evaluated[0]["target_control_match_coverage_pct"] == 100.0
     assert evaluated[0]["target_event_total_before_matching"] == 8
     assert evaluated[0]["target_control_total_before_matching"] == 8
+    assert result["training_mining_status"] == "ok"
+    assert result["training_trial_registry"]["candidate_hypotheses_evaluated"] == 48
+    assert result["training_trial_registry"]["reported_patterns"] == 1
+    assert result["transfer_result_status_counts"] == {"evaluated": 1}
+    assert result["transfer_result_rows"] == 1
 
 
 
