@@ -561,7 +561,8 @@ def build_rolling_cross_symbol_transfer_report(
             "initial_train_fraction": initial_train_fraction,
             "holdout_fraction": holdout_fraction, "step_fraction": step_fraction,
             "purge_minutes": purge_minutes, "min_support": min_support,
-            "label_only_final_window_minutes": PURGE_MINUTES,\n            "eligible_evaluation_timestamps": int(n),\n            "folds_planned": len(folds), "folds_evaluated": sum(
+            "label_only_final_window_minutes": PURGE_MINUTES,
+            "eligible_evaluation_timestamps": int(n),\n            "folds_planned": len(folds), "folds_evaluated": sum(
                 item.get("status") in {"evaluated", "no_transfer_results"} for item in folds
             ),
         },
