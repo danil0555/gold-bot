@@ -30,11 +30,12 @@ jobs:
         env:
           SELECTED_BRANCH: ${{ github.ref_name }}
         run: |
-          test "$SELECTED_BRANCH" = "research/directional-microstructure-scoring"
+          test "$SELECTED_BRANCH" = "research/market-discovery-engine-v1"
           test -f scripts/market_data_collector.py
           test -f scripts/microstructure_event_study.py
           test -f scripts/microstructure_discovery.py
           test -f scripts/microstructure_data_quality.py
+          test -f scripts/market_move_discovery.py
           git log -1 --format='Checked out commit: %h %s'
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -76,6 +77,19 @@ jobs:
             --db /tmp/market_microstructure.sqlite3 \
             --cost-bps 12 \
             --output /tmp/microstructure_discovery.json
+      - name: Discover pre-event market move conditions
+        run: |
+          python -m scripts.market_move_discovery \
+            --db /tmp/market_microstructure.sqlite3 \
+            --output /tmp/market_move_discovery.json
+      - name: Upload pre-event market move discovery report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-move-pre-event-discovery
+          path: /tmp/market_move_discovery.json
+          retention-days: 14
+          if-no-files-found: warn
       - name: Audit capture data quality
         if: always()
         run: |
