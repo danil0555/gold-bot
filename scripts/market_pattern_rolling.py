@@ -76,7 +76,7 @@ def build_rolling_walk_forward_report(
     folds = []
     aggregate_trials = 0
     trial_registry_by_fold = []
-    pattern_observations: dict[tuple, list[dict]] = []
+    pattern_observations: dict[tuple, list[dict]] = {}
     fold_index = 0
     start_index = initial_count
 
