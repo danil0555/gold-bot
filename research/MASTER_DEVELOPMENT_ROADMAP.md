@@ -194,3 +194,13 @@
 - BingX capture run #6 (ID `45467461076`) на ветке `research/market-discovery-engine-v1`, SHA `5bf6a78598c2e06f80a1a3d21b6f81b747c06203`, был `in_progress` на последней проверке.
 - Production `main`, production database, хостинг и реальные ордера не менялись.
 - Следующий шаг: проверить PR #12/CI и продолжить аудит качества/causality; затем обновить этот roadmap фактическим статусом.
+
+
+## 2026-11-24 — OI snapshot interval correction (in progress)
+- Audit confirmed that the Market Move Discovery loader previously calculated `open_interest_change_pct` with a candle-row `groupby().pct_change()` after an as-of join. That can compare repeated carried-forward values or lose the true derivative snapshot interval.
+- Corrected the calculation to derive OI changes directly between consecutive raw derivative snapshots, then attach the result with the existing backward-only 120-second freshness join.
+- Added an explicit `open_interest_change_interval_ms` feature for auditability.
+- OI change is suppressed when either OI value is non-positive, timestamps are non-increasing, or the actual snapshot interval exceeds 10 minutes.
+- Added deterministic tests for accepted 5m/10m snapshot intervals, rejected longer gaps, and non-positive OI.
+- Scope remains research-only. No live signals, production branch, production database, credentials, deployment, or exchange orders are touched.
+- CI validation for this change is pending; do not treat the correction as validated until a successful run on the resulting code SHA.
