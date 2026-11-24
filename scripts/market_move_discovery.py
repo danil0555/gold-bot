@@ -152,6 +152,14 @@ def discover_episodes(
     volatility_multiple: float = 2.5,
     cooldown_minutes: int = 5,
 ) -> tuple[list[dict], dict]:
+    # Public callers and older synthetic panels may not contain every optional
+    # feature. Keep the discovery report schema stable without treating absent
+    # inputs as observed zeroes.
+    panel = panel.copy()
+    for feature in BASE_FEATURES:
+        if feature not in panel.columns:
+            panel[feature] = np.nan
+
     episodes: list[dict] = []
     summaries: dict = {}
     for horizon in horizons:
