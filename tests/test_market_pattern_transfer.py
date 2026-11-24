@@ -3,7 +3,8 @@ import pandas as pd
 
 from scripts.market_pattern_transfer import (
     _build_holdout_label_panel, _condition_mask, _label_tail_coverage,
-    _target_feature_cuts, evaluate_cross_symbol_transfer,
+    _target_feature_cuts, build_cross_symbol_transfer_report,
+    evaluate_cross_symbol_transfer,
 )
 
 
@@ -77,9 +78,10 @@ def test_cross_symbol_label_tail_is_added_per_symbol_but_holdout_stays_separate(
     ], ignore_index=True)
     label_panel = _build_holdout_label_panel(full, holdout, requested_tail_minutes=2)
     assert len(label_panel) == len(holdout) + 3
-    assert set(label_panel.loc[~label_panel.index.isin(holdout.index), "symbol"]) <= {
-        "BTC-USDT", "ETH-USDT"
-    }
+    label_rows = set(zip(label_panel["symbol"], label_panel["minute_ts"]))
+    assert ("BTC-USDT", 180_000) in label_rows
+    assert ("BTC-USDT", 240_000) in label_rows
+    assert ("ETH-USDT", 180_000) in label_rows
     # The evaluation/control frame itself is not mutated or extended.
     assert len(holdout) == 6
     coverage = _label_tail_coverage(full, holdout, requested_tail_minutes=2)
@@ -88,3 +90,41 @@ def test_cross_symbol_label_tail_is_added_per_symbol_but_holdout_stays_separate(
     assert coverage["complete_for_all_symbols"] is False
     per_symbol = {item["symbol"]: item["contiguous_tail_minutes"] for item in coverage["per_symbol"]}
     assert per_symbol == {"BTC-USDT": 2, "ETH-USDT": 1}
+
+
+
+def test_transfer_report_reserves_tail_and_bounds_event_starts(monkeypatch):
+    import scripts.market_pattern_transfer as transfer
+
+    rows = []
+    for symbol in ("BTC-USDT", "ETH-USDT"):
+        for minute in range(200):
+            rows.append({
+                "symbol": symbol, "minute_ts": minute * 60_000,
+                "close": 100.0, "rv_60m": 0.001,
+            })
+    panel = pd.DataFrame(rows)
+    discovery_calls = []
+
+    def fake_discover(frame, **kwargs):
+        discovery_calls.append((frame.copy(), kwargs))
+        return [], {}
+
+    monkeypatch.setattr(transfer, "discover_episodes", fake_discover)
+    monkeypatch.setattr(
+        transfer, "evaluate_cross_symbol_transfer",
+        lambda *args, **kwargs: {"decision": "exploratory_transfer_test_only_no_strategy_approved"},
+    )
+    report = build_cross_symbol_transfer_report(panel, train_fraction=0.70, min_support=2)
+
+    assert len(discovery_calls) == 2
+    holdout_label_frame, kwargs = discovery_calls[1]
+    assert kwargs["start_time_bounds"] == (
+        report["split"]["holdout_start_utc_ms"],
+        report["split"]["holdout_end_utc_ms"],
+    )
+    assert holdout_label_frame["minute_ts"].max() == 199 * 60_000
+    assert report["split"]["holdout_end_utc_ms"] == 169 * 60_000
+    assert report["split"]["label_only_rows"] == 60
+    assert report["split"]["label_tail"]["complete_for_all_symbols"] is True
+    assert report["split"]["label_tail"]["symbols_with_complete_tail"] == 2
