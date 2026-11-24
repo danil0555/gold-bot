@@ -313,7 +313,7 @@
 - Each fold records requested/available label-tail minutes, whether the maximum-horizon tail is complete, and the number of additional rows used only for labels. The final dataset edge is explicitly marked incomplete when 30 future minutes do not exist.
 - Regression coverage verifies that event-start bounds remain inside the holdout, the discovery frame can extend into the label-only tail, evaluation boundaries remain unchanged, and the final incomplete tail is surfaced.
 - Commits: bounded event-start support `2fecd96e517d1e87e45a1d0b06d71e9fcf724b46`; rolling evaluator tail handling `4f7c09fd48c9763726bed3a62d0918ed32902994`; regression tests `1ca165a63ebd37d84b3a3f808adeda59a973a8d5`.
-- CI for these commits is pending at the time of this entry. Do not treat the change as validated until the latest branch-head run completes and the deterministic test step succeeds.
+- The first CI run after the implementation failed in one test double: the insufficient-fold test still mocked `discover_episodes(frame)` without accepting the new optional keyword argument. The production function compiled and the other 115 tests passed. Updated the mock to accept keyword arguments; fix commit: `b9faae3e51419412578eb79a7ca78cbed12c5398`. A fresh latest-head CI run is required.
 - This corrects event-label coverage, not the statistical limitations of descriptive pattern mining. It does not introduce trading signals, execution costs, strategy approval, or live behavior.
 - Production `main`, `trading_bot_v9.db`, credentials, hosting/deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
 
