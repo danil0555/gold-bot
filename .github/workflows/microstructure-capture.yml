@@ -33,6 +33,7 @@ jobs:
           test "$SELECTED_BRANCH" = "research/directional-microstructure-scoring"
           test -f scripts/market_data_collector.py
           test -f scripts/microstructure_event_study.py
+          test -f scripts/microstructure_discovery.py
           test -f scripts/microstructure_data_quality.py
           git log -1 --format='Checked out commit: %h %s'
       - name: Set up Python
@@ -69,6 +70,12 @@ jobs:
             --db /tmp/market_microstructure.sqlite3 \
             --cost-bps 12 \
             --output /tmp/microstructure_event_study.json
+      - name: Discover event-agnostic microstructure features
+        run: |
+          python -m scripts.microstructure_discovery \
+            --db /tmp/market_microstructure.sqlite3 \
+            --cost-bps 12 \
+            --output /tmp/microstructure_discovery.json
       - name: Audit capture data quality
         if: always()
         run: |
@@ -79,6 +86,14 @@ jobs:
           else
             echo "No capture database was produced; skipping quality audit."
           fi
+      - name: Upload event-agnostic discovery report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bingx-microstructure-discovery
+          path: /tmp/microstructure_discovery.json
+          retention-days: 14
+          if-no-files-found: warn
       - name: Upload data-quality report
         if: always()
         uses: actions/upload-artifact@v4
