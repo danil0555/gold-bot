@@ -12,7 +12,7 @@ import pandas as pd
 
 MINUTE_MS = 60_000
 FEATURES = [
-    "taker_imbalance", "cvd_to_trade_flow", "book_imbalance5",
+    "taker_imbalance", "cvd_flow_surprise", "book_imbalance5",
     "book_imbalance20", "microprice_offset_bps", "spread_bps",
     "depth_imbalance5", "depth_imbalance20", "trade_count_surprise",
     "volume_surprise", "oi_change_5m", "funding_rate",
@@ -84,8 +84,9 @@ def build_features(panel: pd.DataFrame, lookback: int = 120, min_periods: int = 
     out["realized_vol_15m"] = g.ret_1m.transform(
         lambda s: s.rolling(15, min_periods=10).std()
     ) * np.sqrt(15)
-    flow = (out.buy_quote_usdt.fillna(0) + out.sell_quote_usdt.fillna(0)).replace(0, np.nan)
-    out["cvd_to_trade_flow"] = out.cvd_quote_usdt / flow
+    out["cvd_flow_surprise"] = g.cvd_quote_usdt.transform(
+        lambda s: s / s.abs().shift(1).rolling(lookback, min_periods=min_periods).median().replace(0, np.nan)
+    )
     out["book_imbalance5"] = out.avg_book_imbalance5
     out["book_imbalance20"] = out.avg_book_imbalance20
     out["microprice_offset_bps"] = out.avg_microprice_offset_bps
