@@ -204,3 +204,12 @@
 - Added deterministic tests for accepted 5m/10m snapshot intervals, rejected longer gaps, and non-positive OI.
 - Scope remains research-only. No live signals, production branch, production database, credentials, deployment, or exchange orders are touched.
 - CI validation for this change is pending; do not treat the correction as validated until a successful run on the resulting code SHA.
+
+
+## 2026-11-24 — CI failure analysis and compatibility fix
+- CI run `45475218598` for commit `bc8be29940ea0ad225e9099595122461ca9dac63` completed with failure: 105 tests passed and 4 Market Move Discovery tests failed.
+- Root cause: the discovery summary iterated the expanded optional feature list and indexed `open_interest_change_interval_ms` on older/synthetic panels that did not contain this new optional column. This was a schema-compatibility issue, not a failure of the raw-snapshot interval calculation.
+- Added defensive NaN columns for absent optional discovery features inside `discover_episodes`, preserving “unknown/missing” rather than inventing zero values. Updated the synthetic fixture to include the new interval feature explicitly.
+- Fix commits: script `0174f817439351f45068ffa3664c24b29f665758`; test fixture `947675cfd8ee90e1c6e9d0a9b3db272807256379`. CI for the resulting combined branch HEAD is required before considering this fix validated.
+- Production `main`, live bot, database, credentials, deployment, and exchange orders remain untouched. PR #12 remains draft and unmerged.
+- Next: inspect the new CI run; if successful, proceed to matched-control comparisons stratified by volatility regime and UTC time-of-day.
