@@ -364,3 +364,13 @@
 - Commits: result and support logic `6923640b53310ebcebd57790a0bbc45fa709d305`; regression test `d1fbe20caff4101258567b528b5d752a66d65154`.
 - Validation: a previous revision passed 123 deterministic tests on commit `783605940877ec9a946f872ad1f5dd07c52473d2`, but that run predates this support/coverage change. Latest-head CI is required.
 - Production remains untouched; PR #12 remains draft and unmerged.
+
+
+## 2026-11-25 — expose cross-symbol search multiplicity and result coverage (CI pending)
+- The cross-symbol transfer report previously emitted selected source patterns and transfer outcomes but did not carry forward the mining trial registry. This made it too easy to read the strongest source→target result without seeing how many hypotheses had been searched to select the source pattern.
+- Transfer reports now include the source mining status, full training `trial_registry`, total transfer result rows, and counts by result status (evaluated, insufficient data, below minimum support, etc.).
+- Added regression assertions that the report preserves candidate hypothesis counts and status diagnostics.
+- Commits: report diagnostics `3af5eb2b995b6c5cc3be69ca78622810a2dbd5cd`; test `27fb8f72af15abc386a154e26ea998dcc3556d25`.
+- Validation: run `45490941559` on the previous head `afccf203` had passed compile, safe-default checks, deterministic tests and read-only BingX smoke scan; its 180-day backtest was cancelled when newer commits arrived. The new diagnostics and test are not covered by that run. Latest-head CI is required.
+- Next methodological step remains repeated chronological cross-symbol holdouts; until then this is a single split exploratory transfer test, not evidence of durable alpha.
+- Production `main`, database, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
