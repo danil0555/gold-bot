@@ -42,6 +42,7 @@ jobs:
           test -f scripts/microstructure_discovery.py
           test -f scripts/microstructure_data_quality.py
           test -f scripts/market_move_discovery.py
+          test -f scripts/merge_microstructure_databases.py
           git log -1 --format='Checked out commit: %h %s'
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -151,6 +152,7 @@ jobs:
           done
       - name: Merge current and earlier captures
         run: |
+          mkdir -p /tmp/previous-captures
           mapfile -t PREVIOUS_DATABASES < <(find /tmp/previous-captures -type f -name market_microstructure.sqlite3 | sort)
           python -m scripts.merge_microstructure_databases \
             --inputs /tmp/market_microstructure.sqlite3 "${PREVIOUS_DATABASES[@]}" \
@@ -171,7 +173,7 @@ jobs:
           print(f"Coverage: {count} unique minutes across {days} UTC dates; holdout_ready={result}")
           print("true" if result else "false")
           PY
-          )
+          | tail -n 1)
           if [ "$ready" = "true" ]; then
             python -m scripts.market_move_discovery --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_move_discovery_multiday.json
             python -m scripts.market_pattern_mining --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_patterns_multiday.json --min-support 5
