@@ -13,11 +13,6 @@ on:
         required: true
         type: string
         default: "BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT"
-      previous_capture_run_ids:
-        description: "Optional comma-separated IDs of earlier successful capture runs to merge"
-        required: false
-        type: string
-        default: ""
 
 permissions:
   contents: read
@@ -123,33 +118,40 @@ jobs:
           path: /tmp/microstructure_data_quality.json
           retention-days: 14
           if-no-files-found: warn
-      - name: Validate and export previous run IDs
+      - name: Discover earlier successful captures and export run IDs
         id: previous_ids
-        if: ${{ inputs.previous_capture_run_ids != '' }}
         env:
-          RAW_IDS: ${{ inputs.previous_capture_run_ids }}
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_BRANCH: ${{ github.ref_name }}
         run: |
-          python - <<'PY'
-          import os, re
-          ids = [item.strip() for item in os.environ["RAW_IDS"].split(",") if item.strip()]
-          if not ids or len(ids) != len(set(ids)) or any(not re.fullmatch(r"[0-9]{6,20}", item) for item in ids):
-              raise SystemExit("Provide unique comma-separated numeric run IDs.")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write("run_ids=" + " ".join(ids) + "\n")
-          print(f"Validated {len(ids)} previous capture runs")
-          PY
+          # Seed with the verified 4.5-hour capture from the earlier research branch.
+          # Future successful captures on this branch are discovered automatically.
+          {
+            echo "45340723127"
+            gh run list --workflow microstructure-capture.yml \
+              --branch "$CURRENT_BRANCH" --status success --limit 20 \
+              --json databaseId --jq '.[].databaseId'
+          } | awk 'NF && !seen[$0]++' > /tmp/previous-run-ids.txt
+          {
+            echo "run_ids<<EOF"
+            tr '\n' ' ' < /tmp/previous-run-ids.txt
+            echo
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Previous successful capture runs selected:"
+          cat /tmp/previous-run-ids.txt
       - name: Download earlier capture artifacts
-        if: ${{ inputs.previous_capture_run_ids != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p /tmp/previous-captures
-          for run_id in ${{ steps.previous_ids.outputs.run_ids }}; do
+          while read -r run_id; do
+            [ -n "$run_id" ] || continue
             mkdir -p "/tmp/previous-captures/$run_id"
             gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
               --name bingx-microstructure-capture \
               --dir "/tmp/previous-captures/$run_id"
-          done
+          done < /tmp/previous-run-ids.txt
       - name: Merge current and earlier captures
         run: |
           mkdir -p /tmp/previous-captures
