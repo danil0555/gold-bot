@@ -48,6 +48,18 @@ def test_cross_symbol_transfer_never_transfers_to_same_symbol(monkeypatch):
         ], "event_support": 8,
     }
     monkeypatch.setattr(transfer, "mine_patterns", lambda *a, **k: {"patterns": [pattern]})
+    monkeypatch.setattr(
+        transfer, "_build_control_frame",
+        lambda *a, **k: pd.DataFrame({
+            "symbol": ["ETH-USDT"] * 8,
+            "horizon": [5] * 8,
+            "direction": ["UP"] * 8,
+            "utc_hour": [0] * 8,
+            "volatility_bucket": [0] * 8,
+            "feature_a": [2.0] * 8,
+            "feature_b": [-2.0] * 8,
+        }),
+    )
     episodes = []
     for symbol in ("BTC-USDT", "ETH-USDT"):
         for index in range(8):
@@ -59,6 +71,12 @@ def test_cross_symbol_transfer_never_transfers_to_same_symbol(monkeypatch):
     result = evaluate_cross_symbol_transfer(train, holdout, [], episodes, min_support=2)
     assert all(item["source_symbol"] != item["target_symbol"] for item in result["transfer_results"])
     assert {item["target_symbol"] for item in result["transfer_results"]} <= {"ETH-USDT"}
+    evaluated = [item for item in result["transfer_results"] if item["status"] == "evaluated"]
+    assert len(evaluated) == 1
+    assert evaluated[0]["target_event_match_coverage_pct"] == 100.0
+    assert evaluated[0]["target_control_match_coverage_pct"] == 100.0
+    assert evaluated[0]["target_event_total_before_matching"] == 8
+    assert evaluated[0]["target_control_total_before_matching"] == 8
 
 
 
