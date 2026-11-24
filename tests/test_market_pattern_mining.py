@@ -138,7 +138,7 @@ def test_control_frame_uses_supplied_training_volatility_cuts():
         "horizon_minutes": 5, "direction": "UP", "pre_move_features": {},
     }]
     controls = _build_control_frame(
-        panel, episode, volatility_cuts={"BTC-USDT": [0.00005, 0.00015]}
+        panel, episode, volatility_cuts={"BTC-USDT": [0.00001, 0.00005]}
     )
     assert not controls.empty
     assert set(controls["volatility_bucket"]) == {2}
