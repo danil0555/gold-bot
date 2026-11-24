@@ -37,6 +37,56 @@ def _signature(frame: pd.DataFrame, thresholds: dict) -> pd.DataFrame:
     return result.fillna(False)
 
 
+def _build_control_frame(panel: pd.DataFrame, episodes: list[dict]) -> pd.DataFrame:
+    """Build controls with no large move in either direction and no event-window overlap."""
+    if panel.empty or not episodes:
+        return pd.DataFrame()
+
+    event_windows = []
+    for episode in episodes:
+        event_windows.append((
+            str(episode["symbol"]),
+            int(episode["start_ts"]),
+            int(episode["start_ts"]) + int(episode["horizon_minutes"]) * 60_000,
+        ))
+
+    controls = []
+    for horizon in sorted({int(e["horizon_minutes"]) for e in episodes}):
+        for symbol, group in panel.groupby("symbol", sort=False):
+            g = group.sort_values("minute_ts").reset_index(drop=True)
+            future = g["close"].shift(-horizon)
+            future_ts = g["minute_ts"].shift(-horizon)
+            contiguous = future_ts.eq(g["minute_ts"] + horizon * 60_000)
+            forward = future / g["close"] - 1
+            rv = g.get("rv_60m", pd.Series(np.nan, index=g.index)).fillna(
+                g.get("rv_30m", pd.Series(np.nan, index=g.index))
+            )
+            threshold = np.maximum(0.004, rv * np.sqrt(horizon) * 2.5)
+            # A genuine non-event control must not have a threshold-sized move
+            # in either direction over the selected forward horizon.
+            eligible = contiguous & forward.notna() & threshold.notna() & (forward.abs() < threshold)
+
+            candidate_idx = np.flatnonzero(eligible.to_numpy())
+            for idx in candidate_idx[::max(1, horizon)]:
+                stamp = int(g.loc[idx, "minute_ts"])
+                control_end = stamp + horizon * 60_000
+                overlaps_event = any(
+                    event_symbol == str(symbol)
+                    and stamp <= event_end
+                    and control_end >= event_start
+                    for event_symbol, event_start, event_end in event_windows
+                )
+                if overlaps_event:
+                    continue
+                row = g.loc[idx].to_dict()
+                row.update({"symbol": str(symbol), "minute_ts": stamp, "horizon": horizon})
+                # The same neutral timestamp is a comparator for both directions;
+                # it is never classified as a directional event.
+                controls.append({**row, "direction": "UP"})
+                controls.append({**row, "direction": "DOWN"})
+    return pd.DataFrame(controls)
+
+
 def mine_patterns(
     panel: pd.DataFrame,
     episodes: list[dict],
@@ -64,49 +114,16 @@ def mine_patterns(
         }
 
     event_rows = []
-    event_keys = set()
     for episode in episodes:
         row = {"symbol": episode["symbol"], "minute_ts": episode["start_ts"],
                "direction": episode["direction"], "horizon": episode["horizon_minutes"]}
         row.update(episode.get("pre_move_features", {}))
         event_rows.append(row)
-        event_keys.add((row["symbol"], row["minute_ts"], row["horizon"], row["direction"]))
     events = pd.DataFrame(event_rows)
     if events.empty:
         return {"status": "no_events", "patterns": [], "thresholds": thresholds}
 
-    # Build same-symbol, same-horizon controls from timestamps where the
-    # forward move did not cross the event threshold. Controls are sampled
-    # deterministically at a coarse interval to avoid minute-level duplication.
-    controls = []
-    for horizon in sorted({int(e["horizon_minutes"]) for e in episodes}):
-        for symbol, group in panel.groupby("symbol", sort=False):
-            g = group.sort_values("minute_ts").reset_index(drop=True)
-            future = g["close"].shift(-horizon)
-            future_ts = g["minute_ts"].shift(-horizon)
-            contiguous = future_ts.eq(g["minute_ts"] + horizon * 60_000)
-            forward = future / g["close"] - 1
-            rv = g.get("rv_60m", pd.Series(np.nan, index=g.index)).fillna(
-                g.get("rv_30m", pd.Series(np.nan, index=g.index))
-            )
-            threshold = np.maximum(0.004, rv * np.sqrt(horizon) * 2.5)
-            eligible = contiguous & forward.notna() & threshold.notna()
-            # Both UP and DOWN control populations are retained separately.
-            for direction, mask in (
-                ("UP", eligible & (forward < threshold)),
-                ("DOWN", eligible & (forward > -threshold)),
-            ):
-                candidate_idx = np.flatnonzero(mask.to_numpy())
-                for idx in candidate_idx[::max(1, horizon)]:
-                    stamp = int(g.loc[idx, "minute_ts"])
-                    key = (str(symbol), stamp, horizon, direction)
-                    if key in event_keys:
-                        continue
-                    row = g.loc[idx].to_dict()
-                    row.update({"symbol": str(symbol), "minute_ts": stamp,
-                                "direction": direction, "horizon": horizon})
-                    controls.append(row)
-    control_frame = pd.DataFrame(controls)
+    control_frame = _build_control_frame(panel, episodes)
     results = []
     for direction in ("UP", "DOWN"):
         ev = events.loc[events.direction == direction].copy()
@@ -154,9 +171,9 @@ def mine_patterns(
     return {
         "status": "exploratory_patterns_found" if results else "no_patterns_met_support",
         "control_method": (
-            "same-symbol and same-horizon non-event timestamps, sampled every horizon minutes; "
-            "UP controls exclude threshold-crossing upward moves and DOWN controls exclude "
-            "threshold-crossing downward moves"
+            "same-symbol and same-horizon neutral timestamps sampled every horizon minutes; "
+            "all controls exclude threshold-sized forward moves in either direction and any "
+            "forward interval overlapping a detected event window"
         ),
         "minimum_event_support": min_support,
         "feature_thresholds": thresholds,
@@ -171,11 +188,11 @@ def mine_patterns(
         "patterns": results[:max_patterns],
         "warning": (
             "Patterns are discovered and ranked on the same sample; thresholds and combinations "
-            "are data-mined. Lift is descriptive, not causal or predictive proof. No multiple-"
-            "testing correction, independent holdout, execution costs, or strategy approval."
+            "are data-mined. Lift is descriptive, not causal or predictive proof. Controls are "
+            "coarse neutral comparators, not fully matched by volatility regime or time. No "
+            "multiple-testing correction, independent holdout, execution costs, or strategy approval."
         ),
     }
-
 
 def main() -> None:
     parser = argparse.ArgumentParser()
