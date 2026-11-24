@@ -423,11 +423,17 @@ def build_rolling_cross_symbol_transfer_report(
         raise ValueError("step_fraction must be >= holdout_fraction to prevent holdout overlap")
     if step_fraction <= 0 or purge_minutes < PURGE_MINUTES:
         raise ValueError("step_fraction must be positive and purge_minutes must be at least 30")
-    timestamps = np.sort(
+    all_timestamps = np.sort(
         pd.to_numeric(panel["minute_ts"], errors="coerce").dropna().unique()
     )
-    if len(timestamps) < 100:
+    if len(all_timestamps) < 100:
         raise ValueError("at least 100 unique timestamps are required")
+    # Keep the final 30 minutes outside every evaluation window so they can
+    # complete forward labels without becoming holdout observations/controls.
+    evaluation_end = int(all_timestamps[-1]) - PURGE_MINUTES * 60_000
+    timestamps = all_timestamps[all_timestamps <= evaluation_end]
+    if len(timestamps) < 100:
+        raise ValueError("at least 100 eligible timestamps are required before the label-only tail")
     n = len(timestamps)
     initial_end = int(n * initial_train_fraction)
     holdout_size = max(1, int(n * holdout_fraction))
@@ -555,7 +561,7 @@ def build_rolling_cross_symbol_transfer_report(
             "initial_train_fraction": initial_train_fraction,
             "holdout_fraction": holdout_fraction, "step_fraction": step_fraction,
             "purge_minutes": purge_minutes, "min_support": min_support,
-            "folds_planned": len(folds), "folds_evaluated": sum(
+            "label_only_final_window_minutes": PURGE_MINUTES,\n            "eligible_evaluation_timestamps": int(n),\n            "folds_planned": len(folds), "folds_evaluated": sum(
                 item.get("status") in {"evaluated", "no_transfer_results"} for item in folds
             ),
         },
