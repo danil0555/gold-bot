@@ -129,6 +129,8 @@ def evaluate_frozen_patterns(
             hits = int(matched.fillna(False).sum())
             return hits, int(len(frame)), hits / len(frame)
 
+        event_count_before_matching = int(len(ev))
+        control_count_before_matching = int(len(co))
         common_strata = set(map(tuple, ev[["utc_hour", "volatility_bucket"]].drop_duplicates().to_numpy())) & set(
             map(tuple, co[["utc_hour", "volatility_bucket"]].drop_duplicates().to_numpy())
         ) if not ev.empty and not co.empty else set()
@@ -175,6 +177,14 @@ def evaluate_frozen_patterns(
             "holdout_control_hits": control_hits,
             "holdout_control_total": control_total,
             "holdout_matched_strata_count": int(len(common_strata)),
+            "holdout_event_match_coverage_pct": (
+                round(event_total / event_count_before_matching * 100, 2)
+                if event_count_before_matching else 0.0
+            ),
+            "holdout_control_match_coverage_pct": (
+                round(control_total / control_count_before_matching * 100, 2)
+                if control_count_before_matching else 0.0
+            ),
             "holdout_event_rate_pct": round(event_rate * 100, 2) if event_rate is not None else None,
             "holdout_control_rate_pct": round(control_rate * 100, 2) if control_rate is not None else None,
             "holdout_descriptive_lift": round(lift, 3) if lift is not None else None,
