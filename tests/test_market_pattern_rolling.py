@@ -127,7 +127,7 @@ def test_rolling_walk_forward_reports_insufficient_folds_without_inventing_resul
         "minute_ts": np.arange(120, dtype=np.int64) * 60_000,
         "close": np.full(120, 100.0),
     })
-    monkeypatch.setattr(rolling, "discover_episodes", lambda frame: ([], {}))
+    monkeypatch.setattr(rolling, "discover_episodes", lambda frame, **kwargs: ([], {}))
     monkeypatch.setattr(rolling, "mine_patterns", _fake_pattern_report)
     monkeypatch.setattr(
         rolling, "evaluate_frozen_patterns",
