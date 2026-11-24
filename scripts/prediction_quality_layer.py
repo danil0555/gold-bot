@@ -116,6 +116,7 @@ def add_market_context(
     out.loc[benchmark_self & out.return_15m.notna(), "relative_return_15m"] = 0.0
 
     out["oi_change_5m_pct"] = np.nan
+    out["oi_snapshot_interval_ms"] = np.nan
     out["funding_rate"] = np.nan
     out["derivatives_age_ms"] = np.nan
     if derivatives is not None and not derivatives.empty:
@@ -141,15 +142,25 @@ def add_market_context(
                 left, right, left_on="minute_ts", right_on="ts_ms",
                 direction="backward", tolerance=max_derivatives_age_ms,
             )
-            prior = joined[["minute_ts", "open_interest_base"]].copy()
+            prior = joined[["minute_ts", "open_interest_base", "ts_ms"]].copy()
             prior["minute_ts"] = prior["minute_ts"] + 5 * 60_000
-            prior = prior.rename(columns={"open_interest_base": "prior_open_interest_base"})
+            prior = prior.rename(columns={
+                "open_interest_base": "prior_open_interest_base",
+                "ts_ms": "prior_ts_ms",
+            })
             joined = joined.merge(prior, on="minute_ts", how="left", validate="one_to_one")
             oi = joined["open_interest_base"]
             prior_oi = joined["prior_open_interest_base"]
-            oi_change = oi.div(prior_oi.where(prior_oi > 0)).sub(1.0) * 100.0
+            snapshot_interval = joined["ts_ms"] - joined["prior_ts_ms"]
+            # Both snapshots are matched near their target minute; require the
+            # actual snapshot-to-snapshot interval to remain within 4-6 minutes.
+            valid_interval = snapshot_interval.between(4 * 60_000, 6 * 60_000)
+            oi_change = (
+                oi.div(prior_oi.where(prior_oi > 0)).sub(1.0) * 100.0
+            ).where(valid_interval)
             target_idx = left.index
             out.loc[target_idx, "oi_change_5m_pct"] = oi_change.to_numpy()
+            out.loc[target_idx, "oi_snapshot_interval_ms"] = snapshot_interval.to_numpy()
             out.loc[target_idx, "funding_rate"] = joined["funding_rate"].to_numpy()
             out.loc[target_idx, "derivatives_age_ms"] = (
                 joined["minute_ts"] - joined["ts_ms"]
