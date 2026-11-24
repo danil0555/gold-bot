@@ -246,6 +246,7 @@ def mine_patterns(
             for first, second in combinations(features, 2):
                 for first_state in ("high", "low"):
                     for second_state in ("high", "low"):
+                        hypotheses_tested += 1
                         a, b = f"{first}:{first_state}", f"{second}:{second_state}"
                         event_hits = ev_sig[a] & ev_sig[b]
                         control_hits = co_sig[a] & co_sig[b]
