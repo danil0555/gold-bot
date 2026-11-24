@@ -23,6 +23,29 @@ from scripts.market_pattern_mining import (
 PURGE_MINUTES = 30
 
 
+def _wilson_interval(successes: int, trials: int, z: float = 1.959963984540054) -> dict:
+    """Two-sided Wilson score interval for a binomial proportion."""
+    successes = int(successes)
+    trials = int(trials)
+    if trials <= 0:
+        return {"lower": None, "upper": None, "confidence_level_pct": 95.0}
+    if successes < 0 or successes > trials:
+        raise ValueError("successes must be between zero and trials")
+    proportion = successes / trials
+    z2 = z * z
+    denominator = 1.0 + z2 / trials
+    center = (proportion + z2 / (2.0 * trials)) / denominator
+    margin = (
+        z * np.sqrt(proportion * (1.0 - proportion) / trials + z2 / (4.0 * trials * trials))
+        / denominator
+    )
+    return {
+        "lower": round(max(0.0, center - margin), 6),
+        "upper": round(min(1.0, center + margin), 6),
+        "confidence_level_pct": 95.0,
+    }
+
+
 def _target_feature_cuts(train_target: pd.DataFrame, features: set[str]) -> dict:
     """Fit 20/80 percentile state boundaries on one target symbol's train rows."""
     cuts = {}
@@ -209,7 +232,14 @@ def evaluate_cross_symbol_transfer(
                 ) if control_count_before_matching else 0.0,
                 "matched_strata_count": int(len(common)),
                 "target_event_rate_pct": round(event_rate * 100, 2) if event_rate is not None else None,
+                "target_event_rate_wilson_95ci": _wilson_interval(event_hits, len(target_events)),
                 "target_control_rate_pct": round(control_rate * 100, 2) if control_rate is not None else None,
+                "target_control_raw_rate_pct": round(
+                    float(control_hit_mask.mean()) * 100, 2
+                ) if len(control_hit_mask) else None,
+                "target_control_raw_rate_wilson_95ci": _wilson_interval(
+                    int(control_hit_mask.sum()), len(control_hit_mask)
+                ),
                 "target_descriptive_lift": round(lift, 3) if lift is not None else None,
                 "target_training_feature_cuts": cuts,
                 "target_volatility_cuts_source": "training_only",
@@ -240,6 +270,7 @@ def evaluate_cross_symbol_transfer(
             "Target holdout events and neutral controls use the same target-specific frozen state cutoffs.",
             "Controls are compared within shared target UTC-hour and training-fitted per-symbol volatility-tercile strata.",
             "A pattern below minimum target event support is reported but not counted as evaluated.",
+            "Wilson 95% intervals describe raw binomial hit-rate uncertainty only; the stratified control rate and lift are descriptive and do not receive naive binomial intervals.",
             "This is descriptive transfer evidence, not causal proof, a profitability test, or a multiple-testing correction.",
         ],
         "limitations": [
