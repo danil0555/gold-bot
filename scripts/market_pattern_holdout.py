@@ -15,7 +15,9 @@ import numpy as np
 import pandas as pd
 
 from scripts.market_move_discovery import discover_episodes, load_market_panel
-from scripts.market_pattern_mining import FEATURES, _build_control_frame, _signature, mine_patterns
+from scripts.market_pattern_mining import (
+    FEATURES, _build_control_frame, _signature, _volatility_cuts_from_panel, mine_patterns,
+)
 
 
 def chronological_split(
@@ -48,6 +50,7 @@ def evaluate_frozen_patterns(
     holdout_episodes: list[dict],
     frozen_patterns: list[dict],
     frozen_thresholds: dict,
+    frozen_volatility_cuts: dict | None = None,
 ) -> dict:
     """Evaluate unchanged training patterns against later events and neutral controls."""
     events = []
@@ -61,7 +64,13 @@ def evaluate_frozen_patterns(
         row.update(episode.get("pre_move_features", {}))
         events.append(row)
     event_frame = pd.DataFrame(events)
-    controls = _build_control_frame(holdout_panel, holdout_episodes)
+    if frozen_volatility_cuts is None:
+        # Compatibility for direct callers; the walk-forward pipeline always
+        # supplies cuts fitted on the training segment.
+        frozen_volatility_cuts = _volatility_cuts_from_panel(holdout_panel)
+    controls = _build_control_frame(
+        holdout_panel, holdout_episodes, volatility_cuts=frozen_volatility_cuts
+    )
     if not event_frame.empty:
         for optional_feature in ("rv_60m", "rv_30m"):
             if optional_feature not in event_frame:
@@ -75,7 +84,10 @@ def evaluate_frozen_patterns(
             rv_panel = rv_panel[np.isfinite(rv_panel)]
             if len(rv_panel) < 10:
                 continue
-            low_cut, high_cut = np.quantile(rv_panel, [1 / 3, 2 / 3])
+            raw_cuts = frozen_volatility_cuts.get(str(symbol), (None, None))
+            if raw_cuts[0] is None or raw_cuts[1] is None:
+                continue
+            low_cut, high_cut = map(float, raw_cuts)
             mask = event_frame["symbol"].astype(str).eq(str(symbol))
             event_rv = pd.to_numeric(event_frame.loc[mask, "rv_60m"], errors="coerce")
             missing_rv = event_rv.isna()
@@ -216,7 +228,8 @@ def build_walk_forward_report(
     frozen_thresholds = training_report.get("feature_thresholds", {})
 
     evaluation = evaluate_frozen_patterns(
-        holdout, holdout_episodes, frozen_patterns, frozen_thresholds
+        holdout, holdout_episodes, frozen_patterns, frozen_thresholds,
+        training_report.get("volatility_cuts", {}),
     )
     return {
         "report_type": "chronological_frozen_pattern_holdout_v1",
@@ -237,13 +250,15 @@ def build_walk_forward_report(
             "pattern_status": training_report.get("status"),
             "frozen_pattern_count": len(frozen_patterns),
             "feature_thresholds": frozen_thresholds,
+            "volatility_cuts": training_report.get("volatility_cuts", {}),
             "patterns": frozen_patterns,
         },
         "holdout": evaluation,
         "methodology": [
             "Chronological split uses unique timestamps, never random row sampling.",
             "A 30-minute purge gap separates training from holdout to prevent event-horizon overlap.",
-            "Feature thresholds, combinations and pattern ranking are learned only on training data.",
+            "Feature thresholds, combinations, ranking and per-symbol volatility-tercile cut points are learned only on training data.",
+            "The same frozen volatility cut points define event/control strata in the later holdout; holdout data do not refit these boundaries.",
             "Holdout events are independently discovered on the later segment.",
             "Frozen training thresholds and conditions are applied unchanged to holdout events and neutral controls.",
             "No holdout metric is used to refit, select or rank patterns.",
