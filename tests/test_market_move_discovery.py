@@ -30,6 +30,7 @@ def synthetic_panel(rows=240, jump_at=180, jump=0.012):
         "microprice_offset_bps": np.zeros(rows),
         "spread_bps": np.ones(rows),
         "open_interest_change_pct": np.zeros(rows),
+        "open_interest_change_interval_ms": np.full(rows, 300_000.0),
         "funding_rate": np.zeros(rows),
     })
 
