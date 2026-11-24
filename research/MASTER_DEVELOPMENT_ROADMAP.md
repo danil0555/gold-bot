@@ -374,3 +374,13 @@
 - Validation: run `45490941559` on the previous head `afccf203` had passed compile, safe-default checks, deterministic tests and read-only BingX smoke scan; its 180-day backtest was cancelled when newer commits arrived. The new diagnostics and test are not covered by that run. Latest-head CI is required.
 - Next methodological step remains repeated chronological cross-symbol holdouts; until then this is a single split exploratory transfer test, not evidence of durable alpha.
 - Production `main`, database, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
+
+
+## 2026-11-25 — cross-symbol hit-rate uncertainty intervals (CI pending)
+- Added Wilson score 95% intervals for raw target-event and raw target-control hit rates. These intervals are more informative than point percentages alone, especially when sample sizes are small or hit rates are near 0%/100%.
+- Kept the event-stratum-weighted control rate and descriptive lift separate. No naive Wilson interval is attached to the weighted rate because its effective sample-size assumptions are not binomial; this avoids presenting an invalid confidence interval as rigorous evidence.
+- Added explicit empty-sample behavior and tests for zero/all-hit/small/balanced samples, plus report-level assertions.
+- Commits: implementation `88e45f6fd5f57ec95001f11678230854625c52e9`; tests `eb16ce7a669df44ce4cb53652b5d39cf9be9d6bd`.
+- Validation: previous commit `76400f1b4483e4345a6aade63ed2369f62c239f3` passed compile, safe-default checks, and deterministic tests. The current interval implementation and tests require a fresh CI run.
+- Limitation: Wilson intervals assume independent Bernoulli observations; overlapping market episodes may violate independence. Intervals are descriptive uncertainty indicators, not formal inference or multiple-testing correction.
+- Production `main`, `trading_bot_v9.db`, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
