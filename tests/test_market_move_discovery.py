@@ -98,3 +98,29 @@ def test_loader_handles_empty_derivatives_table(tmp_path):
     assert len(panel) == 1
     assert np.isnan(panel.loc[0, "open_interest_change_pct"])
     assert np.isnan(panel.loc[0, "funding_rate"])
+
+
+def test_loader_ignores_stale_derivatives_snapshots(tmp_path):
+    path = tmp_path / "stale_capture.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript("""
+            CREATE TABLE minute_candles (
+                symbol TEXT, minute_ts INTEGER, close REAL, volume REAL, is_closed INTEGER
+            );
+            CREATE TABLE minute_features (
+                symbol TEXT, minute_ts INTEGER, trades_count INTEGER,
+                buy_quote_usdt REAL, sell_quote_usdt REAL, taker_imbalance REAL,
+                avg_spread_bps REAL, avg_book_imbalance5 REAL,
+                avg_book_imbalance20 REAL, avg_microprice_offset_bps REAL
+            );
+            CREATE TABLE derivatives_snapshots (
+                symbol TEXT, ts_ms INTEGER, open_interest_base REAL, funding_rate REAL
+            );
+            INSERT INTO minute_candles VALUES ('BTC-USDT', 600000, 100, 10, 1);
+            INSERT INTO minute_features VALUES ('BTC-USDT', 600000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
+            INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 0, 500, 0.0001);
+        """)
+    panel = load_market_panel(str(path))
+    assert len(panel) == 1
+    assert np.isnan(panel.loc[0, "open_interest_base"])
+    assert np.isnan(panel.loc[0, "funding_rate"])
