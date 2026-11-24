@@ -37,11 +37,33 @@ def _signature(frame: pd.DataFrame, thresholds: dict) -> pd.DataFrame:
     return result.fillna(False)
 
 
-def _build_control_frame(panel: pd.DataFrame, episodes: list[dict]) -> pd.DataFrame:
+def _volatility_cuts_from_panel(panel: pd.DataFrame) -> dict:
+    """Fit per-symbol volatility terciles; callers must pass training-only panels."""
+    cuts = {}
+    if panel.empty:
+        return cuts
+    for symbol, group in panel.groupby("symbol", sort=False):
+        rv = pd.to_numeric(group.get("rv_60m", pd.Series(dtype=float)), errors="coerce")
+        rv = rv[np.isfinite(rv)]
+        if len(rv) >= 10:
+            low, high = np.quantile(rv, [1 / 3, 2 / 3])
+            cuts[str(symbol)] = [float(low), float(high)]
+        else:
+            cuts[str(symbol)] = [None, None]
+    return cuts
+
+
+def _build_control_frame(
+    panel: pd.DataFrame,
+    episodes: list[dict],
+    volatility_cuts: dict | None = None,
+) -> pd.DataFrame:
     """Build controls with no large move in either direction and no event-window overlap."""
     if panel.empty or not episodes:
         return pd.DataFrame()
 
+    if volatility_cuts is None:
+        volatility_cuts = _volatility_cuts_from_panel(panel)
     event_windows = []
     for episode in episodes:
         event_windows.append((
@@ -51,18 +73,6 @@ def _build_control_frame(panel: pd.DataFrame, episodes: list[dict]) -> pd.DataFr
         ))
 
     controls = []
-    # Define volatility buckets from the full panel distribution per symbol.
-    # The same fixed cut points are then applied to events and controls.
-    volatility_cuts = {}
-    for symbol, group in panel.groupby("symbol", sort=False):
-        rv = pd.to_numeric(group.get("rv_60m", pd.Series(dtype=float)), errors="coerce")
-        rv = rv[np.isfinite(rv)]
-        if len(rv) >= 10:
-            low, high = np.quantile(rv, [1 / 3, 2 / 3])
-            volatility_cuts[str(symbol)] = (float(low), float(high))
-        else:
-            volatility_cuts[str(symbol)] = (np.nan, np.nan)
-
     for horizon in sorted({int(e["horizon_minutes"]) for e in episodes}):
         for symbol, group in panel.groupby("symbol", sort=False):
             g = group.sort_values("minute_ts").reset_index(drop=True)
@@ -91,7 +101,11 @@ def _build_control_frame(panel: pd.DataFrame, episodes: list[dict]) -> pd.DataFr
                 if overlaps_event:
                     continue
                 row = g.loc[idx].to_dict()
-                low_cut, high_cut = volatility_cuts.get(str(symbol), (np.nan, np.nan))
+                raw_cuts = volatility_cuts.get(str(symbol), (None, None))
+                low_cut, high_cut = (
+                    tuple(float(v) if v is not None else np.nan for v in raw_cuts)
+                    if raw_cuts is not None else (np.nan, np.nan)
+                )
                 rv_value = pd.to_numeric(pd.Series([row.get("rv_60m", np.nan)]), errors="coerce").iloc[0]
                 if not np.isfinite(rv_value):
                     rv_value = pd.to_numeric(pd.Series([row.get("rv_30m", np.nan)]), errors="coerce").iloc[0]
@@ -119,6 +133,7 @@ def mine_patterns(
     max_patterns: int = 30,
 ) -> dict:
     """Compare frequent two-feature extreme combinations in events vs controls."""
+    volatility_cuts = _volatility_cuts_from_panel(panel)
     available = [name for name in FEATURES if name in panel.columns]
     thresholds = {}
     for feature in available:
@@ -135,6 +150,7 @@ def mine_patterns(
             "status": "insufficient_feature_coverage",
             "patterns": [],
             "thresholds": thresholds,
+            "volatility_cuts": volatility_cuts,
             "warning": "Need at least two features with sufficient non-constant observations.",
         }
 
@@ -146,7 +162,8 @@ def mine_patterns(
         event_rows.append(row)
     events = pd.DataFrame(event_rows)
     if events.empty:
-        return {"status": "no_events", "patterns": [], "thresholds": thresholds}
+        return {"status": "no_events", "patterns": [], "thresholds": thresholds,
+                "feature_thresholds": thresholds, "volatility_cuts": volatility_cuts}
 
     # Keep optional volatility fields explicit: missing data stays NaN/unknown.
     for optional_feature in ("rv_60m", "rv_30m"):
@@ -161,7 +178,10 @@ def mine_patterns(
         rv = rv[np.isfinite(rv)]
         if len(rv) < 10:
             continue
-        low_cut, high_cut = np.quantile(rv, [1 / 3, 2 / 3])
+        raw_cuts = volatility_cuts.get(str(symbol), (None, None))
+        if raw_cuts[0] is None or raw_cuts[1] is None:
+            continue
+        low_cut, high_cut = map(float, raw_cuts)
         event_mask = events["symbol"].astype(str).eq(str(symbol))
         event_rv = pd.to_numeric(events.loc[event_mask, "rv_60m"], errors="coerce")
         missing_rv = event_rv.isna()
@@ -182,7 +202,7 @@ def mine_patterns(
         buckets = (event_rv.gt(low_cut).astype(int) + event_rv.gt(high_cut).astype(int))
         events.loc[event_mask & valid, "volatility_bucket"] = buckets.loc[valid].astype(int)
 
-    control_frame = _build_control_frame(panel, episodes)
+    control_frame = _build_control_frame(panel, episodes, volatility_cuts=volatility_cuts)
     results = []
     # Never pool symbols or horizons: each event is compared only with controls
     # from the same instrument and forward horizon.
@@ -289,6 +309,7 @@ def mine_patterns(
         ),
         "minimum_event_support": min_support,
         "feature_thresholds": thresholds,
+        "volatility_cuts": volatility_cuts,
         "event_counts_by_direction": {
             direction: int((events.direction == direction).sum())
             for direction in ("UP", "DOWN")
