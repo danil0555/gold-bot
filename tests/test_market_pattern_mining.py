@@ -71,6 +71,7 @@ def test_pattern_mining_handles_no_episodes():
     report = mine_patterns(panel, [])
     assert report["status"] == "no_events"
     assert report["patterns"] == []
+    assert report["trial_registry"]["candidate_hypotheses_evaluated"] == 0
 
 
 def test_controls_exclude_large_moves_in_both_directions_and_event_windows():
