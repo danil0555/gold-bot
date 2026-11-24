@@ -151,7 +151,17 @@ def discover_episodes(
     min_move_pct: float = 0.004,
     volatility_multiple: float = 2.5,
     cooldown_minutes: int = 5,
+    start_time_bounds: tuple[int, int] | None = None,
 ) -> tuple[list[dict], dict]:
+    """Discover episodes, optionally restricting event starts to an inclusive UTC-ms window.
+
+    Rows after the end bound may remain in the panel solely to complete forward
+    labels. Their features can never become event-start features.
+    """
+    if start_time_bounds is not None:
+        start_min, start_max = map(int, start_time_bounds)
+        if start_min > start_max:
+            raise ValueError("start_time_bounds must be ordered")
     # Public callers and older synthetic panels may not contain every optional
     # feature. Keep the discovery report schema stable without treating absent
     # inputs as observed zeroes.
@@ -180,6 +190,10 @@ def discover_episodes(
                 contiguous & forward_return.notna() & threshold.notna()
                 & (threshold > 0) & group["close"].gt(0)
             )
+            if start_time_bounds is not None:
+                # The future tail supplies labels only; starts remain inside
+                # the requested evaluation window.
+                eligible &= group["minute_ts"].between(start_min, start_max)
             candidates = np.flatnonzero(
                 eligible.to_numpy()
                 & (forward_return.abs().to_numpy() >= threshold.to_numpy())
