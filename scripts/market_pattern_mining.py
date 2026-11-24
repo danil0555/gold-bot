@@ -40,7 +40,7 @@ def _signature(frame: pd.DataFrame, thresholds: dict) -> pd.DataFrame:
 def _volatility_cuts_from_panel(panel: pd.DataFrame) -> dict:
     """Fit per-symbol volatility terciles; callers must pass training-only panels."""
     cuts = {}
-    if panel.empty:
+    if panel.empty or "symbol" not in panel.columns:
         return cuts
     for symbol, group in panel.groupby("symbol", sort=False):
         rv = pd.to_numeric(group.get("rv_60m", pd.Series(dtype=float)), errors="coerce")
