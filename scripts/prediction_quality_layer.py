@@ -35,18 +35,31 @@ def _exact_lag(frame: pd.DataFrame, value: str, minutes: int) -> pd.Series:
 
 def _add_symbol_features(group: pd.DataFrame) -> pd.DataFrame:
     g = group.sort_values("minute_ts").copy()
-    g["return_1m"] = _safe_return(g["close"], g["close"].shift(1))
+    # Exact timestamp lags prevent a missing minute from being mistaken for
+    # the immediately preceding minute.
+    g["return_1m"] = _safe_return(g["close"], _exact_lag(g, "close", 1))
     for minutes in (5, 15, 60):
         lag = _exact_lag(g, "close", minutes)
         g[f"return_{minutes}m"] = _safe_return(g["close"], lag)
-    g["rv_30m"] = g["return_1m"].rolling(30, min_periods=20).std() * np.sqrt(30)
-    g["rv_60m"] = g["return_1m"].rolling(60, min_periods=40).std() * np.sqrt(60)
 
-    abs_move = g["return_1m"].abs()
-    path = abs_move.rolling(60, min_periods=40).sum()
-    g["trend_efficiency_60m"] = g["return_60m"].abs().div(path.where(path > 0))
-    # Regime thresholds use only the trailing observations available at this row.
-    vol_ref = g["rv_60m"].rolling(360, min_periods=60).quantile(0.75)
+    time_index = pd.to_datetime(g["minute_ts"], unit="ms", utc=True)
+    returns_by_time = g["return_1m"].set_axis(time_index)
+    rv_30m = returns_by_time.rolling("30min", min_periods=20).std() * np.sqrt(30)
+    rv_60m = returns_by_time.rolling("60min", min_periods=40).std() * np.sqrt(60)
+    g["rv_30m"] = rv_30m.to_numpy()
+    g["rv_60m"] = rv_60m.to_numpy()
+
+    # Time-based windows avoid treating sparse observations as consecutive minutes.
+    path = returns_by_time.abs().rolling("60min", min_periods=40).sum()
+    g["trend_efficiency_60m"] = (
+        g["return_60m"].abs().to_numpy()
+        / path.to_numpy()
+    )
+    g.loc[~np.isfinite(g["trend_efficiency_60m"]), "trend_efficiency_60m"] = np.nan
+    # Regime thresholds use only trailing observations in the prior six hours.
+    vol_ref = g["rv_60m"].set_axis(time_index).rolling(
+        "360min", min_periods=60
+    ).quantile(0.75).to_numpy()
     high_vol = g["rv_60m"].gt(vol_ref)
     trend = g["trend_efficiency_60m"].ge(0.35) & g["return_60m"].abs().ge(0.003)
     g["market_regime"] = np.select(
@@ -82,8 +95,9 @@ def add_market_context(
     base["close"] = pd.to_numeric(base["close"], errors="coerce")
     if base.duplicated(["symbol", "minute_ts"]).any():
         raise ValueError("candles must be unique by symbol and minute_ts")
-    if (base["close"].dropna() <= 0).any():
-        raise ValueError("close prices must be positive")
+    valid_close = base["close"].dropna().to_numpy(dtype=float)
+    if not np.isfinite(valid_close).all() or (valid_close <= 0).any():
+        raise ValueError("close prices must be finite and positive")
 
     parts = [_add_symbol_features(g) for _, g in base.groupby("symbol", sort=False)]
     out = pd.concat(parts, ignore_index=True).sort_values(
@@ -97,7 +111,9 @@ def add_market_context(
     out = out.merge(benchmark, on="minute_ts", how="left", validate="many_to_one")
     out["relative_return_5m"] = out["return_5m"] - out["btc_return_5m"]
     out["relative_return_15m"] = out["return_15m"] - out["btc_return_15m"]
-    out.loc[out.symbol == benchmark_symbol, ["relative_return_5m", "relative_return_15m"]] = 0.0
+    benchmark_self = out.symbol == benchmark_symbol
+    out.loc[benchmark_self & out.return_5m.notna(), "relative_return_5m"] = 0.0
+    out.loc[benchmark_self & out.return_15m.notna(), "relative_return_15m"] = 0.0
 
     out["oi_change_5m_pct"] = np.nan
     out["funding_rate"] = np.nan
@@ -141,11 +157,19 @@ def add_market_context(
 
     # OI/price quadrants are positioning proxies, not liquidation observations.
     oi_up = out["oi_change_5m_pct"] > 0
+    oi_down = out["oi_change_5m_pct"] < 0
     price_up = out["return_5m"] > 0
-    known = out["oi_change_5m_pct"].notna() & out["return_5m"].notna()
+    price_down = out["return_5m"] < 0
+    # Zero OI/price change is neutral/ambiguous, not evidence of either side.
+    known = (
+        out["oi_change_5m_pct"].notna()
+        & out["return_5m"].notna()
+        & (out["oi_change_5m_pct"] != 0)
+        & (out["return_5m"] != 0)
+    )
     out["positioning_proxy"] = np.select(
-        [known & oi_up & price_up, known & oi_up & ~price_up,
-         known & ~oi_up & price_up, known & ~oi_up & ~price_up],
+        [known & oi_up & price_up, known & oi_up & price_down,
+         known & oi_down & price_up, known & oi_down & price_down],
         ["long_buildup_proxy", "short_buildup_proxy",
          "short_covering_proxy", "long_unwinding_proxy"],
         default="unknown",
