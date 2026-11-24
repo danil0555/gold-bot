@@ -5,6 +5,7 @@ import pytest
 from scripts.prediction_quality_layer import (
     add_market_context,
     apply_probability_calibrator,
+    build_shadow_quality_report,
     evaluate_probabilities,
     estimate_net_trade_return_pct,
     fit_probability_calibrator,
@@ -108,6 +109,24 @@ def test_zero_oi_change_is_not_misclassified_as_position_building():
     ].iloc[0]
     assert eth.oi_change_5m_pct == pytest.approx(0.0)
     assert eth.positioning_proxy == "unknown"
+
+
+def test_non_positive_oi_is_missing_and_shadow_report_exposes_oi_coverage():
+    derivatives = pd.DataFrame([
+        ("ETH-USDT", 0, 10.0, 0.0001),
+        ("ETH-USDT", 5 * 60_000, 0.0, 0.0001),
+    ], columns=["symbol", "ts_ms", "open_interest_base", "funding_rate"])
+    result = add_market_context(_candles(), derivatives)
+    eth = result[
+        (result.symbol == "ETH-USDT")
+        & (result.minute_ts == 5 * 60_000)
+    ].iloc[0]
+    assert pd.isna(eth.oi_change_5m_pct)
+    assert eth.positioning_proxy == "unknown"
+
+    report = build_shadow_quality_report(_candles())
+    assert report["oi_change_5m_coverage_pct"] == 0.0
+    assert report["mode"] == "shadow_only_no_signal_changes_no_orders"
 
 
 def test_calibrator_is_frozen_and_metrics_are_well_formed():
