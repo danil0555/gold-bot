@@ -56,3 +56,41 @@ def test_pattern_mining_handles_no_episodes():
     report = mine_patterns(panel, [])
     assert report["status"] == "no_events"
     assert report["patterns"] == []
+
+
+def test_controls_exclude_large_moves_in_both_directions_and_event_windows():
+    from scripts.market_pattern_mining import _build_control_frame
+
+    rows = 140
+    close = np.full(rows, 100.0)
+    close[15] = 102.0
+    close[35] = 98.0
+    panel = pd.DataFrame({
+        "symbol": ["BTC-USDT"] * rows,
+        "minute_ts": np.arange(rows, dtype=np.int64) * 60_000,
+        "close": close,
+        "rv_60m": np.full(rows, 0.0001),
+        "rv_30m": np.full(rows, 0.0001),
+    })
+    event_start = int(panel.loc[70, "minute_ts"])
+    episodes = [{
+        "symbol": "BTC-USDT",
+        "start_ts": event_start,
+        "horizon_minutes": 5,
+        "direction": "UP",
+        "pre_move_features": {},
+    }]
+
+    controls = _build_control_frame(panel, episodes)
+    assert not controls.empty
+    assert set(controls["direction"]) == {"UP", "DOWN"}
+
+    timestamps = controls.drop_duplicates(["minute_ts"])["minute_ts"].astype(int)
+    for stamp in timestamps:
+        end = int(stamp) + 5 * 60_000
+        assert not (int(stamp) <= event_start + 5 * 60_000 and end >= event_start)
+
+        idx = int(stamp) // 60_000
+        forward_return = panel.loc[idx + 5, "close"] / panel.loc[idx, "close"] - 1
+        assert abs(forward_return) < 0.004
+
