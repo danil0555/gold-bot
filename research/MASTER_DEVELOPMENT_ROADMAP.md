@@ -179,7 +179,7 @@
 - Добавлены тесты на gap после пропущенных минут, time-window coverage, ранний BTC return и нулевой OI change.
 - Коммиты аудита: `cb25b4047887be96c86254c656cf5e17753ea99f` (gap-aware features), `20c8f099f5818cbd480f76101df0c4cf9e473a13` (тесты на gaps/neutral OI), `70d3edf314273aefcbe96212e96e2873fc3dee92` (проверка фактического OI snapshot interval), `b6d3b1d0d0b30afdff97983d628e0013bc41a59e` (тест нерегулярного OI интервала).
 - Эти изменения находятся в ветке `research/prediction-quality-layer-v1`, PR #12 остаётся draft и не объединён. Production не затронут.
-- GitHub Actions run `45472087813` запущен для commit `0085344797c6602ed9b208596cace890054579f5`; на последней проверке job `syntax` находился на установке зависимостей. Финальный результат ещё не получен; тесты не объявлять пройденными.
+- GitHub Actions run `45472087813` для commit `0085344797c6602ed9b208596cace890054579f5` завершился `success`: compileall, импорт runtime с безопасными defaults и полный список deterministic strategy/research tests (включая `tests/test_prediction_quality_layer.py`) прошли. Это подтверждает код и тесты на указанном SHA; последующие изменения roadmap/docs не меняли Python-код. Более новый запуск `45472191619` относится к последующему обновлению документации.
 - BingX capture run #6 (ID `45467461076`) при последней проверке всё ещё был `in_progress`, активен сбор публичных trades/depth/candles/derivatives; аналитические шаги ещё pending.
 
 ### Последняя зафиксированная точка (2026-11-24)
