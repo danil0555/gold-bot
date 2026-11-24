@@ -57,3 +57,11 @@ def test_discovery_report_never_approves_single_capture():
     feature = report["results"]["5m"]["taker_imbalance"]
     assert feature["candidate_status"] == "not_eligible_single_capture_exploratory_only"
     assert feature["top_decile_long"]["cluster_count_24h"] == 1
+
+
+
+def test_regime_labels_mark_unavailable_warmup_as_unknown():
+    result = build_features(sample_panel(), lookback=60, min_periods=30)
+    assert result.loc[0, "trend_regime"] == "unknown"
+    assert result.loc[0, "volatility_regime"] == "unknown"
+    assert result.loc[0, "breadth_regime"] == "unknown"
