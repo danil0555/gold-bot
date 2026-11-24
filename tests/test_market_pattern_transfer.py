@@ -2,7 +2,8 @@ import numpy as np
 import pandas as pd
 
 from scripts.market_pattern_transfer import (
-    _condition_mask, _target_feature_cuts, evaluate_cross_symbol_transfer,
+    _build_holdout_label_panel, _condition_mask, _label_tail_coverage,
+    _target_feature_cuts, evaluate_cross_symbol_transfer,
 )
 
 
@@ -57,3 +58,33 @@ def test_cross_symbol_transfer_never_transfers_to_same_symbol(monkeypatch):
     result = evaluate_cross_symbol_transfer(train, holdout, [], episodes, min_support=2)
     assert all(item["source_symbol"] != item["target_symbol"] for item in result["transfer_results"])
     assert {item["target_symbol"] for item in result["transfer_results"]} <= {"ETH-USDT"}
+
+
+
+def test_cross_symbol_label_tail_is_added_per_symbol_but_holdout_stays_separate():
+    holdout = pd.DataFrame({
+        "symbol": ["BTC-USDT"] * 3 + ["ETH-USDT"] * 3,
+        "minute_ts": [0, 60_000, 120_000] * 2,
+        "close": [100.0] * 6,
+    })
+    full = pd.concat([
+        holdout,
+        pd.DataFrame({
+            "symbol": ["BTC-USDT"] * 2 + ["ETH-USDT"],
+            "minute_ts": [180_000, 240_000, 180_000],
+            "close": [100.0] * 3,
+        }),
+    ], ignore_index=True)
+    label_panel = _build_holdout_label_panel(full, holdout, requested_tail_minutes=2)
+    assert len(label_panel) == len(holdout) + 3
+    assert set(label_panel.loc[~label_panel.index.isin(holdout.index), "symbol"]) <= {
+        "BTC-USDT", "ETH-USDT"
+    }
+    # The evaluation/control frame itself is not mutated or extended.
+    assert len(holdout) == 6
+    coverage = _label_tail_coverage(full, holdout, requested_tail_minutes=2)
+    assert coverage["symbols_checked"] == 2
+    assert coverage["symbols_with_complete_tail"] == 1
+    assert coverage["complete_for_all_symbols"] is False
+    per_symbol = {item["symbol"]: item["contiguous_tail_minutes"] for item in coverage["per_symbol"]}
+    assert per_symbol == {"BTC-USDT": 2, "ETH-USDT": 1}
