@@ -384,3 +384,14 @@
 - Validation: previous commit `76400f1b4483e4345a6aade63ed2369f62c239f3` passed compile, safe-default checks, and deterministic tests. The current interval implementation and tests require a fresh CI run.
 - Limitation: Wilson intervals assume independent Bernoulli observations; overlapping market episodes may violate independence. Intervals are descriptive uncertainty indicators, not formal inference or multiple-testing correction.
 - Production `main`, `trading_bot_v9.db`, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
+
+
+## 2026-11-25 — repeated chronological cross-symbol transfer (CI pending)
+- Added `build_rolling_cross_symbol_transfer_report` with expanding training windows and later, non-overlapping holdout windows. The step must be at least as large as the holdout fraction; configurations that would reuse holdout timestamps are rejected.
+- Every fold independently mines source patterns on its training segment, fits target-symbol feature-state cutoffs from that target's training history, and evaluates only different target symbols. A minimum 30-minute purge separates train and holdout event starts.
+- The final 30 minutes of the captured panel are reserved from evaluation and remain label-only, preventing the last fold from silently losing forward labels. Per-symbol label-tail coverage is reported for every fold; tail rows are never passed as holdout controls.
+- Added recurrence summaries keyed by source symbol, target symbol, horizon, direction and feature/state conditions. Fold-specific numeric thresholds are deliberately not part of the key. Reports include number of evaluated folds, positive-lift folds, median fold lift and support totals.
+- Trial counts are aggregated across folds with an explicit warning: expanding training windows overlap, so folds are dependent and these counts are not a multiple-testing correction. The output remains exploratory, not a strategy approval.
+- Added deterministic tests for expanding training windows, non-overlapping holdouts, purge separation, recurrence aggregation, trial counts and rejection of overlapping-fold configurations.
+- Validation: latest-head CI is required; no research performance or profitability claim is made.
+- Production `main`, `trading_bot_v9.db`, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
