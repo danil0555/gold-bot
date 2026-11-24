@@ -3,6 +3,7 @@ import pandas as pd
 
 from scripts.market_pattern_transfer import (
     _build_holdout_label_panel, _condition_mask, _label_tail_coverage,
+    _wilson_interval,
     _target_feature_cuts, build_cross_symbol_transfer_report,
     evaluate_cross_symbol_transfer,
 )
@@ -77,6 +78,10 @@ def test_cross_symbol_transfer_never_transfers_to_same_symbol(monkeypatch):
     assert evaluated[0]["target_control_match_coverage_pct"] == 100.0
     assert evaluated[0]["target_event_total_before_matching"] == 8
     assert evaluated[0]["target_control_total_before_matching"] == 8
+    assert evaluated[0]["target_event_rate_wilson_95ci"]["lower"] < 1.0
+    assert evaluated[0]["target_event_rate_wilson_95ci"]["upper"] == 1.0
+    assert evaluated[0]["target_control_raw_rate_wilson_95ci"]["lower"] < 1.0
+    assert evaluated[0]["target_control_raw_rate_wilson_95ci"]["upper"] == 1.0
     assert result["training_mining_status"] == "ok"
     assert result["training_trial_registry"]["candidate_hypotheses_evaluated"] == 48
     assert result["training_trial_registry"]["reported_patterns"] == 1
@@ -154,3 +159,18 @@ def test_transfer_report_reserves_tail_and_bounds_event_starts(monkeypatch):
     assert report["split"]["label_only_rows"] == 60
     assert report["split"]["label_tail"]["complete_for_all_symbols"] is True
     assert report["split"]["label_tail"]["symbols_with_complete_tail"] == 2
+
+
+
+def test_wilson_interval_handles_empty_small_and_extreme_samples():
+    assert _wilson_interval(0, 0) == {
+        "lower": None, "upper": None, "confidence_level_pct": 95.0
+    }
+    zero = _wilson_interval(0, 10)
+    assert zero["lower"] == 0.0
+    assert 0.0 < zero["upper"] < 0.5
+    all_hits = _wilson_interval(10, 10)
+    assert 0.5 < all_hits["lower"] < 1.0
+    assert all_hits["upper"] == 1.0
+    balanced = _wilson_interval(5, 10)
+    assert balanced["lower"] < 0.5 < balanced["upper"]
