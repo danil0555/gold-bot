@@ -201,6 +201,8 @@ def mine_patterns(
             ].copy()
             if ev.empty or co.empty:
                 continue
+            event_count_before_matching = int(len(ev))
+            control_count_before_matching = int(len(co))
             # Restrict both groups to strata represented by events and controls:
             # same instrument/horizon/direction, UTC hour and volatility tercile.
             stratum = ["utc_hour", "volatility_bucket"]
@@ -262,6 +264,8 @@ def mine_patterns(
                             "control_support": n_control,
                             "control_total": int(len(co)),
                             "matched_strata_count": int(len(common_strata)),
+                            "event_match_coverage_pct": round(len(ev) / event_count_before_matching * 100, 2),
+                            "control_match_coverage_pct": round(len(co) / control_count_before_matching * 100, 2),
                             "event_rate_pct": round(event_rate * 100, 2),
                             "control_rate_pct": round(control_rate * 100, 2),
                             "descriptive_lift": round(lift, 3) if lift is not None else None,
@@ -280,7 +284,8 @@ def mine_patterns(
             "all controls exclude threshold-sized forward moves in either direction and any "
             "forward interval overlapping a detected event window; pattern event rates are "
             "compared only within shared UTC-hour and per-symbol volatility-tercile strata, "
-            "with control rates standardized to the event stratum mix"
+            "with control rates standardized to the event stratum mix; coverage percentages "
+            "show the share retained after common-strata filtering"
         ),
         "minimum_event_support": min_support,
         "feature_thresholds": thresholds,
