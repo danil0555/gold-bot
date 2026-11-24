@@ -341,3 +341,15 @@
 - Validation: a fresh CI run on the final branch HEAD is required. The previously successful run `45487630824` predates this feature and does not validate it.
 - Known scope limits: this first transfer evaluator is a single chronological train/holdout experiment, has no fees/slippage/funding model or confidence intervals, and holdout event discovery does not yet add the rolling evaluator's label-only tail. It is exploratory and must not be used as a live strategy.
 - Production `main`, `trading_bot_v9.db`, credentials, hosting/deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
+
+
+## 2026-11-25 — isolate label-only tails in cross-symbol transfer (CI pending)
+- Audited the first cross-symbol transfer evaluator and found that its single holdout extended to the end of the captured panel. Consequently, forward event labels near the holdout edge were censored even though the shared discovery engine supports a label-only tail.
+- Reserved the final 30 minutes of the panel as label-only data. Holdout event starts are bounded to the preceding evaluation interval; tail rows are passed only to event discovery. The neutral-control builder still receives the original holdout rows, so label-only candles cannot become controls or evaluation observations.
+- Applied the same rule to training: purge-gap candles may complete labels for training events, but event starts remain inside the training interval and pattern mining receives only the original training panel.
+- Added per-symbol contiguous-tail coverage reporting. A later candle after a missing minute does not count as continuous coverage; completeness is true only when every symbol represented in the segment has the full requested tail.
+- Added tests for per-symbol tail assembly, missing-minute continuity, reserved holdout boundary, training purge-tail isolation, and event-start bounds.
+- Commits: holdout-tail implementation `720d38a126389827a4ef96a97660325db8497b80`; initial tail tests `a7b92c9cec5cb8710127847ede03c6e7945f1d53`; reserved holdout tail `0a810db0bdbd46697dc5e1d66befc23e6ecbe932`; holdout boundary tests `745cc5d69b8f29736f5883db0c867c361fef115b`; training purge-tail implementation `9a13bcf5dbb6210b42a52fa7c232f1c0dd02cdb2`; final boundary assertions `d8d687aeb970acfcd6482eacf2e3b36ac32bd736`.
+- Validation: latest-head CI is pending. Earlier successful run `45488394679` covered the initial transfer evaluator and tests, but predates this label-tail correction and does not validate these new commits.
+- Known limitations remain: single chronological transfer split; no fees, slippage, funding, confidence intervals, liquidity matching, or formal multiple-testing correction. This is exploratory research, not a live strategy.
+- Production `main`, `trading_bot_v9.db`, credentials, hosting/deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
