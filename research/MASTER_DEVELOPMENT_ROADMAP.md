@@ -177,16 +177,16 @@
 - Исправлено отсутствие BTC self-relative context: ноль выставляется только когда соответствующий BTC return уже существует; ранние строки остаются NaN.
 - Добавлена валидация конечности и положительности close.
 - Добавлены тесты на gap после пропущенных минут, time-window coverage, ранний BTC return и нулевой OI change.
-- Коммиты аудита: `cb25b4047887be96c86254c656cf5e17753ea99f` (код), `20c8f099f5818cbd480f76101df0c4cf9e473a13` (тесты).
+- Коммиты аудита: `cb25b4047887be96c86254c656cf5e17753ea99f` (gap-aware features), `20c8f099f5818cbd480f76101df0c4cf9e473a13` (тесты на gaps/neutral OI), `70d3edf314273aefcbe96212e96e2873fc3dee92` (проверка фактического OI snapshot interval), `b6d3b1d0d0b30afdff97983d628e0013bc41a59e` (тест нерегулярного OI интервала).
 - Эти изменения находятся в ветке `research/prediction-quality-layer-v1`, PR #12 остаётся draft и не объединён. Production не затронут.
-- CI для нового SHA пока не подтверждён; тесты не объявлять пройденными до GitHub Actions результата.
+- GitHub Actions run `45472087813` запущен для commit `0085344797c6602ed9b208596cace890054579f5`; на последней проверке job `syntax` находился на установке зависимостей. Финальный результат ещё не получен; тесты не объявлять пройденными.
 - BingX capture run #6 (ID `45467461076`) при последней проверке всё ещё был `in_progress`, активен сбор публичных trades/depth/candles/derivatives; аналитические шаги ещё pending.
 
 ### Последняя зафиксированная точка (2026-11-24)
 
 - Создана исследовательская ветка `research/prediction-quality-layer-v1` и draft PR #12 от ветки `research/market-discovery-engine-v1`.
 - PR #12 включает shadow prediction quality utilities, тесты, документацию и добавление ветки/теста в Python validation workflow.
-- Последний известный SHA PR #12: `5a8facf8449959a09e9deb748559dfe957f2b9e2`.
+- Последний известный SHA PR #12 на момент первоначального создания: `5a8facf8449959a09e9deb748559dfe957f2b9e2`; актуальный SHA нужно брать из PR #12, так как ветка продолжает обновляться.
 - На момент записи CI для этого SHA ещё не был подтверждён; не утверждать, что тесты прошли.
 - BingX capture run #6 (ID `45467461076`) на ветке `research/market-discovery-engine-v1`, SHA `5bf6a78598c2e06f80a1a3d21b6f81b747c06203`, был `in_progress` на последней проверке.
 - Production `main`, production database, хостинг и реальные ордера не менялись.
