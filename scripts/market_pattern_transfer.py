@@ -305,7 +305,13 @@ def build_cross_symbol_transfer_report(
     split_ts = int(timestamps[int(len(timestamps) * train_fraction)])
     train_end = split_ts - purge_minutes * 60_000
     train = panel.loc[panel["minute_ts"] < train_end].copy()
-    holdout = panel.loc[panel["minute_ts"] >= split_ts].copy()
+    # Reserve the final 30 minutes as label-only data. This keeps the latest
+    # eligible holdout events evaluable without admitting tail rows as tests
+    # or controls.
+    holdout_end_limit = int(timestamps[-1]) - PURGE_MINUTES * 60_000
+    holdout = panel.loc[
+        panel["minute_ts"].ge(split_ts) & panel["minute_ts"].le(holdout_end_limit)
+    ].copy()
     if train.empty or holdout.empty:
         raise ValueError("chronological split produced an empty segment")
     train_episodes, _ = discover_episodes(train)
