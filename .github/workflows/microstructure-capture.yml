@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   capture:
@@ -120,6 +121,77 @@ jobs:
           name: bingx-microstructure-data-quality
           path: /tmp/microstructure_data_quality.json
           retention-days: 14
+          if-no-files-found: warn
+      - name: Validate and export previous run IDs
+        id: previous_ids
+        if: ${{ inputs.previous_capture_run_ids != '' }}
+        env:
+          RAW_IDS: ${{ inputs.previous_capture_run_ids }}
+        run: |
+          python - <<'PY'
+          import os, re
+          ids = [item.strip() for item in os.environ["RAW_IDS"].split(",") if item.strip()]
+          if not ids or len(ids) != len(set(ids)) or any(not re.fullmatch(r"[0-9]{6,20}", item) for item in ids):
+              raise SystemExit("Provide unique comma-separated numeric run IDs.")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("run_ids=" + " ".join(ids) + "\n")
+          print(f"Validated {len(ids)} previous capture runs")
+          PY
+      - name: Download earlier capture artifacts
+        if: ${{ inputs.previous_capture_run_ids != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/previous-captures
+          for run_id in ${{ steps.previous_ids.outputs.run_ids }}; do
+            mkdir -p "/tmp/previous-captures/$run_id"
+            gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+              --name bingx-microstructure-capture \
+              --dir "/tmp/previous-captures/$run_id"
+          done
+      - name: Merge current and earlier captures
+        run: |
+          mapfile -t PREVIOUS_DATABASES < <(find /tmp/previous-captures -type f -name market_microstructure.sqlite3 | sort)
+          python -m scripts.merge_microstructure_databases \
+            --inputs /tmp/market_microstructure.sqlite3 "${PREVIOUS_DATABASES[@]}" \
+            --output /tmp/market_microstructure_merged.sqlite3 \
+            --report /tmp/microstructure_merge_report.json
+      - name: Check merged sample coverage and run frozen holdout
+        id: holdout
+        run: |
+          python - <<'PY'
+          import os, sqlite3
+          db = sqlite3.connect("/tmp/market_microstructure_merged.sqlite3")
+          count, days = db.execute("""
+            SELECT COUNT(DISTINCT minute_ts),
+                   COUNT(DISTINCT date(minute_ts / 1000, 'unixepoch'))
+            FROM minute_candles WHERE is_closed = 1
+          """).fetchone()
+          db.close()
+          ready = count >= 600 and days >= 3
+          print(f"Merged coverage: {count} unique minutes across {days} UTC dates; holdout_ready={ready}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"ready={str(ready).lower()}\n")
+          PY
+          if [ "$GITHUB_STEP_SUMMARY" ] && [ "${{ steps.holdout.outputs.ready }}" = "true" ]; then
+            python -m scripts.market_move_discovery --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_move_discovery_multiday.json
+            python -m scripts.market_pattern_mining --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_patterns_multiday.json --min-support 5
+            python -m scripts.market_pattern_holdout --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_pattern_holdout_multiday.json --train-fraction 0.70 --min-support 5
+          else
+            echo "More daily captures are required before holdout analysis."
+          fi
+      - name: Upload merged multi-day research database
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bingx-microstructure-multiday-aggregate
+          path: |
+            /tmp/market_microstructure_merged.sqlite3
+            /tmp/microstructure_merge_report.json
+            /tmp/market_move_discovery_multiday.json
+            /tmp/market_patterns_multiday.json
+            /tmp/market_pattern_holdout_multiday.json
+          retention-days: 30
           if-no-files-found: warn
       - name: Upload raw research database
         if: always()
