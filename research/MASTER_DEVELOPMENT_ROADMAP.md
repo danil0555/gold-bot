@@ -296,3 +296,11 @@
 - Initial implementation commits: rolling evaluator `2c4f6bc430373e06876d63b35deee462fab7c449`; tests `9656e124afa5ac2ff079bbe1cf387dfec12d4a7f`. CI trigger/test-list update is committed separately.
 - Validation note: workflow run `45484245735` completed compilation, runtime safe-default checks and the existing deterministic test step successfully before the rolling evaluator was added. A later CI run must cover the new rolling test before it is considered validated. The 180-day spot/perpetual backtest in that earlier run was still in progress when inspected.
 - Production `main`, live bot, production database, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
+
+
+## 2026-11-24 — rolling evaluator audit and validation boundary
+- Source review caught and fixed an initialization typo in the rolling pattern observation registry: it must be a dictionary because fold observations are grouped with `setdefault`. Fix commit: `c4bde6715545fc2ed4fa0422443697d77fab618a`.
+- The deterministic CI command now explicitly includes `tests/test_market_pattern_rolling.py`; workflow-list commit: `ce29b68e10b773594195bd4714eac0d210e00770`.
+- Run `45484926957` showed the deterministic test step completed successfully, but the overall run was cancelled during the subsequent public-data smoke scan. That run began before the workflow test-list update, so it is not accepted as proof that the new rolling test was executed. A fresh run covering the updated workflow and final branch head is still required.
+- Run `45484245735` completed successfully, including the then-current deterministic test suite and the 180-day public spot/perpetual backtest; it predates the rolling evaluator and does not validate it.
+- Do not describe the rolling evaluator as CI-validated until a successful run confirms the updated deterministic test command on the current branch head.
