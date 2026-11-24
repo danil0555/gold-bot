@@ -46,6 +46,8 @@ def test_mines_repeated_feature_combinations_against_non_event_controls():
     assert report["control_counts_by_direction"]["UP"] > 0
     assert report["warning"].find("same sample") >= 0
     assert all(p["direction"] == "UP" for p in report["patterns"])
+    assert all(p["symbol"] == "BTC-USDT" for p in report["patterns"])
+    assert all(p["horizon_minutes"] == 5 for p in report["patterns"])
 
 
 def test_pattern_mining_handles_no_episodes():
