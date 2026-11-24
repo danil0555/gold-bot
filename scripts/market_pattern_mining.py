@@ -204,6 +204,8 @@ def mine_patterns(
 
     control_frame = _build_control_frame(panel, episodes, volatility_cuts=volatility_cuts)
     results = []
+    hypotheses_tested = 0
+    groups_evaluated = 0
     # Never pool symbols or horizons: each event is compared only with controls
     # from the same instrument and forward horizon.
     strata = events[["symbol", "horizon"]].drop_duplicates().itertuples(index=False)
@@ -235,6 +237,7 @@ def mine_patterns(
             co = co.loc[co[stratum].apply(tuple, axis=1).isin(common_strata)].copy()
             if ev.empty or co.empty:
                 continue
+            groups_evaluated += 1
             # Standardize the control hit rate to the event stratum mix so a
             # different distribution of hours/volatility cannot dominate it.
             stratum_weights = ev.groupby(stratum).size()
@@ -308,6 +311,16 @@ def mine_patterns(
             "show the share retained after common-strata filtering"
         ),
         "minimum_event_support": min_support,
+        "trial_registry": {
+            "feature_count": len(features),
+            "feature_pair_count": len(features) * (len(features) - 1) // 2,
+            "state_combinations_per_pair": 4,
+            "matched_symbol_horizon_direction_groups_evaluated": groups_evaluated,
+            "candidate_hypotheses_evaluated": hypotheses_tested,
+            "reported_patterns": min(len(results), max_patterns),
+            "max_patterns_output": max_patterns,
+            "note": "Counts describe the search performed; they are not a multiple-testing correction.",
+        },
         "feature_thresholds": thresholds,
         "volatility_cuts": volatility_cuts,
         "event_counts_by_direction": {
