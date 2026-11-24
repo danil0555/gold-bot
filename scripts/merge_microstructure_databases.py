@@ -16,8 +16,8 @@ TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collect
 KEYED_TABLES = ("minute_candles", "minute_features", "derivatives_snapshots")
 
 
-def _columns(connection: sqlite3.Connection, table: str) -> list[str]:
-    return [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
+def _columns(connection: sqlite3.Connection, table: str, schema: str = "main") -> list[str]:
+    return [row[1] for row in connection.execute(f"PRAGMA {schema}.table_info({table})")]
 
 
 def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
@@ -62,7 +62,7 @@ def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
             destination.execute(f"ATTACH DATABASE ? AS {alias}", (str(source),))
             for table in TABLES:
                 dest_columns = _columns(destination, table)
-                src_columns = _columns(destination, f"{alias}.{table}")
+                src_columns = _columns(destination, table, alias)
                 if dest_columns != src_columns:
                     raise ValueError(f"schema mismatch in {table} for {source}")
                 names = ", ".join(f'"{name}"' for name in dest_columns)
