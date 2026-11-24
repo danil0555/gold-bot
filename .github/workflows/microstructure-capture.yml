@@ -13,6 +13,11 @@ on:
         required: true
         type: string
         default: "BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT"
+      previous_capture_run_ids:
+        description: "Optional comma-separated IDs of earlier successful capture runs to merge"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
