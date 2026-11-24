@@ -316,3 +316,6 @@
 - CI for these commits is pending at the time of this entry. Do not treat the change as validated until the latest branch-head run completes and the deterministic test step succeeds.
 - This corrects event-label coverage, not the statistical limitations of descriptive pattern mining. It does not introduce trading signals, execution costs, strategy approval, or live behavior.
 - Production `main`, `trading_bot_v9.db`, credentials, hosting/deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
+
+
+- Additional direct regression test: `tests/test_market_move_discovery.py::test_bounded_event_starts_can_use_future_label_tail_without_extending_window` proves that a move beginning at the final allowed holdout timestamp is censored without the tail, detected with the tail, and still cannot start outside the bound. Test commit: `58ae47edcc915ea0a51cd43fcbc023445f980277`. A fresh CI run for this newest commit is required; an earlier run for the previous branch head is not sufficient.
