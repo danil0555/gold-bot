@@ -319,3 +319,12 @@
 
 
 - Additional direct regression test: `tests/test_market_move_discovery.py::test_bounded_event_starts_can_use_future_label_tail_without_extending_window` proves that a move beginning at the final allowed holdout timestamp is censored without the tail, detected with the tail, and still cannot start outside the bound. Test commit: `58ae47edcc915ea0a51cd43fcbc023445f980277`. A fresh CI run for this newest commit is required; an earlier run for the previous branch head is not sufficient.
+
+
+## 2026-11-25 — per-symbol continuity for holdout label tails
+- A further audit found that the holdout tail completeness indicator used the maximum timestamp across the entire panel. In multi-symbol research, one symbol with later candles could therefore make the report imply that every symbol had a complete future-label window, even when another symbol had stopped updating or had missing minutes.
+- Replaced the global timestamp estimate with per-symbol contiguous-minute checks starting from each symbol's final holdout candle. A later timestamp after a missing minute does not count as continuous coverage.
+- Fold metadata now reports the conservative minimum contiguous tail, number of symbols with a complete requested tail, number checked, and each symbol's own coverage. The flag is true only when every symbol represented in the holdout has a complete tail.
+- Added a regression test with two symbols: one has a complete tail and the other has a gap; the combined fold must be marked incomplete.
+- Commits: implementation `d3c1aa6678611c816b45ceba0a46f507e64e7d14`; test `af8958dfa21b1216ac5b787d3fd700edbf01dedb`.
+- Latest-head CI is required before this change is treated as validated. This is a reporting/data-quality correction; it does not create a trading strategy or alter production behavior.
