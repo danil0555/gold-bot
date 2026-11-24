@@ -284,3 +284,15 @@
 - The existing no-episodes regression test exercises this path and now also verifies the trial registry reports zero hypotheses.
 - Fix commit: 9c6f46675a959ab2543542deeb958e7a239ac9bd.
 - This is a source-level review and regression-test addition; CI remains unconfirmed.
+
+
+## 2026-11-24 — repeated chronological pattern validation
+- Added `scripts/market_pattern_rolling.py` with expanding training windows and multiple later, non-overlapping holdout windows. Each fold rediscovers episodes and mines patterns only on its training segment; feature thresholds and per-symbol volatility cut points are frozen and reused unchanged in that fold's holdout.
+- Each fold uses a time-based purge gap of at least 30 minutes, matching the maximum 30-minute event label horizon. Training episodes are discovered only inside the training panel, so their forward labels cannot cross into holdout.
+- Added fold-level time bounds, row/event counts, trial-registry counts, holdout metrics, and pattern recurrence summaries. Recurrence identity uses symbol, horizon, direction and feature/state combination; threshold values may differ between folds and are not silently treated as identical.
+- Holdout windows are required not to overlap. Expanding training sets overlap by design, so fold results are dependent; the report states this and does not treat repeated folds as independent statistical replications.
+- Insufficient data returns an explicit status instead of manufacturing validation metrics. This is still descriptive research, not a strategy approval or a multiple-testing correction.
+- Added deterministic tests for chronological boundaries, frozen volatility cuts, recurrence aggregation, trial counts, overlapping-window rejection and insufficient-fold reporting. Added the new test file to the GitHub Actions deterministic test command.
+- Initial implementation commits: rolling evaluator `2c4f6bc430373e06876d63b35deee462fab7c449`; tests `9656e124afa5ac2ff079bbe1cf387dfec12d4a7f`. CI trigger/test-list update is committed separately.
+- Validation note: workflow run `45484245735` completed compilation, runtime safe-default checks and the existing deterministic test step successfully before the rolling evaluator was added. A later CI run must cover the new rolling test before it is considered validated. The 180-day spot/perpetual backtest in that earlier run was still in progress when inspected.
+- Production `main`, live bot, production database, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
