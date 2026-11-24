@@ -54,6 +54,7 @@ def evaluate_frozen_patterns(
     for episode in holdout_episodes:
         row = {
             "symbol": str(episode["symbol"]),
+            "minute_ts": int(episode["start_ts"]),
             "horizon": int(episode["horizon_minutes"]),
             "direction": str(episode["direction"]),
         }
@@ -62,6 +63,9 @@ def evaluate_frozen_patterns(
     event_frame = pd.DataFrame(events)
     controls = _build_control_frame(holdout_panel, holdout_episodes)
     if not event_frame.empty:
+        for optional_feature in ("rv_60m", "rv_30m"):
+            if optional_feature not in event_frame:
+                event_frame[optional_feature] = np.nan
         event_frame["utc_hour"] = (pd.to_numeric(
             pd.Series([e["start_ts"] for e in holdout_episodes]), errors="coerce"
         ) // 3_600_000 % 24).astype(int).to_numpy()
@@ -76,13 +80,19 @@ def evaluate_frozen_patterns(
             event_rv = pd.to_numeric(event_frame.loc[mask, "rv_60m"], errors="coerce")
             missing_rv = event_rv.isna()
             if missing_rv.any():
-                lookup = holdout_panel.loc[
-                    holdout_panel["symbol"].astype(str).eq(str(symbol)),
-                    ["minute_ts", "rv_60m", "rv_30m"],
-                ].drop_duplicates("minute_ts").set_index("minute_ts")
+                lookup_cols = ["minute_ts"] + [
+                    col for col in ("rv_60m", "rv_30m") if col in holdout_panel.columns
+                ]
                 stamps = event_frame.loc[mask, "minute_ts"]
-                fallback = stamps.map(lookup.get("rv_60m", pd.Series(dtype=float)))
-                fallback = fallback.fillna(stamps.map(lookup.get("rv_30m", pd.Series(dtype=float))))
+                fallback = pd.Series(np.nan, index=stamps.index, dtype=float)
+                if len(lookup_cols) > 1:
+                    lookup = holdout_panel.loc[
+                        holdout_panel["symbol"].astype(str).eq(str(symbol)), lookup_cols
+                    ].drop_duplicates("minute_ts").set_index("minute_ts")
+                    if "rv_60m" in lookup:
+                        fallback = stamps.map(lookup["rv_60m"])
+                    if "rv_30m" in lookup:
+                        fallback = fallback.fillna(stamps.map(lookup["rv_30m"]))
                 event_rv = event_rv.fillna(fallback)
             valid = event_rv.notna()
             buckets = event_rv.gt(low_cut).astype(int) + event_rv.gt(high_cut).astype(int)
