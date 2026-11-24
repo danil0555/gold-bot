@@ -314,7 +314,14 @@ def build_cross_symbol_transfer_report(
     ].copy()
     if train.empty or holdout.empty:
         raise ValueError("chronological split produced an empty segment")
-    train_episodes, _ = discover_episodes(train)
+    train_start = int(train["minute_ts"].min())
+    train_last = int(train["minute_ts"].max())
+    train_label_panel = _build_holdout_label_panel(panel, train, purge_minutes)
+    # Purge-gap candles may complete training labels, but event starts stay
+    # inside training and the mining/control panel remains train-only.
+    train_episodes, _ = discover_episodes(
+        train_label_panel, start_time_bounds=(train_start, train_last)
+    )
     holdout_start = int(holdout["minute_ts"].min())
     holdout_end = int(holdout["minute_ts"].max())
     label_panel = _build_holdout_label_panel(panel, holdout, PURGE_MINUTES)
