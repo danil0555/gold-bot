@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Mine recurring pre-move feature combinations against non-event controls.
+
+Exploratory descriptive mining only. Quantile thresholds are learned from the
+analysis panel, so this report is hypothesis generation, not out-of-sample proof.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from itertools import combinations
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+FEATURES = (
+    "volume_surprise_z", "trades_surprise_z", "taker_imbalance",
+    "book_imbalance5", "book_imbalance20", "microprice_offset_bps",
+    "spread_bps", "open_interest_change_pct", "funding_rate",
+)
+
+
+def _finite_values(frame: pd.DataFrame, name: str) -> np.ndarray:
+    if name not in frame:
+        return np.array([], dtype=float)
+    values = pd.to_numeric(frame[name], errors="coerce").to_numpy(dtype=float)
+    return values[np.isfinite(values)]
+
+
+def _signature(frame: pd.DataFrame, thresholds: dict) -> pd.DataFrame:
+    result = pd.DataFrame(index=frame.index)
+    for feature, limits in thresholds.items():
+        values = pd.to_numeric(frame[feature], errors="coerce")
+        result[f"{feature}:high"] = values >= limits["high"]
+        result[f"{feature}:low"] = values <= limits["low"]
+    return result.fillna(False)
+
+
+def mine_patterns(
+    panel: pd.DataFrame,
+    episodes: list[dict],
+    min_support: int = 5,
+    max_patterns: int = 30,
+) -> dict:
+    """Compare frequent two-feature extreme combinations in events vs controls."""
+    available = [name for name in FEATURES if name in panel.columns]
+    thresholds = {}
+    for feature in available:
+        vals = _finite_values(panel, feature)
+        if len(vals) < 20:
+            continue
+        low, high = np.quantile(vals, [0.20, 0.80])
+        if not np.isfinite(low) or not np.isfinite(high) or low >= high:
+            continue
+        thresholds[feature] = {"low": float(low), "high": float(high)}
+    features = list(thresholds)
+    if len(features) < 2:
+        return {
+            "status": "insufficient_feature_coverage",
+            "patterns": [],
+            "thresholds": thresholds,
+            "warning": "Need at least two features with sufficient non-constant observations.",
+        }
+
+    event_rows = []
+    event_keys = set()
+    for episode in episodes:
+        row = {"symbol": episode["symbol"], "minute_ts": episode["start_ts"],
+               "direction": episode["direction"], "horizon": episode["horizon_minutes"]}
+        row.update(episode.get("pre_move_features", {}))
+        event_rows.append(row)
+        event_keys.add((row["symbol"], row["minute_ts"], row["horizon"], row["direction"]))
+    events = pd.DataFrame(event_rows)
+    if events.empty:
+        return {"status": "no_events", "patterns": [], "thresholds": thresholds}
+
+    # Build same-symbol, same-horizon controls from timestamps where the
+    # forward move did not cross the event threshold. Controls are sampled
+    # deterministically at a coarse interval to avoid minute-level duplication.
+    controls = []
+    for horizon in sorted({int(e["horizon_minutes"]) for e in episodes}):
+        for symbol, group in panel.groupby("symbol", sort=False):
+            g = group.sort_values("minute_ts").reset_index(drop=True)
+            future = g["close"].shift(-horizon)
+            future_ts = g["minute_ts"].shift(-horizon)
+            contiguous = future_ts.eq(g["minute_ts"] + horizon * 60_000)
+            forward = future / g["close"] - 1
+            rv = g.get("rv_60m", pd.Series(np.nan, index=g.index)).fillna(
+                g.get("rv_30m", pd.Series(np.nan, index=g.index))
+            )
+            threshold = np.maximum(0.004, rv * np.sqrt(horizon) * 2.5)
+            eligible = contiguous & forward.notna() & threshold.notna()
+            # Both UP and DOWN control populations are retained separately.
+            for direction, mask in (
+                ("UP", eligible & (forward < threshold)),
+                ("DOWN", eligible & (forward > -threshold)),
+            ):
+                candidate_idx = np.flatnonzero(mask.to_numpy())
+                for idx in candidate_idx[::max(1, horizon)]:
+                    stamp = int(g.loc[idx, "minute_ts"])
+                    key = (str(symbol), stamp, horizon, direction)
+                    if key in event_keys:
+                        continue
+                    row = g.loc[idx].to_dict()
+                    row.update({"symbol": str(symbol), "minute_ts": stamp,
+                                "direction": direction, "horizon": horizon})
+                    controls.append(row)
+    control_frame = pd.DataFrame(controls)
+    results = []
+    for direction in ("UP", "DOWN"):
+        ev = events.loc[events.direction == direction].copy()
+        co = control_frame.loc[control_frame.direction == direction].copy()
+        if ev.empty or co.empty:
+            continue
+        ev_sig = _signature(ev, thresholds)
+        co_sig = _signature(co, thresholds)
+        for first, second in combinations(features, 2):
+            for first_state in ("high", "low"):
+                for second_state in ("high", "low"):
+                    a, b = f"{first}:{first_state}", f"{second}:{second_state}"
+                    event_hits = ev_sig[a] & ev_sig[b]
+                    control_hits = co_sig[a] & co_sig[b]
+                    n_event = int(event_hits.sum())
+                    n_control = int(control_hits.sum())
+                    if n_event < min_support:
+                        continue
+                    event_rate = n_event / len(ev)
+                    control_rate = n_control / len(co)
+                    lift = event_rate / control_rate if control_rate > 0 else None
+                    results.append({
+                        "direction": direction,
+                        "conditions": [
+                            {"feature": first, "state": first_state,
+                             "threshold": thresholds[first][first_state]},
+                            {"feature": second, "state": second_state,
+                             "threshold": thresholds[second][second_state]},
+                        ],
+                        "event_support": n_event,
+                        "event_total": int(len(ev)),
+                        "control_support": n_control,
+                        "control_total": int(len(co)),
+                        "event_rate_pct": round(event_rate * 100, 2),
+                        "control_rate_pct": round(control_rate * 100, 2),
+                        "descriptive_lift": round(lift, 3) if lift is not None else None,
+                    })
+    results.sort(
+        key=lambda x: (
+            x["descriptive_lift"] if x["descriptive_lift"] is not None else -1,
+            x["event_support"],
+        ),
+        reverse=True,
+    )
+    return {
+        "status": "exploratory_patterns_found" if results else "no_patterns_met_support",
+        "control_method": (
+            "same-symbol and same-horizon non-event timestamps, sampled every horizon minutes; "
+            "UP controls exclude threshold-crossing upward moves and DOWN controls exclude "
+            "threshold-crossing downward moves"
+        ),
+        "minimum_event_support": min_support,
+        "feature_thresholds": thresholds,
+        "event_counts_by_direction": {
+            direction: int((events.direction == direction).sum())
+            for direction in ("UP", "DOWN")
+        },
+        "control_counts_by_direction": {
+            direction: int((control_frame.direction == direction).sum())
+            for direction in ("UP", "DOWN")
+        },
+        "patterns": results[:max_patterns],
+        "warning": (
+            "Patterns are discovered and ranked on the same sample; thresholds and combinations "
+            "are data-mined. Lift is descriptive, not causal or predictive proof. No multiple-"
+            "testing correction, independent holdout, execution costs, or strategy approval."
+        ),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", required=True)
+    parser.add_argument("--output", default="research-output/market_patterns_smoke.json")
+    parser.add_argument("--min-support", type=int, default=5)
+    parser.add_argument("--max-patterns", type=int, default=30)
+    args = parser.parse_args()
+    if args.min_support < 2 or args.max_patterns < 1:
+        parser.error("min-support must be >=2 and max-patterns must be >=1")
+    from scripts.market_move_discovery import load_market_panel, discover_episodes
+    panel = load_market_panel(args.db)
+    episodes, _ = discover_episodes(panel)
+    report = mine_patterns(panel, episodes, args.min_support, args.max_patterns)
+    report["episodes_detected"] = len(episodes)
+    report["decision"] = "discovery_only_no_strategy_approved"
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({
+        "status": report["status"],
+        "episodes_detected": len(episodes),
+        "patterns_reported": len(report["patterns"]),
+        "decision": report["decision"],
+        "output": str(output),
+    }, ensure_ascii=False, indent=2), flush=True)
+
+
+if __name__ == "__main__":
+    main()
