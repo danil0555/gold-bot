@@ -5,7 +5,7 @@ from scripts.market_pattern_transfer import (
     _build_holdout_label_panel, _condition_mask, _label_tail_coverage,
     _wilson_interval,
     _target_feature_cuts, build_cross_symbol_transfer_report,
-    evaluate_cross_symbol_transfer,
+    build_rolling_cross_symbol_transfer_report, evaluate_cross_symbol_transfer,
 )
 
 
@@ -174,3 +174,85 @@ def test_wilson_interval_handles_empty_small_and_extreme_samples():
     assert all_hits["upper"] == 1.0
     balanced = _wilson_interval(5, 10)
     assert balanced["lower"] < 0.5 < balanced["upper"]
+
+
+
+def test_rolling_transfer_uses_expanding_train_and_non_overlapping_holdouts(monkeypatch):
+    import scripts.market_pattern_transfer as transfer
+
+    panel = pd.DataFrame({
+        "symbol": ["BTC-USDT"] * 300 + ["ETH-USDT"] * 300,
+        "minute_ts": list(np.arange(300, dtype=np.int64) * 60_000) * 2,
+        "close": [100.0] * 600,
+        "rv_60m": [0.001] * 600,
+    })
+    discovery_calls = []
+    evaluation_calls = []
+
+    def fake_discover(frame, start_time_bounds=None):
+        discovery_calls.append((frame.copy(), start_time_bounds))
+        return [], {}
+
+    def fake_evaluate(train, holdout, train_events, holdout_events, **kwargs):
+        evaluation_calls.append((train.copy(), holdout.copy()))
+        return {
+            "training_pattern_count": 1,
+            "training_mining_status": "ok",
+            "training_trial_registry": {"candidate_hypotheses_evaluated": 10},
+            "transfer_result_rows": 1,
+            "transfer_pairs_evaluated": 1,
+            "transfer_result_status_counts": {"evaluated": 1},
+            "transfer_results": [{
+                "source_symbol": "BTC-USDT", "target_symbol": "ETH-USDT",
+                "horizon_minutes": 5, "direction": "UP",
+                "conditions": [{"feature": "volume_z", "state": "high"}],
+                "status": "evaluated", "target_event_total": 6,
+                "target_control_total": 7, "target_descriptive_lift": 1.2,
+            }],
+        }
+
+    monkeypatch.setattr(transfer, "discover_episodes", fake_discover)
+    monkeypatch.setattr(transfer, "evaluate_cross_symbol_transfer", fake_evaluate)
+
+    report = build_rolling_cross_symbol_transfer_report(
+        panel, initial_train_fraction=0.40, holdout_fraction=0.15,
+        step_fraction=0.15, min_support=2,
+    )
+
+    assert report["report_type"] == "rolling_cross_symbol_pattern_transfer_v1"
+    assert report["configuration"]["folds_evaluated"] == 4
+    assert len(evaluation_calls) == 4
+    previous_end = None
+    previous_train_rows = 0
+    for train, holdout in evaluation_calls:
+        train_end = int(train.minute_ts.max())
+        holdout_start = int(holdout.minute_ts.min())
+        holdout_end = int(holdout.minute_ts.max())
+        assert train_end < holdout_start - 30 * 60_000
+        if previous_end is not None:
+            assert holdout_start > previous_end
+        assert len(train) > previous_train_rows
+        previous_train_rows = len(train)
+        previous_end = holdout_end
+
+    assert len(discovery_calls) == 8
+    assert report["trial_registry"]["candidate_hypotheses_evaluated_across_folds"] == 40
+    assert len(report["pattern_stability"]) == 1
+    stability = report["pattern_stability"][0]
+    assert stability["folds_evaluated"] == 4
+    assert stability["folds_with_lift_above_1"] == 4
+    assert stability["median_evaluated_fold_lift"] == 1.2
+    assert stability["fold_event_support"] == 24
+    assert stability["fold_control_support"] == 28
+
+
+def test_rolling_transfer_rejects_overlapping_holdout_windows():
+    panel = pd.DataFrame({
+        "symbol": ["BTC-USDT"] * 120,
+        "minute_ts": np.arange(120, dtype=np.int64) * 60_000,
+    })
+    import pytest
+    with pytest.raises(ValueError, match="step_fraction"):
+        build_rolling_cross_symbol_transfer_report(
+            panel, holdout_fraction=0.20, step_fraction=0.10
+        )
