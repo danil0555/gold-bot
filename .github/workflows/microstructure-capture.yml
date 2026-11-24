@@ -157,10 +157,9 @@ jobs:
             --output /tmp/market_microstructure_merged.sqlite3 \
             --report /tmp/microstructure_merge_report.json
       - name: Check merged sample coverage and run frozen holdout
-        id: holdout
         run: |
-          python - <<'PY'
-          import os, sqlite3
+          ready=$(python - <<'PY'
+          import sqlite3
           db = sqlite3.connect("/tmp/market_microstructure_merged.sqlite3")
           count, days = db.execute("""
             SELECT COUNT(DISTINCT minute_ts),
@@ -168,12 +167,12 @@ jobs:
             FROM minute_candles WHERE is_closed = 1
           """).fetchone()
           db.close()
-          ready = count >= 600 and days >= 3
-          print(f"Merged coverage: {count} unique minutes across {days} UTC dates; holdout_ready={ready}")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"ready={str(ready).lower()}\n")
+          result = count >= 600 and days >= 3
+          print(f"Coverage: {count} unique minutes across {days} UTC dates; holdout_ready={result}")
+          print("true" if result else "false")
           PY
-          if [ "$GITHUB_STEP_SUMMARY" ] && [ "${{ steps.holdout.outputs.ready }}" = "true" ]; then
+          )
+          if [ "$ready" = "true" ]; then
             python -m scripts.market_move_discovery --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_move_discovery_multiday.json
             python -m scripts.market_pattern_mining --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_patterns_multiday.json --min-support 5
             python -m scripts.market_pattern_holdout --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_pattern_holdout_multiday.json --train-fraction 0.70 --min-support 5
