@@ -99,7 +99,8 @@ def load_market_panel(db_path: str) -> pd.DataFrame:
                 pieces.append(left)
                 continue
             merged = pd.merge_asof(
-                left, deriv.sort_values("minute_ts"), on="minute_ts", direction="backward"
+                left, deriv.sort_values("minute_ts"), on="minute_ts", direction="backward",
+                tolerance=120_000,
             )
             pieces.append(merged)
         panel = pd.concat(pieces, ignore_index=True).sort_values(
