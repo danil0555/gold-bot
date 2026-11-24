@@ -125,8 +125,12 @@ def add_market_context(
                 left, right, left_on="minute_ts", right_on="ts_ms",
                 direction="backward", tolerance=max_derivatives_age_ms,
             )
+            prior = joined[["minute_ts", "open_interest_base"]].copy()
+            prior["minute_ts"] = prior["minute_ts"] + 5 * 60_000
+            prior = prior.rename(columns={"open_interest_base": "prior_open_interest_base"})
+            joined = joined.merge(prior, on="minute_ts", how="left", validate="one_to_one")
             oi = joined["open_interest_base"]
-            prior_oi = oi.shift(5)
+            prior_oi = joined["prior_open_interest_base"]
             oi_change = oi.div(prior_oi.where(prior_oi > 0)).sub(1.0) * 100.0
             target_idx = left.index
             out.loc[target_idx, "oi_change_5m_pct"] = oi_change.to_numpy()
