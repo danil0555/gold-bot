@@ -125,42 +125,56 @@ def mine_patterns(
 
     control_frame = _build_control_frame(panel, episodes)
     results = []
-    for direction in ("UP", "DOWN"):
-        ev = events.loc[events.direction == direction].copy()
-        co = control_frame.loc[control_frame.direction == direction].copy()
-        if ev.empty or co.empty:
-            continue
-        ev_sig = _signature(ev, thresholds)
-        co_sig = _signature(co, thresholds)
-        for first, second in combinations(features, 2):
-            for first_state in ("high", "low"):
-                for second_state in ("high", "low"):
-                    a, b = f"{first}:{first_state}", f"{second}:{second_state}"
-                    event_hits = ev_sig[a] & ev_sig[b]
-                    control_hits = co_sig[a] & co_sig[b]
-                    n_event = int(event_hits.sum())
-                    n_control = int(control_hits.sum())
-                    if n_event < min_support:
-                        continue
-                    event_rate = n_event / len(ev)
-                    control_rate = n_control / len(co)
-                    lift = event_rate / control_rate if control_rate > 0 else None
-                    results.append({
-                        "direction": direction,
-                        "conditions": [
-                            {"feature": first, "state": first_state,
-                             "threshold": thresholds[first][first_state]},
-                            {"feature": second, "state": second_state,
-                             "threshold": thresholds[second][second_state]},
-                        ],
-                        "event_support": n_event,
-                        "event_total": int(len(ev)),
-                        "control_support": n_control,
-                        "control_total": int(len(co)),
-                        "event_rate_pct": round(event_rate * 100, 2),
-                        "control_rate_pct": round(control_rate * 100, 2),
-                        "descriptive_lift": round(lift, 3) if lift is not None else None,
-                    })
+    # Never pool symbols or horizons: each event is compared only with controls
+    # from the same instrument and forward horizon.
+    strata = events[["symbol", "horizon"]].drop_duplicates().itertuples(index=False)
+    for symbol, horizon in strata:
+        for direction in ("UP", "DOWN"):
+            ev = events.loc[
+                (events.symbol == symbol)
+                & (events.horizon == horizon)
+                & (events.direction == direction)
+            ].copy()
+            co = control_frame.loc[
+                (control_frame.symbol == symbol)
+                & (control_frame.horizon == horizon)
+                & (control_frame.direction == direction)
+            ].copy()
+            if ev.empty or co.empty:
+                continue
+            ev_sig = _signature(ev, thresholds)
+            co_sig = _signature(co, thresholds)
+            for first, second in combinations(features, 2):
+                for first_state in ("high", "low"):
+                    for second_state in ("high", "low"):
+                        a, b = f"{first}:{first_state}", f"{second}:{second_state}"
+                        event_hits = ev_sig[a] & ev_sig[b]
+                        control_hits = co_sig[a] & co_sig[b]
+                        n_event = int(event_hits.sum())
+                        n_control = int(control_hits.sum())
+                        if n_event < min_support:
+                            continue
+                        event_rate = n_event / len(ev)
+                        control_rate = n_control / len(co)
+                        lift = event_rate / control_rate if control_rate > 0 else None
+                        results.append({
+                            "symbol": str(symbol),
+                            "horizon_minutes": int(horizon),
+                            "direction": direction,
+                            "conditions": [
+                                {"feature": first, "state": first_state,
+                                 "threshold": thresholds[first][first_state]},
+                                {"feature": second, "state": second_state,
+                                 "threshold": thresholds[second][second_state]},
+                            ],
+                            "event_support": n_event,
+                            "event_total": int(len(ev)),
+                            "control_support": n_control,
+                            "control_total": int(len(co)),
+                            "event_rate_pct": round(event_rate * 100, 2),
+                            "control_rate_pct": round(control_rate * 100, 2),
+                            "descriptive_lift": round(lift, 3) if lift is not None else None,
+                        })
     results.sort(
         key=lambda x: (
             x["descriptive_lift"] if x["descriptive_lift"] is not None else -1,
