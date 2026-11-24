@@ -328,3 +328,16 @@
 - Added a regression test with two symbols: one has a complete tail and the other has a gap; the combined fold must be marked incomplete.
 - Commits: implementation `d3c1aa6678611c816b45ceba0a46f507e64e7d14`; test `af8958dfa21b1216ac5b787d3fd700edbf01dedb`.
 - Latest-head CI is required before this change is treated as validated. This is a reporting/data-quality correction; it does not create a trading strategy or alter production behavior.
+
+
+
+## 2026-11-25 — cross-symbol pattern transfer evaluator (CI pending)
+- Added `scripts/market_pattern_transfer.py` to test whether pre-move feature/state combinations discovered on one source symbol also appear on other target symbols in a later chronological holdout.
+- Source patterns are mined from the training panel only. For each target symbol, the numeric high/low cutoffs are recalculated from that target symbol's training history (20th/80th percentiles); raw source-symbol thresholds are deliberately not copied across coins because feature scales can differ.
+- Transfer evaluation excludes the source symbol itself, preserves horizon and direction, compares target holdout events with same-target neutral controls, and retains only shared UTC-hour / training-fitted per-symbol volatility-tercile strata. Target cutoffs and volatility cuts are not fitted on holdout.
+- Results include source→target pairs, target support, event/control rates, descriptive lift, target-fitted cutoffs, and explicit insufficient-coverage/support statuses. The report explicitly warns that this is not causal proof, profitability evidence, or a multiple-testing correction.
+- Added deterministic tests for target-only cutoff fitting, state transfer without copying source raw thresholds, and excluding self-transfer. Added the test file to the deterministic CI command.
+- Commits: evaluator `be96238ec11108ad70221b7941851d65470acdaf`; tests `d9aad61a3ea3b785336246f57e2472222dd46b1f`; CI test-list update `d2631c7ae705615c0aa3c42303d33c2070ee74e8`.
+- Validation: a fresh CI run on the final branch HEAD is required. The previously successful run `45487630824` predates this feature and does not validate it.
+- Known scope limits: this first transfer evaluator is a single chronological train/holdout experiment, has no fees/slippage/funding model or confidence intervals, and holdout event discovery does not yet add the rolling evaluator's label-only tail. It is exploratory and must not be used as a live strategy.
+- Production `main`, `trading_bot_v9.db`, credentials, hosting/deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
