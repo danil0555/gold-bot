@@ -148,6 +148,11 @@ def mine_patterns(
     if events.empty:
         return {"status": "no_events", "patterns": [], "thresholds": thresholds}
 
+    # Keep optional volatility fields explicit: missing data stays NaN/unknown.
+    for optional_feature in ("rv_60m", "rv_30m"):
+        if optional_feature not in events:
+            events[optional_feature] = np.nan
+
     # Attach the same UTC-hour and per-symbol volatility strata to events.
     events["utc_hour"] = (pd.to_numeric(events["minute_ts"], errors="coerce") // 3_600_000 % 24).astype(int)
     events["volatility_bucket"] = -1
@@ -159,8 +164,20 @@ def mine_patterns(
         low_cut, high_cut = np.quantile(rv, [1 / 3, 2 / 3])
         event_mask = events["symbol"].astype(str).eq(str(symbol))
         event_rv = pd.to_numeric(events.loc[event_mask, "rv_60m"], errors="coerce")
-        if "rv_60m" not in events:
-            continue
+        missing_rv = event_rv.isna()
+        if missing_rv.any():
+            lookup_cols = ["minute_ts"] + [
+                col for col in ("rv_60m", "rv_30m") if col in panel.columns
+            ]
+            if len(lookup_cols) > 1:
+                lookup = panel.loc[
+                    panel["symbol"].astype(str).eq(str(symbol)), lookup_cols
+                ].drop_duplicates("minute_ts").set_index("minute_ts")
+                stamps = events.loc[event_mask, "minute_ts"]
+                fallback = stamps.map(lookup["rv_60m"]) if "rv_60m" in lookup else pd.Series(np.nan, index=stamps.index)
+                if "rv_30m" in lookup:
+                    fallback = fallback.fillna(stamps.map(lookup["rv_30m"]))
+                event_rv = event_rv.fillna(fallback)
         valid = event_rv.notna()
         buckets = (event_rv.gt(low_cut).astype(int) + event_rv.gt(high_cut).astype(int))
         events.loc[event_mask & valid, "volatility_bucket"] = buckets.loc[valid].astype(int)
@@ -279,8 +296,9 @@ def mine_patterns(
         "warning": (
             "Patterns are discovered and ranked on the same sample; thresholds and combinations "
             "are data-mined. Lift is descriptive, not causal or predictive proof. Controls are "
-            "coarse neutral comparators, not fully matched by volatility regime or time. No "
-            "multiple-testing correction, independent holdout, execution costs, or strategy approval."
+            "matched only on shared UTC-hour and per-symbol volatility-tercile strata, not exact "
+            "volatility, liquidity or market-wide state. No multiple-testing correction, independent "
+            "holdout, execution costs, or strategy approval."
         ),
     }
 
