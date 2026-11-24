@@ -138,3 +138,31 @@ def test_rolling_walk_forward_reports_insufficient_folds_without_inventing_resul
     )
     assert report["status"] == "insufficient_chronological_windows"
     assert report["configuration"]["folds_evaluated"] == 1
+
+def test_label_tail_coverage_is_per_symbol_and_requires_contiguous_minutes():
+    holdout = pd.DataFrame({
+        "symbol": ["BTC-USDT"] * 3 + ["ETH-USDT"] * 3,
+        "minute_ts": [0, 60_000, 120_000, 0, 60_000, 120_000],
+    })
+    label_panel = pd.DataFrame({
+        "symbol": (
+            ["BTC-USDT"] * 5
+            + ["ETH-USDT"] * 4
+        ),
+        "minute_ts": (
+            [0, 60_000, 120_000, 180_000, 240_000]
+            + [0, 60_000, 120_000, 240_000]
+        ),
+    })
+    coverage = rolling._label_tail_coverage(
+        holdout, label_panel, holdout_end=120_000, requested_minutes=2
+    )
+    assert coverage["future_tail_complete_for_max_horizon"] is False
+    assert coverage["symbols_with_complete_tail"] == 1
+    assert coverage["symbols_checked"] == 2
+    assert coverage["future_tail_minutes_available"] == 0
+    by_symbol = {item["symbol"]: item for item in coverage["per_symbol"]}
+    assert by_symbol["BTC-USDT"]["contiguous_future_minutes"] == 2
+    # ETH has a missing 180-second minute; a later timestamp must not
+    # disguise the gap as a complete future-label window.
+    assert by_symbol["ETH-USDT"]["contiguous_future_minutes"] == 0
