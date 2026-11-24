@@ -56,6 +56,27 @@ def test_event_threshold_uses_trailing_volatility_and_minimum_move():
     )
     assert episodes == []
 
+def test_bounded_event_starts_can_use_future_label_tail_without_extending_window():
+    panel = synthetic_panel(rows=240, jump_at=180, jump=0.012)
+    start = int(panel.minute_ts.iloc[175])
+    end = start
+
+    truncated = panel.iloc[170:176].copy()
+    truncated_events, _ = discover_episodes(
+        truncated, horizons=(5,), min_move_pct=0.004,
+        start_time_bounds=(start, end),
+    )
+    assert truncated_events == []
+
+    with_tail = panel.iloc[170:206].copy()
+    tail_events, _ = discover_episodes(
+        with_tail, horizons=(5,), min_move_pct=0.004,
+        start_time_bounds=(start, end),
+    )
+    assert len(tail_events) == 1
+    assert tail_events[0]["start_ts"] == start
+    assert tail_events[0]["end_ts"] == int(panel.minute_ts.iloc[180])
+
 
 def test_future_price_changes_do_not_change_pre_event_features():
     original = synthetic_panel()
