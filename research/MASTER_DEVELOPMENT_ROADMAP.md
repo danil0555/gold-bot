@@ -304,3 +304,15 @@
 - Run `45484926957` showed the deterministic test step completed successfully, but the overall run was cancelled during the subsequent public-data smoke scan. That run began before the workflow test-list update, so it is not accepted as proof that the new rolling test was executed. A fresh run covering the updated workflow and final branch head is still required.
 - Run `45484245735` completed successfully, including the then-current deterministic test suite and the 180-day public spot/perpetual backtest; it predates the rolling evaluator and does not validate it.
 - Do not describe the rolling evaluator as CI-validated until a successful run confirms the updated deterministic test command on the current branch head.
+
+
+## 2026-11-24 — complete forward labels at walk-forward holdout edges
+- Audit found that `discover_episodes(holdout)` discarded the final 5/15/30 minutes of each holdout because the forward return could not be computed without candles after the holdout boundary. This biased event counts and coverage downward near every test-window edge.
+- Added optional inclusive `start_time_bounds` to episode discovery. A caller may now provide a label-only future tail while restricting all event starts to the actual evaluation interval.
+- The rolling evaluator now gives holdout discovery up to the next 30 minutes of candles solely to complete forward labels. Frozen-pattern evaluation and neutral controls still receive only the original holdout rows; future-tail rows cannot become evaluation observations or controls.
+- Each fold records requested/available label-tail minutes, whether the maximum-horizon tail is complete, and the number of additional rows used only for labels. The final dataset edge is explicitly marked incomplete when 30 future minutes do not exist.
+- Regression coverage verifies that event-start bounds remain inside the holdout, the discovery frame can extend into the label-only tail, evaluation boundaries remain unchanged, and the final incomplete tail is surfaced.
+- Commits: bounded event-start support `2fecd96e517d1e87e45a1d0b06d71e9fcf724b46`; rolling evaluator tail handling `4f7c09fd48c9763726bed3a62d0918ed32902994`; regression tests `1ca165a63ebd37d84b3a3f808adeda59a973a8d5`.
+- CI for these commits is pending at the time of this entry. Do not treat the change as validated until the latest branch-head run completes and the deterministic test step succeeds.
+- This corrects event-label coverage, not the statistical limitations of descriptive pattern mining. It does not introduce trading signals, execution costs, strategy approval, or live behavior.
+- Production `main`, `trading_bot_v9.db`, credentials, hosting/deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
