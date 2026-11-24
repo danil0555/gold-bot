@@ -64,6 +64,7 @@ def evaluate_frozen_patterns(
         row.update(episode.get("pre_move_features", {}))
         events.append(row)
     event_frame = pd.DataFrame(events)
+    volatility_cut_source = "training_frozen" if frozen_volatility_cuts is not None else "holdout_fallback_compatibility"
     if frozen_volatility_cuts is None:
         # Compatibility for direct callers; the walk-forward pipeline always
         # supplies cuts fitted on the training segment.
@@ -199,6 +200,7 @@ def evaluate_frozen_patterns(
         })
 
     return {
+        "holdout_volatility_cut_source": volatility_cut_source,
         "holdout_event_count": len(holdout_episodes),
         "holdout_control_count_per_direction": {
             d: int((controls.direction == d).sum()) if not controls.empty else 0
