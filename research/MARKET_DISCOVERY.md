@@ -38,3 +38,31 @@ python scripts/market_research.py --days 180 --universe 30 --min-quote-volume 50
 ```
 
 The JSON report is written to `research-output/market_research_180d.json`.
+
+
+## Event-agnostic microstructure discovery (experimental)
+
+The read-only capture pipeline also runs `scripts.microstructure_discovery`.
+It evaluates continuous features rather than relying only on four hand-written
+events: taker imbalance, normalized CVD, book/depth imbalance, microprice,
+spread, trade/volume surprise, open-interest change, funding, momentum and
+realized volatility.
+
+- Feature ranks use a per-symbol trailing window; no future rows enter the rank.
+- Forward returns are retained only when the target closed candle is exactly
+  contiguous with the event timestamp.
+- Reports top-decile LONG and bottom-decile SHORT screens at 1m, 5m and 15m,
+  with separate trend, volatility and cross-sectional breadth slices.
+- Each directional observation pays the configured round-trip cost assumption.
+- Fewer than four independent 24-hour clusters is explicitly marked
+  insufficient for inference. A single capture never approves a strategy.
+- The screen is exploratory and does not adjust for multiple testing, simulate
+  portfolio overlap, or measure actual execution costs. It cannot be used as
+  a trading signal.
+
+Run locally:
+
+```bash
+python -m scripts.microstructure_discovery --db /path/to/market_microstructure.sqlite3 --cost-bps 12
+python -m pytest -q tests/test_microstructure_discovery.py
+```
