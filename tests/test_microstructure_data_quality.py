@@ -62,3 +62,18 @@ def test_quality_audit_flags_missing_candles_and_transport_errors(tmp_path):
     assert "candle_gaps_detected" in codes
     assert "no_depth_minutes" in codes
     assert "ws_reconnect" in codes
+
+
+def test_quality_audit_accepts_single_initial_warmup_candle_without_features(tmp_path):
+    db_path = tmp_path / "quality_warmup.sqlite3"
+    make_db(db_path, candle_stamps=(60_000, 120_000, 180_000))
+    with sqlite3.connect(db_path) as db:
+        db.execute("DELETE FROM minute_features WHERE minute_ts = 60_000")
+    report = audit_database(str(db_path))
+
+    metrics = report["per_symbol"]["BTC-USDT"]
+    assert metrics["initial_boundary_candles_without_features"] == 1
+    assert metrics["candle_minutes_without_features"] == 0
+    assert "candle_minutes_missing_features" not in {
+        warning["code"] for warning in report["warnings"]
+    }
