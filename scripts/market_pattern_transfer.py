@@ -153,8 +153,11 @@ def evaluate_cross_symbol_transfer(
                     "target_event_count": int(len(target_events)),
                     "target_control_count": int(len(target_controls)),
                     "target_feature_cuts": cuts,
+                    "target_volatility_cuts_source": "training_only",
                 })
                 continue
+            event_count_before_matching = int(len(target_events))
+            control_count_before_matching = int(len(target_controls))
             common = set(map(tuple, target_events[["utc_hour", "volatility_bucket"]].drop_duplicates().to_numpy())) & set(
                 map(tuple, target_controls[["utc_hour", "volatility_bucket"]].drop_duplicates().to_numpy())
             )
@@ -187,10 +190,23 @@ def evaluate_cross_symbol_transfer(
             results.append({
                 "source_symbol": source, "target_symbol": target,
                 "horizon_minutes": horizon, "direction": direction,
-                "conditions": conditions, "status": "evaluated" if len(target_events) >= min_support else "below_minimum_target_support",
+                "conditions": conditions,
+                "status": (
+                    "evaluated"
+                    if len(target_events) >= min_support and len(target_controls) >= min_support
+                    else "below_minimum_target_event_or_control_support"
+                ),
                 "training_source_event_support": int(pattern.get("event_support", 0)),
                 "target_event_hits": event_hits, "target_event_total": int(len(target_events)),
                 "target_control_hits": int(control_hit_mask.sum()), "target_control_total": int(len(target_controls)),
+                "target_event_total_before_matching": event_count_before_matching,
+                "target_control_total_before_matching": control_count_before_matching,
+                "target_event_match_coverage_pct": round(
+                    len(target_events) / event_count_before_matching * 100, 2
+                ) if event_count_before_matching else 0.0,
+                "target_control_match_coverage_pct": round(
+                    len(target_controls) / control_count_before_matching * 100, 2
+                ) if control_count_before_matching else 0.0,
                 "matched_strata_count": int(len(common)),
                 "target_event_rate_pct": round(event_rate * 100, 2) if event_rate is not None else None,
                 "target_control_rate_pct": round(control_rate * 100, 2) if control_rate is not None else None,
