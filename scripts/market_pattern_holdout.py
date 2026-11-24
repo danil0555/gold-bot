@@ -61,6 +61,32 @@ def evaluate_frozen_patterns(
         events.append(row)
     event_frame = pd.DataFrame(events)
     controls = _build_control_frame(holdout_panel, holdout_episodes)
+    if not event_frame.empty:
+        event_frame["utc_hour"] = (pd.to_numeric(
+            pd.Series([e["start_ts"] for e in holdout_episodes]), errors="coerce"
+        ) // 3_600_000 % 24).astype(int).to_numpy()
+        event_frame["volatility_bucket"] = -1
+        for symbol, group in holdout_panel.groupby("symbol", sort=False):
+            rv_panel = pd.to_numeric(group.get("rv_60m", pd.Series(dtype=float)), errors="coerce")
+            rv_panel = rv_panel[np.isfinite(rv_panel)]
+            if len(rv_panel) < 10:
+                continue
+            low_cut, high_cut = np.quantile(rv_panel, [1 / 3, 2 / 3])
+            mask = event_frame["symbol"].astype(str).eq(str(symbol))
+            event_rv = pd.to_numeric(event_frame.loc[mask, "rv_60m"], errors="coerce")
+            missing_rv = event_rv.isna()
+            if missing_rv.any():
+                lookup = holdout_panel.loc[
+                    holdout_panel["symbol"].astype(str).eq(str(symbol)),
+                    ["minute_ts", "rv_60m", "rv_30m"],
+                ].drop_duplicates("minute_ts").set_index("minute_ts")
+                stamps = event_frame.loc[mask, "minute_ts"]
+                fallback = stamps.map(lookup.get("rv_60m", pd.Series(dtype=float)))
+                fallback = fallback.fillna(stamps.map(lookup.get("rv_30m", pd.Series(dtype=float))))
+                event_rv = event_rv.fillna(fallback)
+            valid = event_rv.notna()
+            buckets = event_rv.gt(low_cut).astype(int) + event_rv.gt(high_cut).astype(int)
+            event_frame.loc[mask & valid, "volatility_bucket"] = buckets.loc[valid].astype(int)
     results = []
 
     for pattern in frozen_patterns:
@@ -93,8 +119,36 @@ def evaluate_frozen_patterns(
             hits = int(matched.fillna(False).sum())
             return hits, int(len(frame)), hits / len(frame)
 
+        common_strata = set(map(tuple, ev[["utc_hour", "volatility_bucket"]].drop_duplicates().to_numpy())) & set(
+            map(tuple, co[["utc_hour", "volatility_bucket"]].drop_duplicates().to_numpy())
+        ) if not ev.empty and not co.empty else set()
+        if common_strata:
+            keys = ["utc_hour", "volatility_bucket"]
+            ev = ev.loc[ev[keys].apply(tuple, axis=1).isin(common_strata)].copy()
+            co = co.loc[co[keys].apply(tuple, axis=1).isin(common_strata)].copy()
+        else:
+            ev = ev.iloc[0:0]
+            co = co.iloc[0:0]
         event_hits, event_total, event_rate = hit_rate(ev)
-        control_hits, control_total, control_rate = hit_rate(co)
+        control_hits, control_total, _ = hit_rate(co)
+        control_rate = None
+        if not ev.empty and not co.empty:
+            weights = ev.groupby(["utc_hour", "volatility_bucket"]).size()
+            weighted = 0.0
+            weight_total = 0
+            for key, weight in weights.items():
+                key = key if isinstance(key, tuple) else (key,)
+                mask = pd.Series(True, index=co.index)
+                for col, value in zip(["utc_hour", "volatility_bucket"], key):
+                    mask &= co[col].eq(value)
+                stratum = co.loc[mask]
+                if stratum.empty:
+                    continue
+                _, _, rate = hit_rate(stratum)
+                if rate is not None:
+                    weighted += rate * int(weight)
+                    weight_total += int(weight)
+            control_rate = weighted / weight_total if weight_total else None
         lift = (
             event_rate / control_rate
             if event_rate is not None and control_rate is not None and control_rate > 0
@@ -110,6 +164,7 @@ def evaluate_frozen_patterns(
             "holdout_event_total": event_total,
             "holdout_control_hits": control_hits,
             "holdout_control_total": control_total,
+            "holdout_matched_strata_count": int(len(common_strata)),
             "holdout_event_rate_pct": round(event_rate * 100, 2) if event_rate is not None else None,
             "holdout_control_rate_pct": round(control_rate * 100, 2) if control_rate is not None else None,
             "holdout_descriptive_lift": round(lift, 3) if lift is not None else None,
@@ -176,7 +231,7 @@ def build_walk_forward_report(
         "limitations": [
             "A single chronological split is not repeated walk-forward validation.",
             "Holdout lift is descriptive and may be unstable with small event counts.",
-            "Neutral controls are not fully matched by volatility regime or time of day.",
+            "Controls are matched by shared UTC-hour and volatility-tercile strata; exact volatility, liquidity and market-wide state are not matched.",
             "No multiple-testing correction, execution costs, slippage, funding or market impact are modeled.",
             "A positive holdout association is not causal proof and does not approve a trading strategy.",
         ],
