@@ -266,3 +266,14 @@
 - Workflow change commit: cbd3527256fec74a3f4f37d201db7a173bf17b88.
 - At the time of this note, no PR-triggered run was yet visible for that commit; validation is pending, not passed.
 - This only changes research CI triggers. It does not change the production workflow behavior, bot runtime, database, credentials, deployment, or exchange orders. PR #12 remains draft and unmerged.
+
+
+## 2026-11-24 — search trial registry for pattern mining
+- Added an explicit trial registry to the recurring-pattern mining report: number of usable features, feature pairs, state combinations per pair, matched symbol/horizon/direction groups evaluated, total candidate hypotheses evaluated, and number of patterns emitted.
+- The registry is present for normal, empty-event, and insufficient-feature runs, so a report cannot hide that a zero-event run performed no hypothesis tests.
+- Added deterministic assertions that the hypothesis count equals evaluated groups × feature pairs × four high/low state combinations, and that empty input records zero tests.
+- This is an audit trail for search multiplicity, not a multiple-testing correction and not a p-value. The number of tried combinations must be considered before interpreting the best-looking pattern.
+- Code commits: hypothesis registry efb7228421a179181890983c40f2be9697a33d82; registry tests 54c5e0f164cac6432bc4b73c970ccf660e44e67c; stable empty-run registry 19fc1a85525eb37373b19ad76b56ea5619ceff1f; empty-run test 46f4ad4e2cb29ac2d647ef46b80e7c7b39da9be7.
+- Methodological basis: research on backtest overfitting emphasizes that trying many candidate strategies increases false-discovery risk, and that a single walk-forward path can still be unstable. Our next step is repeated chronological test windows and, only with enough data, a more formal multiple-testing / backtest-overfitting assessment. See the 2024 comparison of out-of-sample methods (DOI 10.1016/j.knosys.2024.112477) and the discussion of selection under multiplicity.
+- Validation remains pending: the GitHub connector has not exposed a PR-triggered Actions run for the current branch commits yet. Workflow now includes PR #12's base branch in pull_request triggers; inspect the resulting run before calling tests passed.
+- Production main, live bot, production database, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
