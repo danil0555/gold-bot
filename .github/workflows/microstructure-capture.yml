@@ -162,7 +162,7 @@ jobs:
             --report /tmp/microstructure_merge_report.json
       - name: Check merged sample coverage and run frozen holdout
         run: |
-          ready=$(python - <<'PY'
+          ready=$(python - <<'PY' | tail -n 1
           import sqlite3, sys
           db = sqlite3.connect("/tmp/market_microstructure_merged.sqlite3")
           count, days = db.execute("""
@@ -175,7 +175,7 @@ jobs:
           print(f"Coverage: {count} unique minutes across {days} UTC dates; holdout_ready={result}", file=sys.stderr)
           print("true" if result else "false")
           PY
-          | tail -n 1)
+          )
           if [ "$ready" = "true" ]; then
             python -m scripts.market_move_discovery --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_move_discovery_multiday.json
             python -m scripts.market_pattern_mining --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_patterns_multiday.json --min-support 5
