@@ -72,7 +72,18 @@ def audit_database(db_path: str) -> dict:
             max(0, (right - left) // 60_000 - 1)
             for left, right in zip(candle_stamps, candle_stamps[1:])
         )
-        feature_missing = len(candle_set - feature_set)
+        unmatched_candle_stamps = candle_set - feature_set
+        # The collector may persist one REST warm-up candle before the first
+        # complete minute of trade/depth features. Treat only that exact first
+        # boundary candle as expected; later missing feature minutes remain warnings.
+        initial_boundary_missing = (
+            1 if candle_stamps and feature_rows
+            and candle_stamps[0] not in feature_set
+            and min(feature_set) == candle_stamps[0] + 60_000
+            and unmatched_candle_stamps == {candle_stamps[0]}
+            else 0
+        )
+        feature_missing = len(unmatched_candle_stamps) - initial_boundary_missing
         depth_minutes = sum(1 for row in feature_rows if int(row[3] or 0) > 0)
         trade_minutes = sum(1 for row in feature_rows if int(row[2] or 0) > 0)
         trade_count = sum(int(row[2] or 0) for row in feature_rows)
@@ -97,6 +108,7 @@ def audit_database(db_path: str) -> dict:
                 if expected_minutes else None,
             "feature_minutes": len(feature_rows),
             "candle_minutes_without_features": feature_missing,
+            "initial_boundary_candles_without_features": initial_boundary_missing,
             "depth_minutes": depth_minutes,
             "depth_minute_coverage_pct": round(depth_minutes / len(feature_rows) * 100, 2)
                 if feature_rows else None,
