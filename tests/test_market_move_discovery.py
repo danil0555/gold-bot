@@ -148,20 +148,22 @@ def test_oi_change_uses_real_snapshot_interval_not_minute_row_pct_change(tmp_pat
             INSERT INTO minute_candles VALUES ('BTC-USDT', 600000, 100, 10, 1);
             INSERT INTO minute_candles VALUES ('BTC-USDT', 900000, 100, 10, 1);
             INSERT INTO minute_candles VALUES ('BTC-USDT', 960000, 100, 10, 1);
+            INSERT INTO minute_candles VALUES ('BTC-USDT', 1560000, 100, 10, 1);
             INSERT INTO minute_features VALUES ('BTC-USDT', 300000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
             INSERT INTO minute_features VALUES ('BTC-USDT', 600000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
             INSERT INTO minute_features VALUES ('BTC-USDT', 900000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
             INSERT INTO minute_features VALUES ('BTC-USDT', 960000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
+            INSERT INTO minute_features VALUES ('BTC-USDT', 1560000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
             INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 0, 100, 0.0001);
             INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 300000, 110, 0.0002);
             INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 900000, 121, 0.0003);
-            INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 960000, 133.1, 0.0004);
+            INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 1560000, 133.1, 0.0004);
         """)
     panel = load_market_panel(str(path))
     at_5m = panel.loc[panel.minute_ts == 300000].iloc[0]
     at_10m = panel.loc[panel.minute_ts == 600000].iloc[0]
     at_15m = panel.loc[panel.minute_ts == 900000].iloc[0]
-    at_16m = panel.loc[panel.minute_ts == 960000].iloc[0]
+    at_26m = panel.loc[panel.minute_ts == 1560000].iloc[0]
 
     assert at_5m["open_interest_change_pct"] == pytest.approx(0.10)
     assert at_5m["open_interest_change_interval_ms"] == 300000
