@@ -80,10 +80,6 @@ def evaluate_frozen_patterns(
         ) // 3_600_000 % 24).astype(int).to_numpy()
         event_frame["volatility_bucket"] = -1
         for symbol, group in holdout_panel.groupby("symbol", sort=False):
-            rv_panel = pd.to_numeric(group.get("rv_60m", pd.Series(dtype=float)), errors="coerce")
-            rv_panel = rv_panel[np.isfinite(rv_panel)]
-            if len(rv_panel) < 10:
-                continue
             raw_cuts = frozen_volatility_cuts.get(str(symbol), (None, None))
             if raw_cuts[0] is None or raw_cuts[1] is None:
                 continue
