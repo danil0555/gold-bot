@@ -219,6 +219,24 @@ def evaluate_probabilities(
             "observed_success_rate": float(y.mean())}
 
 
+
+def estimate_net_trade_return_pct(
+    gross_return_pct: float,
+    entry_fee_bps: float,
+    exit_fee_bps: float,
+    entry_slippage_bps: float,
+    exit_slippage_bps: float,
+    funding_bps: float = 0.0,
+) -> float:
+    """Subtract round-trip execution costs from a gross return, all costs in bps."""
+    values = [gross_return_pct, entry_fee_bps, exit_fee_bps,
+              entry_slippage_bps, exit_slippage_bps, funding_bps]
+    if not np.isfinite(np.asarray(values, dtype=float)).all():
+        raise ValueError("trade return and cost inputs must be finite")
+    costs_bps = sum(values[1:])
+    return float(gross_return_pct - costs_bps / 100.0)
+
+
 def summarize_prediction_errors(
     predictions: pd.DataFrame,
     regime_column: str = "market_regime",
