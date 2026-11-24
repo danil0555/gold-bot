@@ -8,7 +8,7 @@ on:
   push:
     branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model, research/market-feature-ablation, research/market-walkforward-regimes, research/directional-microstructure-scoring, research/market-discovery-engine-v1, research/prediction-quality-layer-v1]
   pull_request:
-    branches: [main]
+    branches: [main, research/market-discovery-engine-v1]
   workflow_dispatch:
 
 jobs:
