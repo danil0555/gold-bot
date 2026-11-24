@@ -119,3 +119,26 @@ def test_pattern_mining_handles_missing_event_volatility_without_crashing():
     }]
     report = mine_patterns(panel, episodes, min_support=1)
     assert report["status"] in {"exploratory_patterns_found", "no_patterns_met_support"}
+
+
+
+def test_control_frame_uses_supplied_training_volatility_cuts():
+    from scripts.market_pattern_mining import _build_control_frame
+
+    rows = 90
+    panel = pd.DataFrame({
+        "symbol": ["BTC-USDT"] * rows,
+        "minute_ts": np.arange(rows, dtype=np.int64) * 60_000,
+        "close": np.full(rows, 100.0),
+        "rv_60m": np.linspace(0.0001, 0.0003, rows),
+        "rv_30m": np.linspace(0.0001, 0.0003, rows),
+    })
+    episode = [{
+        "symbol": "BTC-USDT", "start_ts": 80 * 60_000,
+        "horizon_minutes": 5, "direction": "UP", "pre_move_features": {},
+    }]
+    controls = _build_control_frame(
+        panel, episode, volatility_cuts={"BTC-USDT": [0.00005, 0.00015]}
+    )
+    assert not controls.empty
+    assert set(controls["volatility_bucket"]) == {2}
