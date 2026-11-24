@@ -52,6 +52,15 @@ def test_mines_repeated_feature_combinations_against_non_event_controls():
     assert all(p["matched_strata_count"] >= 1 for p in report["patterns"])
     assert all(0 <= p["event_match_coverage_pct"] <= 100 for p in report["patterns"])
     assert all(0 <= p["control_match_coverage_pct"] <= 100 for p in report["patterns"])
+    registry = report["trial_registry"]
+    assert registry["feature_count"] == 9
+    assert registry["feature_pair_count"] == 36
+    assert registry["candidate_hypotheses_evaluated"] == (
+        registry["matched_symbol_horizon_direction_groups_evaluated"]
+        * registry["feature_pair_count"]
+        * registry["state_combinations_per_pair"]
+    )
+    assert registry["candidate_hypotheses_evaluated"] > 0
 
 
 def test_pattern_mining_handles_no_episodes():
