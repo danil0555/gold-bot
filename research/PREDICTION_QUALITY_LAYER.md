@@ -9,7 +9,7 @@ signal generation and cannot place orders.
 - Time-based rolling volatility/trend windows that do not treat sparse rows as consecutive minutes.
 - Causal market regime features; thresholds use trailing data only.
 - Exact-timestamp BTC benchmark context and relative returns.
-- Backward-only derivatives snapshots with a 120-second default freshness limit; OI deltas are retained only when the actual matched snapshot interval is 4-6 minutes, and that interval is exposed for audit.
+- Backward-only derivatives snapshots with a 120-second default freshness limit; OI deltas are retained only when the actual matched snapshot interval is 4-6 minutes, and that interval is exposed for audit. Non-positive OI observations are treated as missing, and the report exposes valid OI-change coverage separately from general derivatives coverage.
 - Open-interest/price quadrants as positioning proxies.
 - Frozen reliability-bin probability calibration and held-out Brier evaluation.
 - Error summaries split by market regime and predicted direction.
