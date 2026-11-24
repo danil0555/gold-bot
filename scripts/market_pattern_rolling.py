@@ -87,13 +87,25 @@ def build_rolling_walk_forward_report(
         training_cutoff = holdout_start - purge_ms
 
         train = panel.loc[pd.to_numeric(panel["minute_ts"], errors="coerce") < training_cutoff].copy()
+        panel_timestamps = pd.to_numeric(panel["minute_ts"], errors="coerce")
         holdout = panel.loc[
-            (pd.to_numeric(panel["minute_ts"], errors="coerce") >= holdout_start)
-            & (pd.to_numeric(panel["minute_ts"], errors="coerce") <= holdout_last)
+            (panel_timestamps >= holdout_start)
+            & (panel_timestamps <= holdout_last)
+        ].copy()
+        # Forward labels for starts near the end of a holdout need up to 30m
+        # of later candles. Keep this tail out of evaluation controls and
+        # restrict discovered event starts to the actual holdout interval.
+        holdout_label_panel = panel.loc[
+            (panel_timestamps >= holdout_start)
+            & (panel_timestamps <= holdout_last + purge_ms)
         ].copy()
 
         train_times = pd.to_numeric(train["minute_ts"], errors="coerce").dropna()
         holdout_times = pd.to_numeric(holdout["minute_ts"], errors="coerce").dropna()
+        label_times = pd.to_numeric(holdout_label_panel["minute_ts"], errors="coerce").dropna()
+        available_label_tail_minutes = max(
+            0, min(int(purge_minutes), int((label_times.max() - holdout_last) // 60_000))
+        ) if not label_times.empty else 0
         if train_times.nunique() < 50 or holdout_times.nunique() < 10:
             folds.append({
                 "fold": fold_index,
@@ -104,11 +116,14 @@ def build_rolling_walk_forward_report(
             start_index += step_count
             continue
 
-        # Discovery on each side is independent. Training labels are computed
-        # only within the pre-holdout training panel, so their forward horizon
-        # cannot cross the purge boundary.
+        # Training labels stay inside the purged training panel. Holdout
+        # event starts stay inside the holdout, but a later label-only tail
+        # completes forward returns for starts in its final 30 minutes.
         train_episodes, _ = discover_episodes(train)
-        holdout_episodes, _ = discover_episodes(holdout)
+        holdout_episodes, _ = discover_episodes(
+            holdout_label_panel,
+            start_time_bounds=(holdout_start, holdout_last),
+        )
         training_report = mine_patterns(train, train_episodes, min_support=min_support)
         frozen_patterns = training_report.get("patterns", [])
         frozen_thresholds = training_report.get("feature_thresholds", {})
@@ -166,6 +181,16 @@ def build_rolling_walk_forward_report(
             "event_counts": {
                 "training": int(len(train_episodes)),
                 "holdout": int(len(holdout_episodes)),
+            },
+            "holdout_labeling": {
+                "future_tail_minutes_requested": int(purge_minutes),
+                "future_tail_minutes_available": available_label_tail_minutes,
+                "future_tail_complete_for_max_horizon": (
+                    available_label_tail_minutes >= purge_minutes
+                ),
+                "tail_rows_used_for_labels_only": int(
+                    max(0, len(holdout_label_panel) - len(holdout))
+                ),
             },
             "training_status": training_report.get("status"),
             "training_pattern_count": len(frozen_patterns),
@@ -245,6 +270,7 @@ def build_rolling_walk_forward_report(
         "methodology": [
             "Expanding training windows use only timestamps earlier than each holdout.",
             "Every holdout is a later, non-overlapping chronological window.",
+            "Holdout event starts are restricted to the holdout window; a following label-only tail completes forward labels for its final 30 minutes when data exists. Tail rows are excluded from holdout controls and feature evaluation.",
             "A time-based purge gap of at least 30 minutes separates training from holdout.",
             "Episode discovery, feature thresholds, pattern selection and ranking are refit on training only in each fold.",
             "Per-symbol volatility cut points are frozen from that fold's training panel and reused unchanged in its holdout.",
@@ -256,6 +282,7 @@ def build_rolling_walk_forward_report(
             "Pattern mining still searches many feature combinations; the trial registry is descriptive and does not correct multiple testing.",
             "UTC-hour and volatility-tercile matching is coarse; exact volatility, liquidity and BTC-wide market state are not fully controlled.",
             "Small event counts, sparse data and missing holdout matches can make lift undefined or unstable.",
+            "The final dataset edge may not contain a full 30-minute future tail; the report marks that fold as label-tail incomplete rather than implying complete event coverage.",
             "No execution costs, slippage, funding, market impact or executable entry rules are modeled.",
             "A repeated descriptive association is not causal proof and does not approve a trading strategy.",
         ],
