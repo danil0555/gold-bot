@@ -213,3 +213,15 @@
 - Fix commits: script `0174f817439351f45068ffa3664c24b29f665758`; test fixture `947675cfd8ee90e1c6e9d0a9b3db272807256379`. CI for the resulting combined branch HEAD is required before considering this fix validated.
 - Production `main`, live bot, database, credentials, deployment, and exchange orders remain untouched. PR #12 remains draft and unmerged.
 - Next: inspect the new CI run; if successful, proceed to matched-control comparisons stratified by volatility regime and UTC time-of-day.
+
+
+## 2026-11-24 — volatility/time matched controls for pre-move mining
+- Confirmed CI run `45475613310` completed successfully on branch SHA `4e207f6b94cac3e31e8f72a895905c3700937de8`. The syntax job compiled Python, imported runtime/safe defaults, and ran deterministic strategy/research tests successfully. Optional live/public scans and historical backtests were skipped by workflow conditions; this was code/test validation, not a fresh market-data experiment.
+- Audited `scripts/market_pattern_mining.py`: previous neutral controls were same-symbol/same-horizon but not matched by UTC hour or volatility regime.
+- Added per-symbol volatility terciles and UTC-hour labels to controls and events. Pattern comparison now retains shared strata only and standardizes control hit rates to the event stratum mix. Reports include `matched_strata_count` and an explicit control-method description.
+- Added a regression assertion for matched-strata reporting in `tests/test_market_pattern_mining.py`.
+- This reduces confounding from broad time-of-day and volatility differences, but is not exact matching and does not control liquidity, BTC-wide market state, funding regime, or multiple testing. Results remain exploratory; no strategy approval.
+- Changes: `scripts/market_pattern_mining.py` commit `30b81a957421e4eeead851cbef3e6941dae25bb6`; `tests/test_market_pattern_mining.py` commit `f85d15035ce086f5215b8b2c3d5306de663fcbd2`.
+- New CI run is required for this matched-control change; do not claim it validated until a run on the resulting code/test SHA succeeds.
+- Production `main`, live bot, database, credentials, deployment, and exchange orders remain untouched. PR #12 remains draft and unmerged.
+- Next: inspect CI, then add coverage diagnostics for how many events survive matching and assess sensitivity to alternative volatility bucket definitions without tuning on holdout.
