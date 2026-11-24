@@ -355,3 +355,12 @@
 - Production `main`, `trading_bot_v9.db`, credentials, hosting/deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
 
 - Validation update: run `45490554688` on commit `783605940877ec9a946f872ad1f5dd07c52473d2` completed successfully. Compile, runtime safe-default checks, and all deterministic tests passed; the suite reported **123 passed** including the new transfer-tail tests. Public BingX smoke and 180-day Spot–Perpetual backtest steps were skipped in this push-triggered run. The earlier PR-triggered run `45488394679` on the initial transfer implementation completed both those read-only checks successfully, but it predates the tail-isolation correction.
+
+
+## 2026-11-25 — cross-symbol matched-sample coverage and minimum support (CI pending)
+- Tightened transfer result eligibility: a source→target transfer is counted as evaluated only when both matched target events and matched target controls meet the configured minimum support.
+- Added pre-match and post-match event/control sample counts and match-coverage percentages to every fully processed transfer result. This makes it harder to mistake a high lift on a tiny matched subset for robust evidence.
+- Added a deterministic regression fixture verifying event/control coverage and support reporting.
+- Commits: result and support logic `6923640b53310ebcebd57790a0bbc45fa709d305`; regression test `d1fbe20caff4101258567b528b5d752a66d65154`.
+- Validation: a previous revision passed 123 deterministic tests on commit `783605940877ec9a946f872ad1f5dd07c52473d2`, but that run predates this support/coverage change. Latest-head CI is required.
+- Production remains untouched; PR #12 remains draft and unmerged.
