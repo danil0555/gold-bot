@@ -55,7 +55,6 @@ def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
         table: int(destination.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
         for table in TABLES
     }
-    source_summaries = []
     try:
         for index, source in enumerate(sources[1:], start=1):
             alias = f"capture_{index}"
@@ -79,9 +78,8 @@ def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
                         f'INSERT INTO main."{table}" ({event_columns}) '
                         f'SELECT {event_columns} FROM "{alias}"."{table}"'
                     )
-            destination.execute(f"DETACH DATABASE {alias}")
             destination.commit()
-            source_summaries.append(str(source))
+            destination.execute(f"DETACH DATABASE {alias}")
         after = {
             table: int(destination.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
             for table in TABLES
