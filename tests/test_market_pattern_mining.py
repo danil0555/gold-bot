@@ -98,3 +98,22 @@ def test_controls_exclude_large_moves_in_both_directions_and_event_windows():
         forward_return = panel.loc[idx + 5, "close"] / panel.loc[idx, "close"] - 1
         assert abs(forward_return) < 0.004
 
+
+
+def test_pattern_mining_handles_missing_event_volatility_without_crashing():
+    rows = 180
+    panel = pd.DataFrame({
+        "symbol": ["BTC-USDT"] * rows,
+        "minute_ts": np.arange(rows, dtype=np.int64) * 60_000,
+        "close": np.full(rows, 100.0),
+        "rv_60m": np.linspace(0.0001, 0.0003, rows),
+        "volume_surprise_z": np.linspace(-2, 2, rows),
+        "trades_surprise_z": np.linspace(-1.5, 1.5, rows),
+    })
+    episodes = [{
+        "symbol": "BTC-USDT", "minute_ts": 150 * 60_000,
+        "start_ts": 150 * 60_000, "horizon_minutes": 5, "direction": "UP",
+        "pre_move_features": {"volume_surprise_z": 1.5, "trades_surprise_z": 1.2},
+    }]
+    report = mine_patterns(panel, episodes, min_support=1)
+    assert report["status"] in {"exploratory_patterns_found", "no_patterns_met_support"}
