@@ -33,6 +33,63 @@ def _pattern_identity(pattern: dict) -> tuple:
         conditions,
     )
 
+def _label_tail_coverage(
+    holdout: pd.DataFrame,
+    label_panel: pd.DataFrame,
+    holdout_end: int,
+    requested_minutes: int,
+) -> dict:
+    """Measure contiguous post-holdout candles separately for each symbol.
+
+    A global maximum timestamp is not sufficient: one symbol may have a full
+    tail while another has stopped updating or contains gaps.
+    """
+    symbol_coverage = []
+    if holdout.empty:
+        return {
+            "future_tail_minutes_requested": int(requested_minutes),
+            "future_tail_minutes_available": 0,
+            "future_tail_complete_for_max_horizon": False,
+            "symbols_with_complete_tail": 0,
+            "symbols_checked": 0,
+            "tail_rows_used_for_labels_only": 0,
+            "per_symbol": [],
+        }
+    for symbol, group in holdout.groupby("symbol", sort=False):
+        anchor = int(pd.to_numeric(group["minute_ts"], errors="coerce").max())
+        future = label_panel.loc[
+            label_panel["symbol"].astype(str).eq(str(symbol))
+            & (pd.to_numeric(label_panel["minute_ts"], errors="coerce") > anchor),
+            "minute_ts",
+        ]
+        stamps = sorted(set(pd.to_numeric(future, errors="coerce").dropna().astype("int64")))
+        contiguous_minutes = 0
+        expected = anchor + 60_000
+        for stamp in stamps:
+            if int(stamp) != expected:
+                break
+            contiguous_minutes += 1
+            expected += 60_000
+        symbol_coverage.append({
+            "symbol": str(symbol),
+            "holdout_last_timestamp": anchor,
+            "contiguous_future_minutes": contiguous_minutes,
+            "complete": contiguous_minutes >= int(requested_minutes),
+        })
+    available = min((item["contiguous_future_minutes"] for item in symbol_coverage), default=0)
+    complete_count = sum(item["complete"] for item in symbol_coverage)
+    return {
+        "future_tail_minutes_requested": int(requested_minutes),
+        "future_tail_minutes_available": int(available),
+        "future_tail_complete_for_max_horizon": (
+            len(symbol_coverage) > 0 and complete_count == len(symbol_coverage)
+        ),
+        "symbols_with_complete_tail": int(complete_count),
+        "symbols_checked": int(len(symbol_coverage)),
+        "tail_rows_used_for_labels_only": int(max(0, len(label_panel) - len(holdout))),
+        "per_symbol": symbol_coverage,
+    }
+
 
 def build_rolling_walk_forward_report(
     panel: pd.DataFrame,
@@ -102,10 +159,9 @@ def build_rolling_walk_forward_report(
 
         train_times = pd.to_numeric(train["minute_ts"], errors="coerce").dropna()
         holdout_times = pd.to_numeric(holdout["minute_ts"], errors="coerce").dropna()
-        label_times = pd.to_numeric(holdout_label_panel["minute_ts"], errors="coerce").dropna()
-        available_label_tail_minutes = max(
-            0, min(int(purge_minutes), int((label_times.max() - holdout_last) // 60_000))
-        ) if not label_times.empty else 0
+        label_tail_coverage = _label_tail_coverage(
+            holdout, holdout_label_panel, holdout_last, purge_minutes
+        )
         if train_times.nunique() < 50 or holdout_times.nunique() < 10:
             folds.append({
                 "fold": fold_index,
@@ -182,16 +238,7 @@ def build_rolling_walk_forward_report(
                 "training": int(len(train_episodes)),
                 "holdout": int(len(holdout_episodes)),
             },
-            "holdout_labeling": {
-                "future_tail_minutes_requested": int(purge_minutes),
-                "future_tail_minutes_available": available_label_tail_minutes,
-                "future_tail_complete_for_max_horizon": (
-                    available_label_tail_minutes >= purge_minutes
-                ),
-                "tail_rows_used_for_labels_only": int(
-                    max(0, len(holdout_label_panel) - len(holdout))
-                ),
-            },
+            "holdout_labeling": label_tail_coverage,
             "training_status": training_report.get("status"),
             "training_pattern_count": len(frozen_patterns),
             "training_trial_registry": trial_registry,
