@@ -258,3 +258,11 @@
 - Validation status: no successful Actions result has yet been observed for the current branch HEAD. The GitHub connector's workflow-run helper filters to pull-request-triggered runs, so an empty result is inconclusive for push-triggered runs. Code and tests are committed; do not claim they passed until the actual Actions run is inspected.
 - Interpretation: this makes holdout matching more consistent and reduces one source of distribution drift, but does not solve sparse sample sizes, exact volatility matching, liquidity/BTC-regime confounding, multiple testing, or execution realism.
 - Production main, live bot, production database, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
+
+
+## 2026-11-24 — enable CI for the research PR base branch
+- Found why the GitHub connector could not show the validation run for PR #12: the workflow's pull_request trigger targeted only base branch main, while PR #12 targets research/market-discovery-engine-v1. Push validation exists, but the connector's run lookup only exposes pull-request-triggered runs.
+- Expanded the pull_request target list to include research/market-discovery-engine-v1 so PR #12 receives the deterministic compile/runtime/research test job and its result can be inspected through the available connector.
+- Workflow change commit: cbd3527256fec74a3f4f37d201db7a173bf17b88.
+- At the time of this note, no PR-triggered run was yet visible for that commit; validation is pending, not passed.
+- This only changes research CI triggers. It does not change the production workflow behavior, bot runtime, database, credentials, deployment, or exchange orders. PR #12 remains draft and unmerged.
