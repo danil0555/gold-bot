@@ -225,3 +225,12 @@
 - New CI run is required for this matched-control change; do not claim it validated until a run on the resulting code/test SHA succeeds.
 - Production `main`, live bot, database, credentials, deployment, and exchange orders remain untouched. PR #12 remains draft and unmerged.
 - Next: inspect CI, then add coverage diagnostics for how many events survive matching and assess sensitivity to alternative volatility bucket definitions without tuning on holdout.
+
+
+## 2026-11-24 — matched controls also applied to frozen holdout
+- Extended the UTC-hour/volatility-tercile control comparison into `evaluate_frozen_patterns`; training discovery and later holdout evaluation now use the same matched-strata principle.
+- Holdout event volatility uses the episode's pre-move RV feature; if absent in a compatibility fixture, it falls back to the exact event timestamp's panel RV, never a future row. Event/control rates are compared only in shared strata, with controls weighted to the holdout event stratum mix.
+- Added `holdout_matched_strata_count` and a regression assertion.
+- Commits: `scripts/market_pattern_holdout.py` `9d3be91500ec619a1843693e11efb7cc553f0317`; `tests/test_market_pattern_holdout.py` `1abeb595bfb56023115a9c9597604b65a84754a8`.
+- CI for the complete matched-control implementation is pending. Do not claim it passed until a successful workflow run covers the final code/test SHA.
+- Method remains exploratory: volatility terciles and UTC hour are coarse strata; they do not match exact volatility, liquidity, BTC market state, funding or event clustering, and do not correct for multiple comparisons.
