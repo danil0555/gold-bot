@@ -215,10 +215,18 @@ def evaluate_cross_symbol_transfer(
                 "target_volatility_cuts_source": "training_only",
             })
     evaluated = [item for item in results if item.get("status") == "evaluated"]
+    status_counts = {
+        status: sum(item.get("status") == status for item in results)
+        for status in sorted({str(item.get("status", "unknown")) for item in results})
+    }
     return {
         "report_type": "cross_symbol_pattern_transfer_v1",
         "decision": "exploratory_transfer_test_only_no_strategy_approved",
         "training_pattern_count": len(source_patterns),
+        "training_mining_status": training.get("status", "unknown"),
+        "training_trial_registry": training.get("trial_registry", {}),
+        "transfer_result_status_counts": status_counts,
+        "transfer_result_rows": len(results),
         "source_pattern_count_by_symbol": {
             symbol: sum(str(p["symbol"]) == symbol for p in source_patterns)
             for symbol in sorted(train_symbols)
