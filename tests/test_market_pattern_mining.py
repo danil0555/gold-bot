@@ -50,6 +50,8 @@ def test_mines_repeated_feature_combinations_against_non_event_controls():
     assert all(p["horizon_minutes"] == 5 for p in report["patterns"])
     assert "UTC-hour" in report["control_method"]
     assert all(p["matched_strata_count"] >= 1 for p in report["patterns"])
+    assert all(0 <= p["event_match_coverage_pct"] <= 100 for p in report["patterns"])
+    assert all(0 <= p["control_match_coverage_pct"] <= 100 for p in report["patterns"])
 
 
 def test_pattern_mining_handles_no_episodes():
