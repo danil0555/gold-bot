@@ -108,21 +108,23 @@ def build_features(panel: pd.DataFrame, lookback: int = 120, min_periods: int = 
     out["volatility_reference"] = g.realized_vol_15m.transform(
         lambda s: s.shift(1).rolling(lookback, min_periods=min_periods).quantile(0.70)
     )
-    out["trend_regime"] = np.select(
+    out["trend_regime"] = pd.Series(np.select(
         [out.trend_60m >= 0.005, out.trend_60m <= -0.005],
         ["up", "down"], default="sideways",
-    )
-    out["volatility_regime"] = np.where(
+    ), index=out.index).where(out.trend_60m.notna(), "unknown")
+    out["volatility_regime"] = pd.Series(np.where(
         out.realized_vol_15m >= out.volatility_reference, "high_vol", "normal_vol"
+    ), index=out.index).where(
+        out.realized_vol_15m.notna() & out.volatility_reference.notna(), "unknown"
     )
     breadth = out.groupby("minute_ts").trend_60m.transform(
         lambda s: (s.dropna() > 0).mean() if s.notna().any() else np.nan
     )
     out["market_breadth_60m"] = breadth
-    out["breadth_regime"] = np.select(
+    out["breadth_regime"] = pd.Series(np.select(
         [breadth >= 0.60, breadth <= 0.40],
         ["positive_breadth", "negative_breadth"], default="mixed_breadth",
-    )
+    ), index=out.index).where(breadth.notna(), "unknown")
     for feature in FEATURES:
         out[f"rank_{feature}"] = g[feature].transform(
             lambda s: _past_rank(s, lookback, min_periods)
