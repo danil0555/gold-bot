@@ -6,6 +6,7 @@ from scripts.prediction_quality_layer import (
     add_market_context,
     apply_probability_calibrator,
     evaluate_probabilities,
+    estimate_net_trade_return_pct,
     fit_probability_calibrator,
     summarize_prediction_errors,
 )
@@ -79,3 +80,16 @@ def test_error_report_breaks_down_by_regime_and_direction():
     assert report["rows"] == 3
     assert report["correct"] == 2
     assert len(report["by_regime_and_side"]) == 2
+
+
+
+def test_net_trade_return_subtracts_round_trip_costs():
+    net = estimate_net_trade_return_pct(
+        gross_return_pct=1.0,
+        entry_fee_bps=5,
+        exit_fee_bps=5,
+        entry_slippage_bps=2,
+        exit_slippage_bps=3,
+        funding_bps=1,
+    )
+    assert net == pytest.approx(0.84)
