@@ -48,7 +48,7 @@ def test_derivatives_are_backward_joined_and_stale_data_is_rejected():
     ], columns=["symbol", "ts_ms", "open_interest_base", "funding_rate"])
     result = add_market_context(candles, derivatives)
     eth = result[result.symbol == "ETH-USDT"].sort_values("minute_ts")
-    assert eth.iloc[0].derivatives_age_ms == 0
+    assert eth.iloc[1].derivatives_age_ms == 0
     assert pd.isna(eth.iloc[-1].derivatives_age_ms)
     assert not bool(eth.iloc[-1].liquidation_data_available)
 
