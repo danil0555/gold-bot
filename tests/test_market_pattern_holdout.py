@@ -69,3 +69,4 @@ def test_frozen_pattern_is_evaluated_without_refitting_thresholds():
     assert pattern["holdout_event_total"] == 1
     assert pattern["conditions"][0]["threshold"] == 1.0
     assert "holdout_descriptive_lift" in pattern
+    assert pattern["holdout_matched_strata_count"] >= 1
