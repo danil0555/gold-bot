@@ -155,9 +155,10 @@ def add_market_context(
             # Both snapshots are matched near their target minute; require the
             # actual snapshot-to-snapshot interval to remain within 4-6 minutes.
             valid_interval = snapshot_interval.between(4 * 60_000, 6 * 60_000)
+            valid_oi = oi.gt(0) & prior_oi.gt(0) & valid_interval
             oi_change = (
                 oi.div(prior_oi.where(prior_oi > 0)).sub(1.0) * 100.0
-            ).where(valid_interval)
+            ).where(valid_oi)
             target_idx = left.index
             out.loc[target_idx, "oi_change_5m_pct"] = oi_change.to_numpy()
             out.loc[target_idx, "oi_snapshot_interval_ms"] = snapshot_interval.to_numpy()
@@ -319,6 +320,9 @@ def build_shadow_quality_report(
         ),
         "derivatives_coverage_pct": round(
             float(enriched.derivatives_age_ms.notna().mean() * 100), 2
+        ),
+        "oi_change_5m_coverage_pct": round(
+            float(enriched.oi_change_5m_pct.notna().mean() * 100), 2
         ),
         "liquidation_data_available": False,
         "positioning_proxy_is_not_liquidation_data": True,
