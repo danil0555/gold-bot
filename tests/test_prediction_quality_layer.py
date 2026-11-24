@@ -79,6 +79,23 @@ def test_btc_self_relative_return_stays_missing_until_return_exists():
     assert btc.iloc[10].relative_return_5m == 0.0
 
 
+def test_oi_change_requires_a_near_five_minute_snapshot_interval():
+    derivatives = pd.DataFrame([
+        ("ETH-USDT", 0, 10.0, 0.0001),
+        ("ETH-USDT", 7 * 60_000, 11.0, 0.0002),
+    ], columns=["symbol", "ts_ms", "open_interest_base", "funding_rate"])
+    result = add_market_context(_candles(), derivatives)
+    eth = result[
+        (result.symbol == "ETH-USDT")
+        & (result.minute_ts == 7 * 60_000)
+    ].iloc[0]
+
+    # Each snapshot is fresh for its own target, but the actual interval is 7m.
+    assert eth.oi_snapshot_interval_ms == 7 * 60_000
+    assert pd.isna(eth.oi_change_5m_pct)
+    assert eth.positioning_proxy == "unknown"
+
+
 def test_zero_oi_change_is_not_misclassified_as_position_building():
     derivatives = pd.DataFrame([
         ("ETH-USDT", 0, 10.0, 0.0001),
