@@ -404,6 +404,184 @@ def build_cross_symbol_transfer_report(
     }
     return report
 
+
+def build_rolling_cross_symbol_transfer_report(
+    panel: pd.DataFrame,
+    initial_train_fraction: float = 0.50,
+    holdout_fraction: float = 0.15,
+    step_fraction: float = 0.15,
+    purge_minutes: int = PURGE_MINUTES,
+    min_support: int = 5,
+    max_source_patterns: int = 30,
+) -> dict:
+    """Evaluate source→target patterns over expanding, non-overlapping holdouts."""
+    if not 0.30 <= initial_train_fraction <= 0.80:
+        raise ValueError("initial_train_fraction must be between 0.30 and 0.80")
+    if not 0.05 <= holdout_fraction <= 0.30:
+        raise ValueError("holdout_fraction must be between 0.05 and 0.30")
+    if step_fraction < holdout_fraction:
+        raise ValueError("step_fraction must be >= holdout_fraction to prevent holdout overlap")
+    if step_fraction <= 0 or purge_minutes < PURGE_MINUTES:
+        raise ValueError("step_fraction must be positive and purge_minutes must be at least 30")
+    timestamps = np.sort(
+        pd.to_numeric(panel["minute_ts"], errors="coerce").dropna().unique()
+    )
+    if len(timestamps) < 100:
+        raise ValueError("at least 100 unique timestamps are required")
+    n = len(timestamps)
+    initial_end = int(n * initial_train_fraction)
+    holdout_size = max(1, int(n * holdout_fraction))
+    step_size = max(1, int(n * step_fraction))
+    folds = []
+    aggregate = {}
+    total_trials = 0
+    total_patterns = 0
+    start_index = initial_end
+    fold_number = 0
+
+    while start_index < n:
+        end_index = min(n, start_index + holdout_size)
+        holdout_start_ts = int(timestamps[start_index])
+        holdout_end_ts = int(timestamps[end_index - 1])
+        train_end_ts = holdout_start_ts - purge_minutes * 60_000
+        train = panel.loc[pd.to_numeric(panel["minute_ts"], errors="coerce") < train_end_ts].copy()
+        holdout = panel.loc[
+            pd.to_numeric(panel["minute_ts"], errors="coerce").between(
+                holdout_start_ts, holdout_end_ts, inclusive="both"
+            )
+        ].copy()
+        if train.empty or holdout.empty:
+            folds.append({
+                "fold": fold_number + 1, "status": "insufficient_train_or_holdout_rows",
+                "time_bounds_utc_ms": {
+                    "training_end": int(train["minute_ts"].max()) if not train.empty else None,
+                    "holdout_start": holdout_start_ts, "holdout_end": holdout_end_ts,
+                },
+                "train_rows": int(len(train)), "holdout_rows": int(len(holdout)),
+            })
+            start_index += step_size
+            fold_number += 1
+            continue
+
+        train_start_ts = int(pd.to_numeric(train["minute_ts"], errors="coerce").min())
+        train_last_ts = int(pd.to_numeric(train["minute_ts"], errors="coerce").max())
+        train_label_panel = _build_holdout_label_panel(panel, train, purge_minutes)
+        train_episodes, _ = discover_episodes(
+            train_label_panel, start_time_bounds=(train_start_ts, train_last_ts)
+        )
+        holdout_label_panel = _build_holdout_label_panel(panel, holdout, PURGE_MINUTES)
+        holdout_episodes, _ = discover_episodes(
+            holdout_label_panel,
+            start_time_bounds=(holdout_start_ts, holdout_end_ts),
+        )
+        report = evaluate_cross_symbol_transfer(
+            train, holdout, train_episodes, holdout_episodes,
+            min_support=min_support, max_source_patterns=max_source_patterns,
+        )
+        trial_count = int(
+            report.get("training_trial_registry", {}).get("candidate_hypotheses_evaluated", 0)
+        )
+        total_trials += trial_count
+        total_patterns += int(report.get("training_pattern_count", 0))
+        fold_id = fold_number + 1
+        for item in report.get("transfer_results", []):
+            conditions_key = json.dumps(item.get("conditions", []), sort_keys=True, separators=(",", ":"))
+            key = (
+                str(item.get("source_symbol", "")), str(item.get("target_symbol", "")),
+                int(item.get("horizon_minutes", 0)), str(item.get("direction", "")),
+                conditions_key,
+            )
+            entry = aggregate.setdefault(key, {
+                "source_symbol": key[0], "target_symbol": key[1],
+                "horizon_minutes": key[2], "direction": key[3],
+                "conditions": item.get("conditions", []),
+                "folds_seen": 0, "folds_evaluated": 0,
+                "folds_with_lift_above_1": 0, "fold_lifts": [],
+                "fold_event_support": 0, "fold_control_support": 0,
+            })
+            entry["folds_seen"] += 1
+            if item.get("status") == "evaluated":
+                entry["folds_evaluated"] += 1
+                entry["fold_event_support"] += int(item.get("target_event_total", 0))
+                entry["fold_control_support"] += int(item.get("target_control_total", 0))
+                lift = item.get("target_descriptive_lift")
+                if lift is not None:
+                    entry["fold_lifts"].append(float(lift))
+                    if float(lift) > 1.0:
+                        entry["folds_with_lift_above_1"] += 1
+            entry.setdefault("fold_results", []).append({
+                "fold": fold_id, "status": item.get("status"),
+                "target_event_total": item.get("target_event_total"),
+                "target_control_total": item.get("target_control_total"),
+                "target_descriptive_lift": item.get("target_descriptive_lift"),
+            })
+
+        folds.append({
+            "fold": fold_id,
+            "status": "evaluated" if report.get("transfer_result_rows", 0) else "no_transfer_results",
+            "time_bounds_utc_ms": {
+                "training_start": train_start_ts, "training_end": train_last_ts,
+                "holdout_start": holdout_start_ts, "holdout_end": holdout_end_ts,
+            },
+            "train_rows": int(len(train)), "holdout_rows": int(len(holdout)),
+            "training_pattern_count": int(report.get("training_pattern_count", 0)),
+            "training_mining_status": report.get("training_mining_status"),
+            "training_trial_registry": report.get("training_trial_registry", {}),
+            "transfer_result_status_counts": report.get("transfer_result_status_counts", {}),
+            "transfer_result_rows": int(report.get("transfer_result_rows", 0)),
+            "transfer_pairs_evaluated": int(report.get("transfer_pairs_evaluated", 0)),
+            "label_tail": _label_tail_coverage(panel, holdout, PURGE_MINUTES),
+            "label_only_rows": int(len(holdout_label_panel) - len(holdout)),
+        })
+        start_index += step_size
+        fold_number += 1
+
+    stability = []
+    for item in aggregate.values():
+        lifts = item.pop("fold_lifts")
+        item["median_evaluated_fold_lift"] = (
+            round(float(np.median(lifts)), 3) if lifts else None
+        )
+        item["folds_with_lift_above_1"] = int(item["folds_with_lift_above_1"])
+        stability.append(item)
+    stability.sort(
+        key=lambda x: (x["folds_evaluated"], x["folds_with_lift_above_1"],
+                       x["median_evaluated_fold_lift"] or 0.0), reverse=True
+    )
+    return {
+        "report_type": "rolling_cross_symbol_pattern_transfer_v1",
+        "decision": "exploratory_repeated_transfer_test_only_no_strategy_approved",
+        "configuration": {
+            "initial_train_fraction": initial_train_fraction,
+            "holdout_fraction": holdout_fraction, "step_fraction": step_fraction,
+            "purge_minutes": purge_minutes, "min_support": min_support,
+            "folds_planned": len(folds), "folds_evaluated": sum(
+                item.get("status") in {"evaluated", "no_transfer_results"} for item in folds
+            ),
+        },
+        "folds": folds,
+        "pattern_stability": stability,
+        "trial_registry": {
+            "candidate_hypotheses_evaluated_across_folds": total_trials,
+            "training_patterns_reported_across_folds": total_patterns,
+            "note": "Expanding training windows make folds dependent; counts are descriptive, not a multiple-testing correction.",
+        },
+        "methodology": [
+            "Training windows expand chronologically; holdout windows are later and non-overlapping.",
+            "Each fold mines source patterns from training rows only and refits target-symbol feature cutoffs using that fold's target training rows.",
+            "A purge gap of at least 30 minutes separates training event starts from holdout starts.",
+            "Per-symbol future label tails complete event outcomes only; tail rows never enter holdout controls or evaluation observations.",
+            "Recurrence is grouped by source, target, horizon, direction and feature/state conditions; fold-specific numeric cutoffs may differ.",
+            "Expanding training windows overlap, so folds and their trial counts are dependent.",
+        ],
+        "limitations": [
+            "Exploratory transfer evidence only; no live strategy approval.",
+            "No fees, spread/slippage, funding, liquidity matching, formal multiple-testing correction, or dependence-adjusted confidence intervals.",
+            "Wilson intervals on individual fold raw rates do not make the aggregate fold recurrence statistically independent.",
+        ],
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", required=True)
