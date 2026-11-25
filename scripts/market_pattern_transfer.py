@@ -543,6 +543,14 @@ def build_rolling_cross_symbol_transfer_report(
         start_index += step_size
         fold_number += 1
 
+    trailing_eligible_timestamps_discarded = max(0, n - start_index)
+    trailing_fragment_start_ts = (
+        int(timestamps[start_index]) if trailing_eligible_timestamps_discarded else None
+    )
+    trailing_fragment_end_ts = (
+        int(timestamps[-1]) if trailing_eligible_timestamps_discarded else None
+    )
+
     stability = []
     for item in aggregate.values():
         lifts = item.pop("fold_lifts")
@@ -564,6 +572,11 @@ def build_rolling_cross_symbol_transfer_report(
             "purge_minutes": purge_minutes, "min_support": min_support,
             "label_only_final_window_minutes": PURGE_MINUTES,
             "eligible_evaluation_timestamps": int(n),
+            "trailing_eligible_timestamps_discarded": int(
+                trailing_eligible_timestamps_discarded
+            ),
+            "trailing_fragment_start_utc_ms": trailing_fragment_start_ts,
+            "trailing_fragment_end_utc_ms": trailing_fragment_end_ts,
             "folds_planned": len(folds), "folds_evaluated": sum(
                 item.get("status") in {"evaluated", "no_transfer_results"} for item in folds
             ),
