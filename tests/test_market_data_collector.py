@@ -285,3 +285,27 @@ def test_overlapping_capture_sessions_preserve_independent_minute_features(tmp_p
     finally:
         first.close()
         second.close()
+
+
+
+def test_sigterm_handler_requests_cooperative_shutdown():
+    import asyncio
+    import signal
+
+    from scripts.market_data_collector import _register_sigterm_handler
+
+    class FakeLoop:
+        def add_signal_handler(self, signum, callback):
+            self.signum = signum
+            self.callback = callback
+
+    async def scenario():
+        stop_event = asyncio.Event()
+        loop = FakeLoop()
+        assert _register_sigterm_handler(loop, stop_event) is True
+        assert loop.signum == signal.SIGTERM
+        assert stop_event.is_set() is False
+        loop.callback()
+        assert stop_event.is_set() is True
+
+    asyncio.run(scenario())
