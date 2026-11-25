@@ -484,3 +484,12 @@
 - Added deterministic tests for timeframe close-boundaries, setup deduplication, invalid/missing data, and loading the actual production builder without starting the bot. Registered tests in validation CI.
 - This is an adapter foundation, not a completed backtest. It still requires verified historical OHLCV for all five timeframes, correct exchange candle semantics, and a comparison run on the same 1m execution candles. The replay uses the `main.py` present in the checked-out branch; compare its recorded SHA/version with production before interpreting results.
 - Production `main`, database, credentials, hosting, live signals and exchange orders remain untouched. PR #12 remains draft and unmerged.
+
+
+## 2026-11-25 — fail-closed execution-price and funding validation
+- Corrected invalid-price accounting: non-positive close prices remain in the exact timestamp lookup so the evaluator classifies them as `invalid_price`, rather than misreporting them as missing candles.
+- Funding input now fails closed for non-numeric/non-finite rates, non-integer or non-finite settlement timestamps, duplicate symbol/settlement records, and duplicate/invalid expected schedule timestamps. Previously invalid rates could be silently skipped and duplicate records could overwrite one another.
+- Added deterministic tests for non-positive entry prices, invalid funding rates, duplicate funding settlements, and fractional expected settlement timestamps.
+- Commits: evaluator hardening `480688fb8f1ee8b4e37ba7c542b2a981a0ce7b76`; regression tests `8ecc1e213abec22066624b5122dc6a3bbb7178a2`.
+- Validation: not yet run on this head; CI must confirm the changes. No historical performance claims are made.
+- Production `main`, `trading_bot_v9.db`, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
