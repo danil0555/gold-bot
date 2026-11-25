@@ -30,7 +30,9 @@ CREATE TABLE collector_sessions (
 );
 CREATE TABLE capture_observations (
  capture_id TEXT NOT NULL, symbol TEXT NOT NULL, observed_at_ms INTEGER NOT NULL,
- observation_type TEXT NOT NULL,
+ observation_type TEXT NOT NULL CHECK (
+  observation_type IN ('session', 'candle', 'features', 'derivatives')
+ ),
  PRIMARY KEY(capture_id, symbol, observed_at_ms, observation_type)
 );
 """
@@ -65,7 +67,8 @@ def make_capture(path, candle_rows, event):
             (f"capture-{event}", row[0], row[1], "candle")
             for row in candle_rows
         ] + [
-            (f"capture-{event}", "BTC-USDT", 1000 + event, "derivatives")
+            (f"capture-{event}", "BTC-USDT", 1000 + event, "derivatives"),
+            (f"capture-{event}", "", event, "session"),
         ],
     )
     db.commit()
@@ -140,9 +143,49 @@ def test_merge_preserves_capture_observation_links(tmp_path):
     make_capture(first, [candle(60_000)], 1)
     make_capture(second, [candle(60_000)], 2)
     report = merge_databases([first, second], output)
-    assert report["rows_after"]["capture_observations"] == 4
+    assert report["rows_after"]["capture_observations"] == 6
     with sqlite3.connect(output) as db:
         sessions = db.execute(
             "SELECT COUNT(DISTINCT capture_id) FROM capture_observations"
         ).fetchone()[0]
         assert sessions == 2
+
+
+
+def test_merge_upgrades_older_capture_observation_check_constraint(tmp_path):
+    legacy, modern, output = (
+        tmp_path / "legacy-mapped.db",
+        tmp_path / "modern.db",
+        tmp_path / "merged.db",
+    )
+    old_schema = SCHEMA.replace(
+        "observation_type TEXT NOT NULL CHECK (\n  observation_type IN ('session', 'candle', 'features', 'derivatives')\n ),",
+        "observation_type TEXT NOT NULL CHECK (\n  observation_type IN ('candle', 'features', 'derivatives')\n ),",
+    )
+    with sqlite3.connect(legacy) as db:
+        db.executescript(old_schema)
+        db.execute(
+            "INSERT INTO minute_candles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            candle(60_000),
+        )
+        db.execute(
+            "INSERT INTO collector_sessions VALUES (?, ?, ?, ?)",
+            ("legacy", 1, 1000, '["BTC-USDT"]'),
+        )
+        db.execute(
+            "INSERT INTO capture_observations VALUES (?, ?, ?, ?)",
+            ("legacy", "BTC-USDT", 60_000, "candle"),
+        )
+    make_capture(modern, [candle(120_000)], 2)
+
+    report = merge_databases([legacy, modern], output)
+    assert report["rows_after"]["capture_observations"] == 3
+    with sqlite3.connect(output) as db:
+        markers = db.execute(
+            "SELECT COUNT(*) FROM capture_observations WHERE observation_type='session'"
+        ).fetchone()[0]
+        assert markers == 1
+        db.execute(
+            "INSERT INTO capture_observations VALUES (?, ?, ?, ?)",
+            ("post-merge", "", 999, "session"),
+        )
