@@ -707,3 +707,9 @@
 - PR #17 remains Draft/open/unmerged; GitHub reports mergeable=true. No rebase or merge performed.
 - Validation covers deterministic code paths only. It does not yet validate a live BingX capture, a merged real-data DB, or predictive profitability. Next: conduct a small read-only capture using the v2 collector, inspect row counts and per-capture isolation in the resulting DB, then run the multi-day coverage gate before any long collection.
 - Production main, production DB, credentials, deployment, strategy/risk settings, and exchange orders remain untouched.
+
+
+## 2026-11-25 — mixed legacy/v2 merge-order regression added (PR #17)
+- Added a regression test with a legacy capture as the first merge input and a v2 capture as the second. This specifically validates that the merger creates additive v2 destination tables from a legacy first input and then copies the second capture's version marker and per-capture minute aggregate without dropping it.
+- Test commit: 5fbc57d99c420411916dba27b76ce3d2d805e8da. Exact-head CI is queued/in progress; prior 119-pass result applies to the preceding head only, not this new test commit.
+- PR #17 remains Draft/open/unmerged. No production changes or data collection have been started by this test-only addition.
