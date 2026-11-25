@@ -87,3 +87,9 @@ def test_replay_requires_all_strategy_timeframes():
     frames.pop("4h")
     with pytest.raises(ValueError, match="missing timeframes"):
         replay_strategy_b({"BTC-USDT": frames}, signal_builder=lambda *a, **k: None)
+
+def test_default_replay_loads_production_builder_without_starting_bot():
+    result = replay_strategy_b({"BTC-USDT": _all_frames()})
+    assert result["production_strategy_version"] == "10.2.2"
+    assert len(result["production_main_sha256"]) == 64
+    assert result["status"] in {"evaluated", "no_signals"}
