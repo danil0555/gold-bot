@@ -218,3 +218,33 @@ def test_replay_cooldown_is_separate_for_long_and_short_sides():
     assert len(longs) >= 2 and len(shorts) >= 2
     assert longs[1]["signal_ts"] - longs[0]["signal_ts"] == 32 * 60_000
     assert shorts[1]["signal_ts"] - shorts[0]["signal_ts"] == 32 * 60_000
+
+
+
+def test_default_builder_rejection_diagnostics_are_aggregated(monkeypatch):
+    calls = 0
+
+    def builder(market, symbol, frames, quote=None, diagnostics=None):
+        nonlocal calls
+        calls += 1
+        diagnostics["reason"] = (
+            "trend_alignment_failed" if calls % 2 else "missing_structure"
+        )
+        diagnostics["stage"] = "strategy_filter"
+        return None
+
+    monkeypatch.setattr(
+        "scripts.strategy_b_replay._load_production_builder",
+        lambda: (builder, "10.2.2", "a" * 64, "b" * 64, 30),
+    )
+    result = replay_strategy_b({"BTC-USDT": _all_frames()})
+
+    assert result["status"] == "no_signals"
+    assert result["diagnostics"]["no_signal"] == calls
+    assert result["diagnostics"]["builder_rejection_reasons"] == {
+        "trend_alignment_failed": (calls + 1) // 2,
+        "missing_structure": calls // 2,
+    }
+    assert result["diagnostics"]["builder_rejection_stages"] == {
+        "strategy_filter": calls,
+    }
