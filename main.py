@@ -1544,7 +1544,6 @@ def signal_text(signal):
     if not isinstance(reasons, (list, tuple)):
         reasons = [part.strip() for part in str(reasons).split(";") if part.strip()]
     reasons_text = "\n".join(f"• {html.escape(str(item))}" for item in reasons if item) or "—"
-    side = "🟢 LONG" if is_long_side(signal["side"]) else "🔴 SHORT"
     mode = "Вход от зоны" if signal.get("entry_mode") == "level" else "Рыночный вход"
     validity = format_moscow_from_utc(signal.get("expires_at")) if signal.get("expires_at") else "—"
     zone_block = ""
