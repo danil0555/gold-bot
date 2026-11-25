@@ -664,3 +664,11 @@
 - Log confirms Python compilation and runtime safe-default import passed; the full deterministic research/strategy suite completed with **115 passed in 2.00s**. The public spot/perpetual smoke and 180-day backtest steps were skipped as intended for a PR targeting the research base.
 - The tested head includes the collector `close()` finally-cleanup change and regression test for a simulated final-flush exception. A failed flush leaves `ended_at_ms` NULL and closes the SQLite handle.
 - PR #14 remains Draft/open/unmerged and GitHub reports mergeable=true. No production changes, live DB access, deployment or exchange orders.
+
+
+## 2026-11-25 — Portfolio risk helper groundwork (PR #16)
+- Added `scripts/portfolio_risk.py`, a pure Decimal-based helper that checks open-position remaining stop-risk plus a proposed trade against an explicit portfolio risk cap.
+- It counts only records explicitly marked `confirmed=True` and `status='OPEN'`; requires `remaining_risk_usdt` for every counted position; rejects negative, NaN, infinite or malformed risk inputs; and fails closed if a confirmed open record lacks risk data.
+- No default portfolio cap is selected. The helper is not integrated into signal delivery because current bot code does not maintain a reliable registry of user-confirmed positions, actual entries, remaining quantities, partial exits and current stops. It is groundwork only and does not block or alter signals.
+- Added `tests/test_portfolio_risk.py` and included it in the PR #16 CI command. Exact-head CI run `45682161967` for commit `7b89900a38ebf096e57b841a31589b0848a564a2` is running; compilation has passed and dependency installation was still in progress at the last check. No test pass is claimed yet.
+- PR #16 remains Draft/open/unmerged. GitHub currently reports mergeable=true. Production `main`, live database, deployment, credentials and exchange orders remain untouched.
