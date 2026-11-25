@@ -176,3 +176,50 @@ def test_multiple_individually_valid_signals_can_stack_risk():
     assert all(item["risk_usdt"] == pytest.approx(100) for item in signals)
     assert sum(item["risk_usdt"] for item in signals) == pytest.approx(300)
     assert sum(item["risk_usdt"] for item in signals) == pytest.approx(30 * balance / 100)
+
+
+@pytest.mark.parametrize("side", ["", "BUYSELL", "SIDEWAYS", None])
+def test_bingx_constraint_check_rejects_unknown_side(side):
+    from scripts.position_sizing import apply_bingx_contract_constraints
+
+    result = apply_bingx_contract_constraints(
+        {"quantity": 1, "entry_price": 100, "stop_distance": 2},
+        {"quantity_precision": 2}, side, 5,
+    )
+    assert result["validated"] is False
+    assert result["reasons"] == ["invalid_side"]
+
+
+@pytest.mark.parametrize("leverage", [0, -1, "NaN", "Infinity", None, "invalid"])
+def test_bingx_constraint_check_rejects_invalid_leverage(leverage):
+    from scripts.position_sizing import apply_bingx_contract_constraints
+
+    result = apply_bingx_contract_constraints(
+        {"quantity": 1, "entry_price": 100, "stop_distance": 2},
+        {"quantity_precision": 2}, "LONG", leverage,
+    )
+    assert result["validated"] is False
+    assert result["reasons"] == ["invalid_leverage"]
+
+
+@pytest.mark.parametrize("precision", [-1, 19, 2.5, True, "2", None])
+def test_bingx_constraint_check_rejects_invalid_precision(precision):
+    from scripts.position_sizing import apply_bingx_contract_constraints
+
+    result = apply_bingx_contract_constraints(
+        {"quantity": 1, "entry_price": 100, "stop_distance": 2},
+        {"quantity_precision": precision}, "LONG", 5,
+    )
+    assert result["validated"] is False
+    assert result["reasons"] == ["unknown_or_invalid_quantity_precision"]
+
+
+def test_bingx_constraint_check_fails_closed_on_non_finite_sizing_data():
+    from scripts.position_sizing import apply_bingx_contract_constraints
+
+    result = apply_bingx_contract_constraints(
+        {"quantity": "NaN", "entry_price": 100, "stop_distance": 2},
+        {"quantity_precision": 2}, "LONG", 5,
+    )
+    assert result["validated"] is False
+    assert result["reasons"] == ["invalid_sizing_or_contract_metadata"]
