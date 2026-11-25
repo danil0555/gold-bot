@@ -189,3 +189,37 @@ def test_merge_upgrades_older_capture_observation_check_constraint(tmp_path):
             "INSERT INTO capture_observations VALUES (?, ?, ?, ?)",
             ("post-merge", "", 999, "session"),
         )
+
+
+def test_merge_preserves_capture_scoped_feature_rows(tmp_path):
+    from scripts.market_data_collector import MarketMinuteAggregator
+
+    source_a = tmp_path / "capture-a.sqlite3"
+    source_b = tmp_path / "capture-b.sqlite3"
+    output = tmp_path / "merged.sqlite3"
+    aggs = [
+        MarketMinuteAggregator(str(source_a), symbols=["BTC-USDT"]),
+        MarketMinuteAggregator(str(source_b), symbols=["BTC-USDT"]),
+    ]
+    try:
+        now_ms = int(__import__("time").time() * 1000)
+        minute_ts = (now_ms // 60_000 - 1) * 60_000
+        for agg, price in zip(aggs, (100.0, 200.0)):
+            agg.process_trade({
+                "s": "BTC-USDT", "t": f"trade-{price}", "T": minute_ts + 10_000,
+                "p": str(price), "q": "1", "m": False,
+            })
+            agg.flush_before(now_ms)
+        ids = {agg.capture_id for agg in aggs}
+    finally:
+        for agg in aggs:
+            agg.close()
+    report = merge_databases([source_a, source_b], output)
+    with sqlite3.connect(output) as db:
+        rows = db.execute(
+            "SELECT capture_id,buy_quote_usdt FROM capture_minute_features "
+            "WHERE minute_ts=? ORDER BY capture_id", (minute_ts,)
+        ).fetchall()
+    assert {row[0] for row in rows} == ids
+    assert {row[1] for row in rows} == {100.0, 200.0}
+    assert report["rows_after"]["capture_minute_features"] == 2
