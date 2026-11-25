@@ -167,7 +167,7 @@ def evaluate_multiday_coverage(
             "session_attribution_ambiguous": bool(overlapping_capture_ids),
             "attribution_source": (
                 "capture_scoped_rows_v2" if capture_id in scoped_capture_ids
-                else "capture_observation_links_v1" if capture_id in exact_capture_ids
+                else "capture_observations" if capture_id in exact_capture_ids
                 else "time_window_estimate_legacy_session"
             ),
             "symbols": per_session,
