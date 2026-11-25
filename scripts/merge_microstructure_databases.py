@@ -12,9 +12,13 @@ import json
 import sqlite3
 from pathlib import Path
 
-TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events", "collector_sessions", "capture_observations")
+TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events", "collector_sessions", "capture_observations", "capture_storage_versions", "capture_minute_features", "capture_minute_candles", "capture_derivatives_snapshots")
 REQUIRED_TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events")
-KEYED_TABLES = ("minute_candles", "minute_features", "derivatives_snapshots")
+KEYED_TABLES = (
+    "minute_candles", "minute_features", "derivatives_snapshots",
+    "collector_sessions", "capture_observations", "capture_storage_versions",
+    "capture_minute_features", "capture_minute_candles", "capture_derivatives_snapshots",
+)
 
 
 def _columns(connection: sqlite3.Connection, table: str, schema: str = "main") -> list[str]:
@@ -63,6 +67,41 @@ def _ensure_capture_observations_schema(connection: sqlite3.Connection) -> None:
         connection.execute("DROP TABLE capture_observations_legacy")
 
 
+def _ensure_capture_scoped_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript("""
+        CREATE TABLE IF NOT EXISTS capture_storage_versions (
+            capture_id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL CHECK (schema_version >= 2)
+        );
+        CREATE TABLE IF NOT EXISTS capture_minute_features (
+            capture_id TEXT NOT NULL, symbol TEXT NOT NULL, minute_ts INTEGER NOT NULL,
+            trades_count INTEGER NOT NULL DEFAULT 0, buy_trades INTEGER NOT NULL DEFAULT 0,
+            sell_trades INTEGER NOT NULL DEFAULT 0, buy_quote_usdt REAL NOT NULL DEFAULT 0,
+            sell_quote_usdt REAL NOT NULL DEFAULT 0, cvd_quote_usdt REAL NOT NULL DEFAULT 0,
+            taker_imbalance REAL, avg_spread_bps REAL, min_spread_bps REAL, max_spread_bps REAL,
+            avg_bid_depth5_usdt REAL, avg_ask_depth5_usdt REAL,
+            avg_bid_depth20_usdt REAL, avg_ask_depth20_usdt REAL,
+            avg_book_imbalance5 REAL, avg_book_imbalance20 REAL,
+            avg_microprice_offset_bps REAL, depth_samples INTEGER NOT NULL DEFAULT 0,
+            last_mid REAL,
+            PRIMARY KEY(capture_id, symbol, minute_ts)
+        );
+        CREATE TABLE IF NOT EXISTS capture_minute_candles (
+            capture_id TEXT NOT NULL, symbol TEXT NOT NULL, minute_ts INTEGER NOT NULL,
+            close_ts INTEGER NOT NULL, open REAL NOT NULL, high REAL NOT NULL,
+            low REAL NOT NULL, close REAL NOT NULL, volume REAL NOT NULL,
+            is_closed INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(capture_id, symbol, minute_ts)
+        );
+        CREATE TABLE IF NOT EXISTS capture_derivatives_snapshots (
+            capture_id TEXT NOT NULL, symbol TEXT NOT NULL, ts_ms INTEGER NOT NULL,
+            open_interest_base REAL, funding_rate REAL, mark_price REAL,
+            index_price REAL, next_funding_time INTEGER,
+            PRIMARY KEY(capture_id, symbol, ts_ms)
+        );
+    """)
+
+
 def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
     sources = [Path(item).resolve() for item in inputs]
     target = Path(output).resolve()
@@ -103,6 +142,7 @@ def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
         )
     """)
     _ensure_capture_observations_schema(destination)
+    _ensure_capture_scoped_schema(destination)
     destination.commit()
     before = {
         table: int(destination.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
@@ -166,7 +206,12 @@ def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
 def _count_rows(path: Path, table: str) -> int:
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
-        return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        # Older collector captures legitimately predate optional v2 tables.
+        return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) if exists else 0
     finally:
         connection.close()
 

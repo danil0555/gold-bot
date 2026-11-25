@@ -189,3 +189,92 @@ def test_merge_upgrades_older_capture_observation_check_constraint(tmp_path):
             "INSERT INTO capture_observations VALUES (?, ?, ?, ?)",
             ("post-merge", "", 999, "session"),
         )
+
+
+def test_merge_preserves_capture_scoped_feature_rows(tmp_path):
+    from scripts.market_data_collector import MarketMinuteAggregator
+
+    source_a = tmp_path / "capture-a.sqlite3"
+    source_b = tmp_path / "capture-b.sqlite3"
+    output = tmp_path / "merged.sqlite3"
+    aggs = [
+        MarketMinuteAggregator(str(source_a), symbols=["BTC-USDT"]),
+        MarketMinuteAggregator(str(source_b), symbols=["BTC-USDT"]),
+    ]
+    try:
+        now_ms = int(__import__("time").time() * 1000)
+        minute_ts = (now_ms // 60_000 - 1) * 60_000
+        for agg, price in zip(aggs, (100.0, 200.0)):
+            agg.process_trade({
+                "s": "BTC-USDT", "t": f"trade-{price}", "T": minute_ts + 10_000,
+                "p": str(price), "q": "1", "m": False,
+            })
+            agg.flush_before(now_ms)
+        ids = {agg.capture_id for agg in aggs}
+    finally:
+        for agg in aggs:
+            agg.close()
+    report = merge_databases([source_a, source_b], output)
+    with sqlite3.connect(output) as db:
+        rows = db.execute(
+            "SELECT capture_id,buy_quote_usdt FROM capture_minute_features "
+            "WHERE minute_ts=? ORDER BY capture_id", (minute_ts,)
+        ).fetchall()
+    assert {row[0] for row in rows} == ids
+    assert {row[1] for row in rows} == {100.0, 200.0}
+    assert report["rows_after"]["capture_minute_features"] == 2
+
+
+def test_legacy_capture_row_count_treats_missing_optional_table_as_zero(tmp_path):
+    from scripts.merge_microstructure_databases import _count_rows
+
+    path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE minute_candles (symbol TEXT, minute_ts INTEGER)")
+        db.execute("INSERT INTO minute_candles VALUES ('BTC-USDT', 1)")
+    assert _count_rows(path, "minute_candles") == 1
+    assert _count_rows(path, "capture_minute_features") == 0
+
+
+def test_merge_legacy_first_then_v2_capture_preserves_scoped_payloads(tmp_path):
+    from scripts.market_data_collector import MarketMinuteAggregator
+
+    legacy = tmp_path / "legacy-first.sqlite3"
+    modern = tmp_path / "v2-second.sqlite3"
+    output = tmp_path / "mixed-merge.sqlite3"
+    # Build a v1-shaped capture using the real collector schema, then
+    # remove only the v2 tables to model an older collector database.
+    legacy_agg = MarketMinuteAggregator(str(legacy), symbols=["BTC-USDT"])
+    legacy_agg.close()
+    with sqlite3.connect(legacy) as db:
+        for table in (
+            "capture_storage_versions", "capture_minute_features",
+            "capture_minute_candles", "capture_derivatives_snapshots",
+        ):
+            db.execute(f"DROP TABLE {table}")
+
+    agg = MarketMinuteAggregator(str(modern), symbols=["BTC-USDT"])
+    try:
+        now_ms = int(__import__("time").time() * 1000)
+        minute_ts = (now_ms // 60_000 - 1) * 60_000
+        agg.process_trade({
+            "s": "BTC-USDT", "t": "v2-trade", "T": minute_ts + 10_000,
+            "p": "123", "q": "2", "m": False,
+        })
+        agg.flush_before(now_ms)
+        capture_id = agg.capture_id
+    finally:
+        agg.close()
+
+    report = merge_databases([legacy, modern], output)
+    with sqlite3.connect(output) as db:
+        rows = db.execute(
+            "SELECT capture_id,buy_quote_usdt FROM capture_minute_features"
+        ).fetchall()
+        version = db.execute(
+            "SELECT schema_version FROM capture_storage_versions WHERE capture_id=?",
+            (capture_id,),
+        ).fetchone()
+    assert rows == [(capture_id, 246.0)]
+    assert version == (2,)
+    assert report["rows_after"]["capture_minute_features"] == 1

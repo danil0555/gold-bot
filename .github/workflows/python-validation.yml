@@ -6,9 +6,9 @@ concurrency:
 
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model, research/market-feature-ablation, research/market-walkforward-regimes, research/directional-microstructure-scoring, research/market-discovery-engine-v1, research/multiday-coverage-gate-v2, research/capture-observation-provenance-v1]
+    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model, research/market-feature-ablation, research/market-walkforward-regimes, research/directional-microstructure-scoring, research/market-discovery-engine-v1, research/multiday-coverage-gate-v2, research/capture-observation-provenance-v1, research/capture-scoped-storage-v2]
   pull_request:
-    branches: [main, research/multiday-coverage-gate-v2]
+    branches: [main, research/multiday-coverage-gate-v2, research/capture-observation-provenance-v1]
   workflow_dispatch:
 
 jobs:
@@ -33,7 +33,7 @@ jobs:
           BACKUP_DIR: /tmp/trading_bot_ci_backups
         run: python -c "import main; assert main.REAL_TRADING_ENABLED is False; assert main.ENABLE_ADDON_STRATEGIES is False; assert main.RISK_PERCENT == 2.0; assert main.FUTURES_LEVERAGE == 5; print('runtime import OK; real orders OFF; add-ons OFF')"
       - name: Run deterministic strategy and research tests
-        run: python -m pytest -q tests/test_addon_strategies.py tests/test_spot_futures_arb.py tests/test_backtest_spot_futures_arb.py tests/test_scalping_100.py tests/test_market_research.py tests/test_market_walkforward.py tests/test_market_data_collector.py tests/test_microstructure_event_study.py tests/test_microstructure_data_quality.py tests/test_microstructure_discovery.py tests/test_market_move_discovery.py tests/test_market_pattern_mining.py tests/test_market_pattern_holdout.py tests/test_merge_microstructure_databases.py tests/test_multiday_coverage_gate.py
+        run: python -m pytest -q tests/test_addon_strategies.py tests/test_spot_futures_arb.py tests/test_backtest_spot_futures_arb.py tests/test_scalping_100.py tests/test_market_research.py tests/test_market_walkforward.py tests/test_market_data_collector.py tests/test_microstructure_event_study.py tests/test_microstructure_data_quality.py tests/test_microstructure_discovery.py tests/test_market_move_discovery.py tests/test_market_pattern_mining.py tests/test_market_pattern_holdout.py tests/test_merge_microstructure_databases.py tests/test_multiday_coverage_gate.py tests/test_validate_capture_db.py
       - name: Run read-only public BingX spot-perpetual smoke scan
         if: (github.event_name == 'pull_request' && github.base_ref == 'main') || github.ref == 'refs/heads/research/spot-futures-arbitrage'
         run: python -m scripts.spot_futures_arb --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --notional 1000 --funding-periods 3
@@ -66,19 +66,22 @@ jobs:
           path: research-output/market_research_180d.json
           if-no-files-found: warn
       - name: Run 3-minute read-only BingX microstructure smoke collection
-        if: (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1')
+        if: (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1' || github.ref == 'refs/heads/research/capture-scoped-storage-v2')
         continue-on-error: true
         run: python -m scripts.market_data_collector --symbols BTC-USDT,ETH-USDT --duration-hours 0.05 --derivatives-interval 30 --db-path /tmp/market_microstructure.sqlite3
         timeout-minutes: 5
+      - name: Validate capture-scoped v2 smoke database
+        if: github.ref == 'refs/heads/research/capture-scoped-storage-v2'
+        run: python -m scripts.validate_capture_db --db /tmp/market_microstructure.sqlite3
       - name: Upload microstructure smoke database
-        if: always() && (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1')
+        if: always() && (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1' || github.ref == 'refs/heads/research/capture-scoped-storage-v2')
         uses: actions/upload-artifact@v4
         with:
           name: bingx-microstructure-smoke
           path: /tmp/market_microstructure.sqlite3
           if-no-files-found: warn
       - name: Run microstructure event-study pipeline on smoke data
-        if: (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1')
+        if: (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1' || github.ref == 'refs/heads/research/capture-scoped-storage-v2')
         run: python -m scripts.microstructure_event_study --db /tmp/market_microstructure.sqlite3 --output research-output/microstructure_event_study.json
       - name: Run pre-event market move discovery on smoke data
         if: github.ref == 'refs/heads/research/market-discovery-engine-v1'
@@ -101,7 +104,7 @@ jobs:
           path: research-output/market_move_discovery.json
           if-no-files-found: warn
       - name: Upload microstructure event-study report
-        if: always() && (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1')
+        if: always() && (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1' || github.ref == 'refs/heads/research/capture-scoped-storage-v2')
         uses: actions/upload-artifact@v4
         with:
           name: microstructure-event-study-smoke
