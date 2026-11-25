@@ -1,3 +1,8 @@
+## 2026-11-25 — execution model follow-up
+- Corrected the evaluator's methodology text to describe the actual OPEN-time candle lookup precisely: signal candle close is timestamp `signal_ts`; entry is the close of the candle opening at `signal_ts`; exit is the close of the candle opening at `signal_ts + horizon_minutes`.
+- The recorded execution times are those candle closes, one minute after each corresponding OPEN timestamp.
+- The old evaluator methodology statement was stale after the timestamp fix; corrected to prevent future confusion.
+- Current validation status: workflow file includes both affected test modules in its deterministic test command, and the research branch is configured for push validation. The connector's status endpoint currently returns no status checks for the latest head, so tests are not yet claimed as passed.
 ## 2026-11-25 — Corrected backtest execution timestamp convention
 - Audit found a one-minute forward shift in the close-to-close evaluator: signal timestamps represent the signal candle close, but the lookup used candle OPEN keys at signal_ts+1m for the entry close. Because each row's price is that candle's close, this selected the close one full minute too late.
 - Corrected lookup: entry price is the close of the candle with open timestamp `signal_ts`; exit price is the close of the candle with open timestamp `signal_ts + horizon_minutes*60_000`. Recorded execution timestamps remain the corresponding candle close times (`signal_ts+1m` and plus horizon).
