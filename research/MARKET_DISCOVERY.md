@@ -73,3 +73,12 @@ python -m pytest -q tests/test_microstructure_discovery.py
 - Added a configurable minimum of 120 closed minutes per symbol per UTC date (default), included per-day counts and undercovered-date diagnostics in the report, and made any undercovered observed date block `holdout_ready`.
 - This remains a history-sufficiency check, not a continuous-coverage or data-quality certification. Capture-session breaks and within-session gaps still require separate diagnostics because the current table does not encode session identity.
 - Added regression tests for sparse dates and invalid daily thresholds. Research-only; no production files, database, credentials, deployment or exchange orders changed.
+
+
+## 2026-11-25 — explicit collector session metadata and gap diagnostics
+- Collector creates a unique capture session row with start/end UTC epoch milliseconds and the exact symbol list, plus start/stop diagnostic events.
+- Database merger carries `collector_sessions` metadata and remains backward-compatible with older captures that lack the table.
+- Multi-day coverage report emits per-session, per-symbol candle counts, maximum internal gap and number of internal gaps. These are diagnostics only; they do not yet block holdout readiness.
+- Regression tests cover session diagnostics, sparse UTC dates and legacy-capture compatibility.
+- Next: validate the exact branch through CI before relying on this metadata in another research run. Consider a strict gap gate only after inspecting real within-session gap distributions.
+- Research-only: production code, production DB, credentials, deployment and exchange orders untouched.
