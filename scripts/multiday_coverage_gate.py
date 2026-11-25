@@ -57,6 +57,19 @@ def evaluate_multiday_coverage(
                     "WHERE observation_type='session'"
                 ).fetchall()
             }
+        scoped_storage_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='capture_storage_versions'"
+        ).fetchone() is not None
+        scoped_capture_ids = set()
+        if scoped_storage_exists:
+            scoped_capture_ids = {
+                str(row[0]) for row in db.execute(
+                    "SELECT capture_id FROM capture_storage_versions WHERE schema_version >= 2"
+                ).fetchall()
+            }
+        scoped_candles_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='capture_minute_candles'"
+        ).fetchone() is not None
         daily_rows = db.execute("""
             SELECT symbol, date(minute_ts / 1000, 'unixepoch'),
                    COUNT(DISTINCT minute_ts), MIN(minute_ts), MAX(minute_ts)
@@ -107,7 +120,15 @@ def evaluate_multiday_coverage(
                 start_minute = int(started_at_ms) // 60_000 * 60_000
                 end_value = int(ended_at_ms) if ended_at_ms is not None else int(time.time() * 1000)
                 end_minute = end_value // 60_000 * 60_000
-                if capture_id in exact_capture_ids:
+                if capture_id in scoped_capture_ids and scoped_candles_exists:
+                    timestamps = [
+                        int(row[0]) for row in session_db.execute(
+                            "SELECT minute_ts FROM capture_minute_candles "
+                            "WHERE capture_id=? AND symbol=? AND is_closed=1 ORDER BY minute_ts",
+                            (capture_id, symbol),
+                        ).fetchall()
+                    ]
+                elif capture_id in exact_capture_ids:
                     timestamps = [
                         int(row[0]) for row in session_db.execute(
                             "SELECT observed_at_ms FROM capture_observations "
@@ -145,7 +166,8 @@ def evaluate_multiday_coverage(
             "overlapping_capture_ids": sorted(overlapping_capture_ids),
             "session_attribution_ambiguous": bool(overlapping_capture_ids),
             "attribution_source": (
-                "capture_observations" if capture_id in exact_capture_ids
+                "capture_scoped_rows_v2" if capture_id in scoped_capture_ids
+                else "capture_observation_links_v1" if capture_id in exact_capture_ids
                 else "time_window_estimate_legacy_session"
             ),
             "symbols": per_session,
