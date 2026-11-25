@@ -394,4 +394,5 @@
 - Trial counts are aggregated across folds with an explicit warning: expanding training windows overlap, so folds are dependent and these counts are not a multiple-testing correction. The output remains exploratory, not a strategy approval.
 - Added deterministic tests for expanding training windows, non-overlapping holdouts, purge separation, recurrence aggregation, trial counts and rejection of overlapping-fold configurations.
 - Validation: latest-head CI is required; no research performance or profitability claim is made.
+- Follow-up hardening: rolling evaluation now discards a trailing fragment shorter than one full holdout window rather than reporting a tiny partial fold. The collector kline test now uses one fixed timestamp safely in the past, avoiding a wall-clock boundary race in its closed-candle assertion.
 - Production `main`, `trading_bot_v9.db`, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
