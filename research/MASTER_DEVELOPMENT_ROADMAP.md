@@ -584,6 +584,6 @@
 
 ## 2026-11-25 — production diagnostics HTML safety (separate review PR)
 - Audited the existing allowlisted `/diag_db` handler in production `main.py`. Dynamic SQLite diagnostic values were interpolated directly into Telegram HTML, and raw exception text was echoed to the user. A table name containing HTML-significant characters could make Telegram reject the diagnostic message; exception text could also leak implementation/database details or break parsing.
-- Prepared a minimal presentation/security hardening change on isolated branch `fix/diag-db-html-safety` (PR to be opened separately): HTML-escape every dynamic value and return a generic failure message while retaining full details in server logs.
+- Prepared a minimal presentation/security hardening change on isolated branch `fix/diag-db-html-safety`, Draft PR #15: https://github.com/danil0555/gold-bot/pull/15. HTML-escape every dynamic value and return a generic failure message while retaining full details in server logs. CI has not yet reported a run for this exact head.
 - No SQL, DB access mode, schema, query, allowlist, strategy, risk, signal generation, credentials, deployment or order behavior is changed by this patch.
 - Keep the change isolated for review; do not merge or deploy until the complete CI result and code review are satisfactory.
