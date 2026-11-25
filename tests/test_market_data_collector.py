@@ -204,11 +204,11 @@ def test_market_observations_are_linked_to_capture_session():
         now_ms = int(__import__("time").time() * 1000)
         current_minute = now_ms // 60_000 * 60_000
         agg.process_trade({
-            "s": "BTC-USDT", "t": "trade-1", "T": current_minute - 10_000,
+            "s": "BTC-USDT", "t": "trade-1", "T": current_minute - 50_000,
             "p": "100", "q": "1", "m": False,
         })
         agg.flush_before(now_ms)
-        close_ts = (current_minute - 60_000) - 1
+        close_ts = current_minute - 1
         assert agg.save_candle("BTC-USDT", {
             "t": current_minute - 60_000, "T": close_ts,
             "o": "100", "h": "102", "l": "99", "c": "101", "v": "1",
