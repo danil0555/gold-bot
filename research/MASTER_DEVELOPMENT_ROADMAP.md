@@ -1,3 +1,13 @@
+## 2026-11-25 — Strategy B replay adapter hardening
+- Audited the replay adapter against both production `main.py` and the research-branch copy. The complete `build_signal_b` function body is byte-for-byte identical in the two checked files; the research branch's full `main.py` differs because of unrelated Spot–Futures/UI and reliability changes. Therefore a full-file hash must not be mislabeled as a production-source hash.
+- Renamed replay provenance fields to `checked_out_bot_version` and `checked_out_main_sha256`; added `strategy_builder_sha256` as a separate fingerprint of the exact imported `build_signal_b` source.
+- Hardened signal validation: only BUY/SELL are accepted; required numeric fields must be finite and positive; SL/entry/TP ordering must be directionally valid; malformed quote objects and non-mapping builder results are rejected. This prevents unknown sides from silently becoming SHORT trades.
+- Added deterministic tests for invalid side, inconsistent price ordering, non-finite output and a valid SHORT signal.
+- Verified the execution evaluator uses signal close + 1 minute as entry and exact-horizon close as exit; this matches the replay's decision timestamp convention.
+- Existing CI run `45574114071` passed deterministic tests on its own checked-out SHA, but it is not evidence for the current PR #12 head `d952f70a`. New CI for the new commits is required.
+- The four-hour public BingX capture `45573371850` remains in progress and has no artifacts yet. No performance conclusions can be drawn.
+- Production branch, database, credentials, deployment and exchange orders remain untouched; PR #12 remains Draft and unmerged.
+- Next: commit the validation hardening, confirm CI on the resulting PR #12 head, then validate multi-timeframe historical candle coverage before any Strategy B replay.
 ## 2026-11-25 — per-symbol multi-day holdout coverage gate
 - Roadmap audit identified a weakness in the capture workflow: holdout readiness used pooled distinct-minute/date counts across the entire merged database. A well-covered symbol could therefore hide inadequate history for another symbol.
 - Added read-only `scripts/multiday_coverage_gate.py`. It checks every observed symbol independently and also checks all explicitly expected symbols from the current capture configuration. Each must meet at least 600 closed one-minute candles and 3 distinct UTC dates before the multi-day holdout pipeline is allowed to run.
