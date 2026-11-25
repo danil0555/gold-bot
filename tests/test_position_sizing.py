@@ -46,7 +46,6 @@ def test_rejects_non_finite_inputs():
 
 
 def test_parse_bingx_contract_metadata():
-    from decimal import Decimal
     from scripts.position_sizing import parse_bingx_contract_specs
 
     specs = parse_bingx_contract_specs({
@@ -71,7 +70,6 @@ def test_parse_bingx_contract_metadata():
 
 
 def test_bingx_quantity_rounds_down_and_recalculates_risk():
-    from decimal import Decimal
     from scripts.position_sizing import apply_bingx_contract_constraints
 
     result = apply_bingx_contract_constraints(
@@ -88,13 +86,13 @@ def test_bingx_quantity_rounds_down_and_recalculates_risk():
     )
     assert result["validated"] is True
     assert result["quantity"] == Decimal("1.234")
+    assert result["quantity_precision"] == 3
     assert result["notional_usdt"] == Decimal("123.400")
     assert result["risk_usdt"] == Decimal("2.468")
     assert result["margin_usdt"] == Decimal("24.680")
 
 
 def test_bingx_rejects_quantity_below_minimum_after_rounding():
-    from decimal import Decimal
     from scripts.position_sizing import apply_bingx_contract_constraints
 
     result = apply_bingx_contract_constraints(
