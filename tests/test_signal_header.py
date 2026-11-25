@@ -1,11 +1,13 @@
 """Regression tests for the direction-first Telegram signal heading."""
 
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("BOT_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
 os.environ.setdefault("DB_PATH", "/tmp/trading_bot_signal_header_test.db")
 os.environ.setdefault("BACKUP_DIR", "/tmp/trading_bot_signal_header_backups")
 
+import main
 from main import FUTURES_LEVERAGE, RISK_PERCENT, signal_text
 
 
@@ -56,3 +58,20 @@ def test_signal_warns_when_required_margin_exceeds_balance():
     signal["sl"] = 99.8
     rendered = signal_text(signal, balance_usdt=1000.0)
     assert "Не хватает баланса под расчётную маржу" in rendered
+
+
+def test_user_balance_is_saved_per_user_in_additive_profile_table(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "risk_profiles.sqlite3")
+    monkeypatch.setattr(main, "BACKUP_DIR", tmp_path / "backups")
+    main.BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+    main.init_db()
+    main.register_user(SimpleNamespace(id=101, username="first"))
+    main.register_user(SimpleNamespace(id=202, username="second"))
+    main.set_user_balance(101, 1234.5)
+
+    assert main.get_user_balance(101) == 1234.5
+    assert main.get_user_balance(202) is None
+    with main.db() as con:
+        violations = con.execute("PRAGMA foreign_key_check").fetchall()
+    assert violations == []
