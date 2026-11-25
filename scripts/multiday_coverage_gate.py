@@ -55,12 +55,38 @@ def evaluate_multiday_coverage(
             ORDER BY symbol, date(minute_ts / 1000, 'unixepoch')
         """).fetchall()
 
-    session_coverage = []
+    now_ms = int(time.time() * 1000)
+    parsed_sessions = []
     for capture_id, started_at_ms, ended_at_ms, symbols_json in sessions:
         try:
-            session_symbols = json.loads(symbols_json)
+            session_symbols = sorted(set(json.loads(symbols_json)))
         except (TypeError, ValueError):
             session_symbols = []
+        parsed_sessions.append({
+            "capture_id": str(capture_id),
+            "started_at_ms": int(started_at_ms),
+            "ended_at_ms": int(ended_at_ms) if ended_at_ms is not None else None,
+            "effective_end_ms": int(ended_at_ms) if ended_at_ms is not None else now_ms,
+            "symbols": session_symbols,
+        })
+
+    session_coverage = []
+    for session in parsed_sessions:
+        capture_id = session["capture_id"]
+        started_at_ms = session["started_at_ms"]
+        ended_at_ms = session["ended_at_ms"]
+        session_symbols = session["symbols"]
+        overlapping_capture_ids = []
+        for other in parsed_sessions:
+            if other["capture_id"] == capture_id:
+                continue
+            shares_symbols = bool(set(session_symbols) & set(other["symbols"]))
+            overlaps_time = (
+                started_at_ms <= other["effective_end_ms"]
+                and other["started_at_ms"] <= session["effective_end_ms"]
+            )
+            if shares_symbols and overlaps_time:
+                overlapping_capture_ids.append(other["capture_id"])
         per_session = {}
         for symbol in session_symbols:
             session_db = sqlite3.connect(
@@ -91,9 +117,12 @@ def evaluate_multiday_coverage(
                 "internal_gap_count": sum(1 for gap in gaps if gap > 0),
             }
         session_coverage.append({
-            "capture_id": str(capture_id),
-            "started_at_ms": int(started_at_ms),
-            "ended_at_ms": int(ended_at_ms) if ended_at_ms is not None else None,
+            "capture_id": capture_id,
+            "started_at_ms": started_at_ms,
+            "ended_at_ms": ended_at_ms,
+            "status": "closed" if ended_at_ms is not None else "open",
+            "overlapping_capture_ids": sorted(overlapping_capture_ids),
+            "session_attribution_ambiguous": bool(overlapping_capture_ids),
             "symbols": per_session,
         })
 
@@ -140,7 +169,17 @@ def evaluate_multiday_coverage(
 
     missing_symbols = sorted(set(expected_symbols or []) - set(observed))
     not_ready = [symbol for symbol, metrics in per_symbol.items() if not metrics["ready"]]
-    ready = bool(per_symbol) and not missing_symbols and not not_ready
+    open_capture_sessions = [
+        item["capture_id"] for item in session_coverage if item["status"] == "open"
+    ]
+    ambiguous_capture_sessions = [
+        item["capture_id"] for item in session_coverage
+        if item["session_attribution_ambiguous"]
+    ]
+    ready = (
+        bool(per_symbol) and not missing_symbols and not not_ready
+        and not open_capture_sessions
+    )
     return {
         "report_type": "multiday_holdout_coverage_gate_v1",
         "holdout_ready": ready,
@@ -154,10 +193,14 @@ def evaluate_multiday_coverage(
         "not_ready_symbols": not_ready,
         "per_symbol": per_symbol,
         "capture_session_count": len(session_coverage),
+        "open_capture_sessions": open_capture_sessions,
+        "ambiguous_capture_sessions": ambiguous_capture_sessions,
         "capture_sessions": session_coverage,
         "interpretation": (
-            "Daily history sufficiency only. This gate does not establish continuous coverage "
-            "or data quality, statistical significance, predictive value, or strategy profitability. "
+            "Daily history sufficiency only. An unclosed capture session blocks holdout readiness. "
+            "Overlapping sessions that share symbols have ambiguous candle attribution because "
+            "minute_candles are not keyed by capture_id. This gate does not establish continuous "
+            "coverage or data quality, statistical significance, predictive value, or profitability. "
             "Inspect capture-session boundaries and within-session gaps separately."
         ),
     }
