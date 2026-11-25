@@ -1,3 +1,8 @@
+## 2026-11-25 — Strategy B replay hardening commit record
+- `scripts/strategy_b_replay.py`: validation/provenance commit `e33fc5ca0c021bd14c66e2e14ea9c741cf8c8528`; finite-number validation cleanup `8a1feacecc245b5ddd8389a87df7d98ee9a4220a`.
+- `tests/test_strategy_b_replay.py`: regression tests commit `37a1e7d916232ac3f3167f82e78c0a26e664b5e4`.
+- Roadmap audit entry commit `15b5245eb7099ba809ef121ea32110d6b66f7ae3`.
+- Current PR #12 head after these commits: `8a1feacecc245b5ddd8389a87df7d98ee9a4220a`. PR remains Draft/open/unmerged. CI status for this exact SHA is not yet exposed by the available run/status lookup; do not infer success from the older successful run.
 ## 2026-11-25 — Strategy B replay adapter hardening
 - Audited the replay adapter against both production `main.py` and the research-branch copy. The complete `build_signal_b` function body is byte-for-byte identical in the two checked files; the research branch's full `main.py` differs because of unrelated Spot–Futures/UI and reliability changes. Therefore a full-file hash must not be mislabeled as a production-source hash.
 - Renamed replay provenance fields to `checked_out_bot_version` and `checked_out_main_sha256`; added `strategy_builder_sha256` as a separate fingerprint of the exact imported `build_signal_b` source.
