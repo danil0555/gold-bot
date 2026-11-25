@@ -1,3 +1,11 @@
+## 2026-11-25 — expose Strategy B trend-check rejection combinations
+- Extended the replay diagnostics to preserve the production builder's existing `trend_checks` string when trend alignment fails. The report now counts exact BUY/SELL sub-check combinations in addition to rejection reason and stage.
+- This distinguishes common alignment patterns (for example, 1H trend agrees but 5m momentum does not) without changing any trading condition or interpreting the combinations as causal probabilities.
+- Added a deterministic test for aggregation of two distinct trend-check states.
+- Commits: source `bfc5e46ec9a89c738074ca2d173854670c800455`; test `f5ca5aa93eb7280b0ceb498562b8b37c79b4140c`. PR #12 remains research-only; CI is not yet confirmed for this new head.
+- Production `main`, DB, hosting, credentials, deployment, and exchange orders remain untouched.
+- Next: obtain CI evidence for the new head, then evaluate per-symbol and per-regime rejection distributions on multi-day data before considering separate shadow-only filter experiments.
+
 ## 2026-11-25 — Strategy B replay rejection funnel diagnostics
 - Continued the planned frequency-versus-quality investigation without changing Strategy B rules, thresholds, signal output criteria, production code, or live behavior.
 - The historical replay now passes a diagnostics dictionary to the checked-out production `build_signal_b` and counts its existing rejection reasons and stages when no signal is produced. Injected test builders retain their prior call contract.
