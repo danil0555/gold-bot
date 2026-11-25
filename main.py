@@ -2342,8 +2342,11 @@ async def refresh_contract_specs() -> bool:
 
 async def contract_specs_refresh_loop() -> None:
     while True:
-        await asyncio.sleep(CONTRACT_SPECS_MAX_AGE_SEC)
-        await refresh_contract_specs()
+        if not contract_specs_updated_at or time.time() - contract_specs_updated_at > CONTRACT_SPECS_MAX_AGE_SEC:
+            await asyncio.sleep(300)
+            await refresh_contract_specs()
+        else:
+            await asyncio.sleep(CONTRACT_SPECS_MAX_AGE_SEC)
 
 
 async def on_startup() -> None:
