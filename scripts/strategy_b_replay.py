@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import inspect
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -160,7 +161,7 @@ def replay_strategy_b(
                     value = float(signal[key])
                 except (TypeError, ValueError, OverflowError) as exc:
                     raise ValueError(f"{symbol}: invalid signal field {key}") from exc
-                if not pd.notna(value) or not __import__("math").isfinite(value):
+                if not pd.notna(value) or not math.isfinite(value):
                     raise ValueError(f"{symbol}: non-finite signal field {key}")
                 levels[key] = value
             entry, sl, tp1, tp2 = (
