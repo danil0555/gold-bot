@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   capture:
@@ -30,11 +31,13 @@ jobs:
         env:
           SELECTED_BRANCH: ${{ github.ref_name }}
         run: |
-          test "$SELECTED_BRANCH" = "research/directional-microstructure-scoring"
+          test "$SELECTED_BRANCH" = "research/market-discovery-engine-v1"
           test -f scripts/market_data_collector.py
           test -f scripts/microstructure_event_study.py
           test -f scripts/microstructure_discovery.py
           test -f scripts/microstructure_data_quality.py
+          test -f scripts/market_move_discovery.py
+          test -f scripts/merge_microstructure_databases.py
           git log -1 --format='Checked out commit: %h %s'
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -76,6 +79,19 @@ jobs:
             --db /tmp/market_microstructure.sqlite3 \
             --cost-bps 12 \
             --output /tmp/microstructure_discovery.json
+      - name: Discover pre-event market move conditions
+        run: |
+          python -m scripts.market_move_discovery \
+            --db /tmp/market_microstructure.sqlite3 \
+            --output /tmp/market_move_discovery.json
+      - name: Upload pre-event market move discovery report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-move-pre-event-discovery
+          path: /tmp/market_move_discovery.json
+          retention-days: 14
+          if-no-files-found: warn
       - name: Audit capture data quality
         if: always()
         run: |
@@ -102,13 +118,92 @@ jobs:
           path: /tmp/microstructure_data_quality.json
           retention-days: 14
           if-no-files-found: warn
+      - name: Discover earlier successful captures and export run IDs
+        id: previous_ids
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_BRANCH: ${{ github.ref_name }}
+        run: |
+          # Seed with the verified 4.5-hour capture from the earlier research branch.
+          # Future successful captures on this branch are discovered automatically.
+          {
+            echo "45340723127"
+            gh run list --workflow microstructure-capture.yml \
+              --branch "$CURRENT_BRANCH" --status success --limit 20 \
+              --json databaseId --jq '.[].databaseId'
+          } | awk 'NF && !seen[$0]++' > /tmp/previous-run-ids.txt
+          {
+            echo "run_ids<<EOF"
+            tr '\n' ' ' < /tmp/previous-run-ids.txt
+            echo
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Previous successful capture runs selected:"
+          cat /tmp/previous-run-ids.txt
+      - name: Download earlier capture artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/previous-captures
+          while read -r run_id; do
+            [ -n "$run_id" ] || continue
+            mkdir -p "/tmp/previous-captures/$run_id"
+            gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+              --name bingx-microstructure-capture \
+              --dir "/tmp/previous-captures/$run_id"
+          done < /tmp/previous-run-ids.txt
+      - name: Merge current and earlier captures
+        run: |
+          mkdir -p /tmp/previous-captures
+          mapfile -t PREVIOUS_DATABASES < <(find /tmp/previous-captures -type f -name market_microstructure.sqlite3 | sort)
+          python -m scripts.merge_microstructure_databases \
+            --inputs /tmp/market_microstructure.sqlite3 "${PREVIOUS_DATABASES[@]}" \
+            --output /tmp/market_microstructure_merged.sqlite3 \
+            --report /tmp/microstructure_merge_report.json
+      - name: Check merged sample coverage and run frozen holdout
+        run: |
+          python -m scripts.multiday_coverage_gate \
+            --db /tmp/market_microstructure_merged.sqlite3 \
+            --output /tmp/multiday_coverage_gate.json \
+            --min-closed-minutes 600 \
+            --min-utc-days 3 \
+            --expected-symbols "${{ inputs.symbols }}"
+          ready=$(python -c 'import json; print("true" if json.load(open("/tmp/multiday_coverage_gate.json"))["holdout_ready"] else "false")')
+          if [ "$ready" = "true" ]; then
+            python -m scripts.market_move_discovery --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_move_discovery_multiday.json
+            python -m scripts.market_pattern_mining --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_patterns_multiday.json --min-support 5
+            python -m scripts.market_pattern_holdout --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_pattern_holdout_multiday.json --train-fraction 0.70 --min-support 5
+          else
+            echo "More daily captures are required before holdout analysis."
+          fi
+      - name: Upload multi-day coverage gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multiday-holdout-coverage-gate
+          path: /tmp/multiday_coverage_gate.json
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Upload merged multi-day research database
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bingx-microstructure-multiday-aggregate
+          path: |
+            /tmp/market_microstructure_merged.sqlite3
+            /tmp/microstructure_merge_report.json
+            /tmp/market_move_discovery_multiday.json
+            /tmp/market_patterns_multiday.json
+            /tmp/market_pattern_holdout_multiday.json
+          retention-days: 30
+          if-no-files-found: warn
       - name: Upload raw research database
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bingx-microstructure-capture
           path: /tmp/market_microstructure.sqlite3
-          retention-days: 14
+          retention-days: 30
           if-no-files-found: warn
       - name: Upload event-study report
         if: always()
