@@ -154,6 +154,37 @@ class MarketMinuteAggregator:
             ),
             PRIMARY KEY(capture_id, symbol, observed_at_ms, observation_type)
         );
+        CREATE TABLE IF NOT EXISTS capture_storage_versions (
+            capture_id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL CHECK (schema_version >= 2)
+        );
+        CREATE TABLE IF NOT EXISTS capture_minute_features (
+            capture_id TEXT NOT NULL,
+            symbol TEXT NOT NULL, minute_ts INTEGER NOT NULL,
+            trades_count INTEGER NOT NULL DEFAULT 0, buy_trades INTEGER NOT NULL DEFAULT 0,
+            sell_trades INTEGER NOT NULL DEFAULT 0, buy_quote_usdt REAL NOT NULL DEFAULT 0,
+            sell_quote_usdt REAL NOT NULL DEFAULT 0, cvd_quote_usdt REAL NOT NULL DEFAULT 0,
+            taker_imbalance REAL, avg_spread_bps REAL, min_spread_bps REAL, max_spread_bps REAL,
+            avg_bid_depth5_usdt REAL, avg_ask_depth5_usdt REAL,
+            avg_bid_depth20_usdt REAL, avg_ask_depth20_usdt REAL,
+            avg_book_imbalance5 REAL, avg_book_imbalance20 REAL,
+            avg_microprice_offset_bps REAL, depth_samples INTEGER NOT NULL DEFAULT 0,
+            last_mid REAL,
+            PRIMARY KEY(capture_id, symbol, minute_ts)
+        );
+        CREATE TABLE IF NOT EXISTS capture_minute_candles (
+            capture_id TEXT NOT NULL, symbol TEXT NOT NULL, minute_ts INTEGER NOT NULL,
+            close_ts INTEGER NOT NULL, open REAL NOT NULL, high REAL NOT NULL,
+            low REAL NOT NULL, close REAL NOT NULL, volume REAL NOT NULL,
+            is_closed INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(capture_id, symbol, minute_ts)
+        );
+        CREATE TABLE IF NOT EXISTS capture_derivatives_snapshots (
+            capture_id TEXT NOT NULL, symbol TEXT NOT NULL, ts_ms INTEGER NOT NULL,
+            open_interest_base REAL, funding_rate REAL, mark_price REAL,
+            index_price REAL, next_funding_time INTEGER,
+            PRIMARY KEY(capture_id, symbol, ts_ms)
+        );
         """)
         self.capture_id = uuid.uuid4().hex
         self.session_started_at_ms = int(time.time() * 1000)
@@ -164,6 +195,10 @@ class MarketMinuteAggregator:
         self.db.execute(
             "INSERT INTO collector_events(ts_ms,event_type,detail) VALUES(?,?,?)",
             (self.session_started_at_ms, "capture_session_started", self.capture_id),
+        )
+        self.db.execute(
+            "INSERT INTO capture_storage_versions(capture_id,schema_version) VALUES (?, 2)",
+            (self.capture_id,),
         )
         # Distinguish modern empty sessions from legacy sessions with no links.
         self.db.execute(
@@ -265,6 +300,16 @@ class MarketMinuteAggregator:
             "(capture_id,symbol,observed_at_ms,observation_type) VALUES (?,?,?,?)",
             (self.capture_id, symbol, minute_ts, "features"),
         )
+        self.db.execute(
+            "INSERT OR REPLACE INTO capture_minute_features "
+            "(capture_id,symbol,minute_ts,trades_count,buy_trades,sell_trades,"
+            "buy_quote_usdt,sell_quote_usdt,cvd_quote_usdt,taker_imbalance,"
+            "avg_spread_bps,min_spread_bps,max_spread_bps,avg_bid_depth5_usdt,"
+            "avg_ask_depth5_usdt,avg_bid_depth20_usdt,avg_ask_depth20_usdt,"
+            "avg_book_imbalance5,avg_book_imbalance20,avg_microprice_offset_bps,"
+            "depth_samples,last_mid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (self.capture_id, *row),
+        )
 
     def flush_before(self, timestamp_ms):
         cutoff = int(timestamp_ms // 60_000 * 60_000)
@@ -336,6 +381,13 @@ class MarketMinuteAggregator:
                 "(capture_id,symbol,observed_at_ms,observation_type) VALUES (?,?,?,?)",
                 (self.capture_id, normalized_symbol, minute_ts, "candle"),
             )
+            self.db.execute(
+                "INSERT OR REPLACE INTO capture_minute_candles "
+                "(capture_id,symbol,minute_ts,close_ts,open,high,low,close,volume,is_closed) "
+                "VALUES (?,?,?,?,?,?,?,?,?,1)",
+                (self.capture_id, normalized_symbol, minute_ts, close_ts,
+                 open_price, high, low, close, volume),
+            )
             self.db.commit()
             return True
         except (TypeError, ValueError, KeyError, OverflowError):
@@ -354,6 +406,13 @@ class MarketMinuteAggregator:
             "INSERT OR IGNORE INTO capture_observations "
             "(capture_id,symbol,observed_at_ms,observation_type) VALUES (?,?,?,?)",
             (self.capture_id, normalized_symbol, timestamp_ms, "derivatives"),
+        )
+        self.db.execute(
+            "INSERT OR REPLACE INTO capture_derivatives_snapshots "
+            "(capture_id,symbol,ts_ms,open_interest_base,funding_rate,mark_price,"
+            "index_price,next_funding_time) VALUES (?,?,?,?,?,?,?,?)",
+            (self.capture_id, normalized_symbol, timestamp_ms, open_interest,
+             funding_rate, mark_price, index_price, next_funding_time),
         )
         self.db.commit()
 
