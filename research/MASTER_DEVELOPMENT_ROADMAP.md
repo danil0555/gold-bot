@@ -1,3 +1,14 @@
+## 2026-11-25 — Strategy B replay rejection funnel diagnostics
+- Continued the planned frequency-versus-quality investigation without changing Strategy B rules, thresholds, signal output criteria, production code, or live behavior.
+- The historical replay now passes a diagnostics dictionary to the checked-out production `build_signal_b` and counts its existing rejection reasons and stages when no signal is produced. Injected test builders retain their prior call contract.
+- This makes it possible to distinguish trend-alignment, structure, VWAP, volume, RR, and other current filter bottlenecks before proposing any threshold changes. Counts are diagnostic labels, not probabilities; label text can change with builder revisions.
+- Added a deterministic test that verifies aggregation of multiple rejection reasons and stages.
+- Changes are on `research/prediction-quality-layer-v1`, PR #12 Draft/open/unmerged. Source commit: `836c71a7527ca05c57f4d4ffe428c322640f81ca`; test commit: `640aee21ccaf340fcd55b5ea10617b58571276b7`.
+- CI for the resulting branch head must be checked before treating the test as passed. No local test run is claimed.
+- The four-hour BingX capture `45573371850` was still in progress at inspection, with the capture step active and no artifacts; no market conclusions are available yet.
+- Production `main`, production DB, hosting, credentials, deployment, and exchange orders remain untouched.
+- Next: verify CI on the updated PR #12 head; then use rejection-funnel counts alongside multi-day captured data to identify which existing filters merit separate shadow experiments, without relaxing Strategy B in production.
+
 ## 2026-11-25 — Strategy B replay now mirrors production signal cooldown
 - Audited production `save_signal`: duplicate `setup_key` is checked first, then a 30-minute cooldown is enforced by market, symbol, side, and strategy version. The cooldown boundary is inclusive (a new signal at exactly 30 minutes is still rejected).
 - The historical replay previously deduplicated only identical setup keys and could therefore overstate signal frequency versus production.
