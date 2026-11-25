@@ -66,19 +66,19 @@ jobs:
           path: research-output/market_research_180d.json
           if-no-files-found: warn
       - name: Run 3-minute read-only BingX microstructure smoke collection
-        if: (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1')
+        if: (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1' || github.ref == 'refs/heads/research/capture-scoped-storage-v2')
         continue-on-error: true
         run: python -m scripts.market_data_collector --symbols BTC-USDT,ETH-USDT --duration-hours 0.05 --derivatives-interval 30 --db-path /tmp/market_microstructure.sqlite3
         timeout-minutes: 5
       - name: Upload microstructure smoke database
-        if: always() && (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1')
+        if: always() && (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1' || github.ref == 'refs/heads/research/capture-scoped-storage-v2')
         uses: actions/upload-artifact@v4
         with:
           name: bingx-microstructure-smoke
           path: /tmp/market_microstructure.sqlite3
           if-no-files-found: warn
       - name: Run microstructure event-study pipeline on smoke data
-        if: (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1')
+        if: (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1' || github.ref == 'refs/heads/research/capture-scoped-storage-v2')
         run: python -m scripts.microstructure_event_study --db /tmp/market_microstructure.sqlite3 --output research-output/microstructure_event_study.json
       - name: Run pre-event market move discovery on smoke data
         if: github.ref == 'refs/heads/research/market-discovery-engine-v1'
@@ -101,7 +101,7 @@ jobs:
           path: research-output/market_move_discovery.json
           if-no-files-found: warn
       - name: Upload microstructure event-study report
-        if: always() && (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1')
+        if: always() && (github.ref == 'refs/heads/research/market-walkforward-regimes' || github.ref == 'refs/heads/research/directional-microstructure-scoring' || github.ref == 'refs/heads/research/market-discovery-engine-v1' || github.ref == 'refs/heads/research/capture-scoped-storage-v2')
         uses: actions/upload-artifact@v4
         with:
           name: microstructure-event-study-smoke
