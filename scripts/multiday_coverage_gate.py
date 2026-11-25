@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 
@@ -67,7 +68,7 @@ def evaluate_multiday_coverage(
             )
             try:
                 start_minute = int(started_at_ms) // 60_000 * 60_000
-                end_value = int(ended_at_ms) if ended_at_ms is not None else int(__import__("time").time() * 1000)
+                end_value = int(ended_at_ms) if ended_at_ms is not None else int(time.time() * 1000)
                 end_minute = end_value // 60_000 * 60_000
                 timestamps = [
                     int(row[0]) for row in session_db.execute(
