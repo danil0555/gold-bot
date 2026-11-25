@@ -34,10 +34,6 @@ def test_gate_requires_each_symbol_to_meet_minute_and_day_thresholds(tmp_path):
     for symbol in ("BTC-USDT", "ETH-USDT"):
         for day in (20_000, 20_001, 20_002):
             rows.extend(_minutes(symbol, day, 200))
-    report = evaluate_multiday_coverage(
-        str(path), min_closed_minutes=600, min_utc_days=3,
-        expected_symbols=["BTC-USDT", "ETH-USDT"],
-    ) if path.exists() else None
     _database(path, rows)
     report = evaluate_multiday_coverage(
         str(path), min_closed_minutes=600, min_utc_days=3,
