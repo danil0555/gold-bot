@@ -249,3 +249,37 @@ def test_close_releases_database_when_final_flush_fails(tmp_path, monkeypatch):
         ).fetchone()[0]
     # Failed flushes must not be recorded as cleanly completed captures.
     assert ended_at_ms is None
+
+
+def test_overlapping_capture_sessions_preserve_independent_minute_features(tmp_path):
+    path = tmp_path / "overlapping.sqlite3"
+    first = MarketMinuteAggregator(str(path), symbols=["BTC-USDT"])
+    second = MarketMinuteAggregator(str(path), symbols=["BTC-USDT"])
+    try:
+        now_ms = int(__import__("time").time() * 1000)
+        minute_ts = (now_ms // 60_000 - 1) * 60_000
+        first_id, second_id = first.capture_id, second.capture_id
+        for agg, price in ((first, 100.0), (second, 200.0)):
+            agg.process_trade({
+                "s": "BTC-USDT", "t": f"trade-{price}", "T": minute_ts + 10_000,
+                "p": str(price), "q": "1", "m": False,
+            })
+            agg.flush_before(now_ms)
+        with sqlite3.connect(path) as db:
+            rows = db.execute(
+                "SELECT capture_id, buy_quote_usdt FROM capture_minute_features "
+                "WHERE symbol='BTC-USDT' AND minute_ts=? ORDER BY capture_id",
+                (minute_ts,),
+            ).fetchall()
+            assert len(rows) == 2
+            values = {capture_id: quote for capture_id, quote in rows}
+            assert values[first_id] == 100.0
+            assert values[second_id] == 200.0
+            canonical = db.execute(
+                "SELECT buy_quote_usdt FROM minute_features WHERE symbol='BTC-USDT' AND minute_ts=?",
+                (minute_ts,),
+            ).fetchone()[0]
+            assert canonical in (100.0, 200.0)
+    finally:
+        first.close()
+        second.close()
