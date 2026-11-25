@@ -12,7 +12,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events", "collector_sessions")
+TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events", "collector_sessions", "capture_observations")
 REQUIRED_TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events")
 KEYED_TABLES = ("minute_candles", "minute_features", "derivatives_snapshots")
 
@@ -58,6 +58,17 @@ def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
             started_at_ms INTEGER NOT NULL,
             ended_at_ms INTEGER,
             symbols_json TEXT NOT NULL
+        )
+    """)
+    destination.execute("""
+        CREATE TABLE IF NOT EXISTS capture_observations (
+            capture_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            observed_at_ms INTEGER NOT NULL,
+            observation_type TEXT NOT NULL CHECK (
+                observation_type IN ('candle', 'features', 'derivatives')
+            ),
+            PRIMARY KEY(capture_id, symbol, observed_at_ms, observation_type)
         )
     """)
     destination.commit()
