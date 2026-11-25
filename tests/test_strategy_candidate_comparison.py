@@ -97,8 +97,10 @@ def test_comparison_rejects_empty_symbol_and_blank_strategy_name():
         )
     with pytest.raises(ValueError, match="strategy names"):
         compare_strategy_candidates(
-            {"   ": _signals("BTC-USDT", "LONG")}, _candles(),
-            horizon_minutes=1, baseline_name="Strategy B"
+            {
+                "Strategy B": _signals("BTC-USDT", "LONG"),
+                "   ": _signals("ETH-USDT", "SHORT"),
+            }, _candles(), horizon_minutes=1, baseline_name="Strategy B"
         )
 
 
