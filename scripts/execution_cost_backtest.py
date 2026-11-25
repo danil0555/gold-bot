@@ -69,6 +69,8 @@ def run_close_to_close_backtest(
     schedule = None if expected_funding_timestamps_ms is None else sorted(
         {int(ts) for ts in expected_funding_timestamps_ms}
     )
+    if schedule is not None and not schedule:
+        raise ValueError("expected_funding_timestamps_ms must not be empty")
 
     frame = signals[["symbol", "signal_ts", "direction"]].copy()
     frame["signal_ts"] = pd.to_numeric(frame.signal_ts, errors="coerce")
@@ -151,8 +153,12 @@ def run_close_to_close_backtest(
         "gross_expectancy_pct": float(ledger.gross_return_pct.mean()),
         "net_expectancy_pct": float(ledger.net_return_pct.mean()),
         "net_total_return_pct": float((equity[-1] - 1.0) * 100.0),
-        "profit_factor": (float(gross_wins.sum() / loss_sum) if loss_sum > 0
-                          else (None if gross_wins.empty else float("inf"))),
+        # Keep reports strict-JSON serializable: Infinity is not valid JSON.
+        "profit_factor": (float(gross_wins.sum() / loss_sum) if loss_sum > 0 else None),
+        "profit_factor_status": (
+            "defined" if loss_sum > 0 else
+            "no_losses" if not gross_wins.empty else "no_wins_or_losses"
+        ),
         "max_drawdown_pct": float(drawdowns.min() * 100.0),
         "average_holding_minutes": float(
             (ledger.exit_ts - ledger.entry_ts).mean() / 60_000.0

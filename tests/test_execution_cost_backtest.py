@@ -29,7 +29,8 @@ def test_long_and_short_direction_and_round_trip_costs():
     assert report["trade_count"] == 2
     assert report["trades"][0]["gross_return_pct"] == pytest.approx((103 / 101 - 1) * 100)
     assert report["trades"][0]["execution_cost_pct"] == pytest.approx(0.14)
-    assert report["trades"][1]["gross_return_pct"] == pytest.approx((102 / 104 - 1) * 100)
+    # Short PnL is measured against entry notional: (entry - exit) / entry.
+    assert report["trades"][1]["gross_return_pct"] == pytest.approx((102 - 104) / 102 * 100)
 
 
 def test_missing_exact_entry_or_exit_is_rejected_not_bridged():
@@ -93,3 +94,11 @@ def test_invalid_inputs_and_duplicate_candles_are_rejected():
         )
     with pytest.raises(ValueError):
         _run(_signals([("BTC", 0, "LONG")]), expected_funding_timestamps_ms=[])
+
+
+
+def test_profit_factor_without_losses_is_json_safe():
+    report = _run(_signals([("BTC", 0, "LONG")]))
+    assert report["trades"][0]["net_return_pct"] > 0
+    assert report["profit_factor"] is None
+    assert report["profit_factor_status"] == "no_losses"
