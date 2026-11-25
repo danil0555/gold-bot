@@ -12,7 +12,8 @@ import json
 import sqlite3
 from pathlib import Path
 
-TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events")
+TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events", "collector_sessions")
+REQUIRED_TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events")
 KEYED_TABLES = ("minute_candles", "minute_features", "derivatives_snapshots")
 
 
@@ -35,7 +36,7 @@ def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
             existing = {row[0] for row in check.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )}
-            missing = set(TABLES) - existing
+            missing = set(REQUIRED_TABLES) - existing
             if missing:
                 raise ValueError(f"{source} is missing collector tables: {sorted(missing)}")
         finally:
@@ -51,6 +52,15 @@ def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
     finally:
         first.close()
 
+    destination.execute("""
+        CREATE TABLE IF NOT EXISTS collector_sessions (
+            capture_id TEXT PRIMARY KEY,
+            started_at_ms INTEGER NOT NULL,
+            ended_at_ms INTEGER,
+            symbols_json TEXT NOT NULL
+        )
+    """)
+    destination.commit()
     before = {
         table: int(destination.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
         for table in TABLES
@@ -59,7 +69,12 @@ def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
         for index, source in enumerate(sources[1:], start=1):
             alias = f"capture_{index}"
             destination.execute(f"ATTACH DATABASE ? AS {alias}", (str(source),))
+            source_tables = {row[0] for row in destination.execute(
+                f"SELECT name FROM {alias}.sqlite_master WHERE type='table'"
+            )}
             for table in TABLES:
+                if table not in source_tables:
+                    continue
                 dest_columns = _columns(destination, table)
                 src_columns = _columns(destination, table, alias)
                 if dest_columns != src_columns:
