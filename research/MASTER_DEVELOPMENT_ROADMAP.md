@@ -1,3 +1,15 @@
+## 2026-11-25 — per-symbol multi-day holdout coverage gate
+- Roadmap audit identified a weakness in the capture workflow: holdout readiness used pooled distinct-minute/date counts across the entire merged database. A well-covered symbol could therefore hide inadequate history for another symbol.
+- Added read-only `scripts/multiday_coverage_gate.py`. It checks every observed symbol independently and also checks all explicitly expected symbols from the current capture configuration. Each must meet at least 600 closed one-minute candles and 3 distinct UTC dates before the multi-day holdout pipeline is allowed to run.
+- The report records per-symbol minute/day counts, first/last timestamps, missing expected symbols, and not-ready symbols. The gate is a history sufficiency check only; it does not establish data quality or strategy profitability.
+- Added deterministic tests for per-symbol thresholds, pooled-coverage false positives, missing expected symbols, exclusion of open candles, empty history, and invalid thresholds.
+- Updated `.github/workflows/microstructure-capture.yml` to use the gate and upload its JSON report; updated deterministic CI test list.
+- Commits on `research/market-discovery-engine-v1`: implementation `3910facc168f7fa37e7aad2e46f0fa8a52b4f4e2`; tests `0db95edd6115e070868c5f73b3ecf266d55ea949`; workflow `147dd57f83bbfc51f63a1f54273e0869f9323e49`; CI registration `ed63fcde9504f77b1af93ee85dbd50cfaba16fde`; test cleanup / current branch HEAD `77a8413b39e4d94ad25a6e4dd2f8df6d9dd619b6`.
+- Validation: push CI run `45574114071` is queued for the final HEAD. Earlier per-file runs were cancelled by the workflow's concurrency policy; only the final run should be used for validation.
+- The active four-hour capture `45573371850` checked out its original SHA `5bf6a785` before these changes; its running workflow is unaffected. This gate applies to subsequent captures.
+- PR #11 remains open/draft; PR #12 remains open/draft; no merges. Production `main`, bot DB, hosting, credentials, and exchange orders remain untouched.
+- Next: confirm CI on `77a8413b`, inspect the four-hour capture artifacts, and only then interpret the multi-day coverage / holdout status.
+
 ## 2026-11-25 — rolling transfer tail-coverage diagnostics
 - Audited the rolling cross-symbol transfer evaluator after the prior CI success.
 - Found that the evaluator intentionally discards a trailing eligible fragment shorter than a complete holdout window, but the report did not quantify that discarded fragment.
