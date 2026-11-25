@@ -27,16 +27,23 @@ def test_long_and_short_direction_and_round_trip_costs():
         ("BTC", 0, "LONG"), ("BTC", 2 * 60_000, "SHORT")
     ]))
     assert report["trade_count"] == 2
-    assert report["trades"][0]["gross_return_pct"] == pytest.approx((103 / 101 - 1) * 100)
+    # Signal at 0 is available at candle 0 close (100); next candle closes at 101.
+    assert report["trades"][0]["entry_ts"] == 60_000
+    assert report["trades"][0]["exit_ts"] == 120_000
+    assert report["trades"][0]["entry_price"] == pytest.approx(100)
+    assert report["trades"][0]["exit_price"] == pytest.approx(101)
+    assert report["trades"][0]["gross_return_pct"] == pytest.approx(1.0)
     assert report["trades"][0]["execution_cost_pct"] == pytest.approx(0.14)
-    # Short PnL is measured against entry notional: (entry - exit) / entry.
-    assert report["trades"][1]["gross_return_pct"] == pytest.approx((102 - 104) / 102 * 100)
+    # Second signal at 2m enters on candle 2 close (103), exits candle 3 close (102).
+    assert report["trades"][1]["entry_price"] == pytest.approx(103)
+    assert report["trades"][1]["exit_price"] == pytest.approx(102)
+    assert report["trades"][1]["gross_return_pct"] == pytest.approx((102 - 103) / 103 * 100)
 
 
 def test_missing_exact_entry_or_exit_is_rejected_not_bridged():
-    candles = _candles().loc[lambda x: x.minute_ts != 2 * 60_000]
+    candles = _candles().loc[lambda x: x.minute_ts != 60_000]
     report = run_close_to_close_backtest(
-        _signals([("BTC", 60_000, "LONG")]), candles,
+        _signals([("BTC", 0, "LONG")]), candles,
         horizon_minutes=1, fee_bps_per_side=5, slippage_bps_per_side=2
     )
     assert report["trade_count"] == 0
@@ -102,3 +109,17 @@ def test_profit_factor_without_losses_is_json_safe():
     assert report["trades"][0]["net_return_pct"] > 0
     assert report["profit_factor"] is None
     assert report["profit_factor_status"] == "no_losses"
+
+
+
+def test_entry_and_exit_use_closes_exactly_one_and_horizon_minutes_after_signal():
+    report = run_close_to_close_backtest(
+        _signals([("BTC", 0, "LONG")]), _candles(),
+        horizon_minutes=2, fee_bps_per_side=0, slippage_bps_per_side=0
+    )
+    trade = report["trades"][0]
+    assert trade["signal_ts"] == 0
+    assert trade["entry_ts"] == 60_000
+    assert trade["exit_ts"] == 180_000
+    assert trade["entry_price"] == pytest.approx(100)
+    assert trade["exit_price"] == pytest.approx(103)
