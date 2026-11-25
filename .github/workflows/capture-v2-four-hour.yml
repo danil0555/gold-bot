@@ -1,0 +1,70 @@
+name: Capture-scoped v2 four-hour read-only collection
+
+on:
+  push:
+    branches:
+      - research/capture-v2-4h-run
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capture-v2-four-hour-readonly
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 270
+    steps:
+      - name: Check out research branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install collector and research dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Compile collector and validator
+        run: python -m compileall -q scripts
+
+      - name: Run four-hour read-only BingX capture
+        run: >-
+          python -m scripts.market_data_collector
+          --symbols BTC-USDT,ETH-USDT
+          --duration-hours 4
+          --derivatives-interval 30
+          --db-path /tmp/market_microstructure_4h.sqlite3
+        timeout-minutes: 250
+
+      - name: Validate capture-scoped v2 database
+        run: >-
+          python -m scripts.validate_capture_db
+          --db /tmp/market_microstructure_4h.sqlite3
+
+      - name: Run exploratory event-study diagnostics
+        run: >-
+          python -m scripts.microstructure_event_study
+          --db /tmp/market_microstructure_4h.sqlite3
+          --output research-output/microstructure_event_study_4h.json
+
+      - name: Upload four-hour capture database
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bingx-microstructure-v2-four-hour
+          path: /tmp/market_microstructure_4h.sqlite3
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload four-hour event-study report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: microstructure-v2-four-hour-event-study
+          path: research-output/microstructure_event_study_4h.json
+          if-no-files-found: warn
+          retention-days: 14
