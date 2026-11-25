@@ -641,3 +641,10 @@
 - Added a further parameterized stress-test commit `08637f82a11f2a9f16e0fba543ca07a30ee531b3`: six balance/entry/stop-distance/precision combinations assert that exchange rounding DOWN never raises the individual trade's calculated stop-loss risk above the 10% budget. Added an explicit test documenting that three separately valid 10%-risk signals can stack to 30% aggregate nominal risk; this is a known absence of portfolio-level exposure control, not a feature claim.
 - CI for the new stress-test head `08637f8` has not yet been reported. Do not treat run `45675272507` as validation of the newer commit.
 - PR #16 remains Draft/open/unmerged. GitHub currently reports `mergeable=false`; no rebase, retarget, merge, or force-push was attempted. Production `main`, live database, credentials, deployment and exchange orders remain untouched.
+
+
+## 2026-11-25 — PR #16 risk-rounding stress tests passed exact-head CI
+- GitHub Actions run `45681145259` (run 586) completed successfully on exact latest PR #16 head `08637f82a11f2a9f16e0fba543ca07a30ee531b3`.
+- Job log confirms: Python compilation passed; runtime import/safe defaults passed with real trading and add-on strategies disabled; deterministic reliability/add-on/API suite **21 passed**; signal, balance persistence and position-sizing suite **25 passed**. Optional read-only 7-day BingX historical backtest was skipped.
+- The 25-test signal/sizing group includes the new six-case balance/stop-distance/precision stress parameterization and the explicit demonstration that three independent 10% positions can sum to 30% nominal aggregate risk. Rounded-down size remained at or below the per-trade 10% budget in all six cases.
+- PR #16 is still Draft/open/unmerged. Latest GitHub snapshot reports `mergeable=true`; no merge, deployment, database migration or real orders were performed. Production `main` remains untouched.
