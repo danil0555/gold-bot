@@ -99,3 +99,5 @@ python -m pytest -q tests/test_microstructure_discovery.py
 - The merger carries the new mapping table and creates it for older first-input databases. Legacy source captures without the mapping table remain accepted; they simply contribute no exact capture links.
 - This is provenance, not a claim that two sessions observing the same market minute represent two independent market outcomes. Research samples must still be deduplicated by market timestamp for statistical inference.
 - Existing market tables and old databases are not migrated or rewritten. The feature is research-only and requires a fresh collector run to populate exact links; old merged captures cannot be retroactively attributed exactly.
+
+- Mixed old/new merged databases use an explicit `session` provenance marker: modern sessions with no candle links correctly report zero exact observations, while legacy sessions without a marker use a clearly labeled time-window estimate. This avoids treating every old session as empty merely because the merged database contains the newer mapping table.
