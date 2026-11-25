@@ -26,7 +26,7 @@ def _frame(interval_ms, count=210, future_extra=False, offset_ms=0):
 
 def _all_frames():
     return {
-        "1m": _frame(60_000, 212, offset_ms=205 * 14_400_000),
+        "1m": _frame(60_000, 416, offset_ms=205 * 14_400_000),
         "5m": _frame(300_000, 212),
         "15m": _frame(900_000, 212),
         "1h": _frame(3_600_000, 212),
