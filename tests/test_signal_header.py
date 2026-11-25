@@ -2,6 +2,8 @@
 
 import os
 import sqlite3
+
+import pytest
 from types import SimpleNamespace
 
 os.environ.setdefault("BOT_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
