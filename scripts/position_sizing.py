@@ -52,6 +52,7 @@ def calculate_linear_usdtm_position_size(
     return {
         "risk_usdt": risk_usdt,
         "stop_distance": stop_distance,
+        "entry_price": entry,
         "quantity": quantity,
         "notional_usdt": notional_usdt,
         "margin_usdt": margin_usdt,
