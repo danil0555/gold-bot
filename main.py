@@ -1605,11 +1605,11 @@ def position_size_text(signal, balance_usdt: float | None) -> str:
             for key in ("quantity", "risk_usdt", "notional_usdt", "margin_usdt"):
                 source = {"quantity": "quantity", "risk_usdt": "risk_usdt", "notional_usdt": "notional_usdt", "margin_usdt": "margin_usdt"}[key]
                 sizing[key] = float(checked[source])
-            contract_note = f"Биржевые ограничения BingX: <b>проверены</b> (точность {checked['quantity_precision']} знаков).\\n"
+            contract_note = f"Биржевые ограничения BingX: <b>проверены</b> (точность {checked['quantity_precision']} знаков).\n"
         else:
-            contract_note = "⛔ <b>Объём не подтверждён биржей:</b> " + html.escape(" / ".join(checked.get("reasons", []))) + ". Не используй расчёт как готовый ордер.\\n"
+            contract_note = "⛔ <b>Объём не подтверждён биржей:</b> " + html.escape(" / ".join(checked.get("reasons", []))) + ". Не используй расчёт как готовый ордер.\n"
     else:
-        contract_note = "⛔ <b>Объём не подтверждён биржей:</b> нет свежих данных контракта. Не используй расчёт как готовый ордер.\\n"
+        contract_note = "⛔ <b>Объём не подтверждён биржей:</b> нет свежих данных контракта. Не используй расчёт как готовый ордер.\n"
     quantity = f"{sizing['quantity']:.10f}".rstrip("0").rstrip(".")
     block = (
         "<b>РАСЧЁТ ПОЗИЦИИ (ориентир):</b>\n"
@@ -1632,7 +1632,7 @@ def position_size_text(signal, balance_usdt: float | None) -> str:
         )
     block += (
         "<i>Расчёт от указанной цены входа и SL; не учтены комиссии, funding и проскальзывание. "
-        "Проверка шага, минимального объёма и множителя контракта BingX не выполняется; "
+        "Проверка использует последние публичные ограничения контракта BingX (обновление раз в 6 часов). "
         "фактическая цена исполнения может изменить риск. "
         "10% применяется отдельно к каждому сигналу: одновременные сделки суммируют риск.</i>\n"
     )
