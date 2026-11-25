@@ -107,7 +107,8 @@ def replay_strategy_b(
         raise ValueError("candles_by_symbol must be a non-empty mapping")
     if min_history_rows < 205:
         raise ValueError("min_history_rows cannot be below production MIN_CANDLE_ROWS")
-    if signal_builder is None:
+    collect_builder_diagnostics = signal_builder is None
+    if collect_builder_diagnostics:
         (builder, checked_out_version, checked_out_main_sha256,
          builder_sha256, cooldown_minutes) = _load_production_builder()
     else:
@@ -121,9 +122,15 @@ def replay_strategy_b(
         raise ValueError("production signal cooldown must be a positive integer")
 
     output = []
-    diagnostics = {"decisions": 0, "insufficient_history": 0,
-                  "no_signal": 0, "duplicate_setup": 0,
-                  "cooldown_rejected": 0}
+    diagnostics = {
+        "decisions": 0,
+        "insufficient_history": 0,
+        "no_signal": 0,
+        "duplicate_setup": 0,
+        "cooldown_rejected": 0,
+        "builder_rejection_reasons": {},
+        "builder_rejection_stages": {},
+    }
     last_accepted_by_cooldown: dict[tuple[str, str, str, str], int] = {}
     for symbol, frames in candles_by_symbol.items():
         symbol = str(symbol)
@@ -157,9 +164,24 @@ def replay_strategy_b(
             quote = (quote_by_symbol or {}).get(symbol)
             if quote is not None and not isinstance(quote, Mapping):
                 raise ValueError(f"{symbol}: quote must be a mapping")
-            signal = builder("swap", symbol, aligned, quote=quote)
+            if collect_builder_diagnostics:
+                builder_diagnostics = {}
+                signal = builder(
+                    "swap", symbol, aligned, quote=quote,
+                    diagnostics=builder_diagnostics,
+                )
+            else:
+                builder_diagnostics = None
+                signal = builder("swap", symbol, aligned, quote=quote)
             if signal is None:
                 diagnostics["no_signal"] += 1
+                if builder_diagnostics is not None:
+                    reason = str(builder_diagnostics.get("reason") or "unspecified")
+                    stage = str(builder_diagnostics.get("stage") or "unspecified")
+                    reasons = diagnostics["builder_rejection_reasons"]
+                    stages = diagnostics["builder_rejection_stages"]
+                    reasons[reason] = reasons.get(reason, 0) + 1
+                    stages[stage] = stages.get(stage, 0) + 1
                 continue
             if not isinstance(signal, Mapping):
                 raise ValueError(f"{symbol}: Strategy B builder must return a mapping or None")
@@ -241,6 +263,7 @@ def replay_strategy_b(
             "Only candles whose full interval ends at or before the 1m decision close are visible.",
             "Each accepted Strategy B setup_key is emitted once; cooldown-rejected setups are not marked as saved.",
             "Production SIGNAL_COOLDOWN_MINUTES is applied per market/symbol/side/strategy_version; the exact boundary is rejected just as in save_signal.",
+            "When using the checked-out production builder, its existing rejection reason/stage diagnostics are counted without changing strategy decisions or thresholds.",
             "Signal timestamp is the decision candle close; the execution-cost evaluator enters at the next exact 1m close.",
         ],
         "limitations": [
@@ -248,5 +271,6 @@ def replay_strategy_b(
             "The replay imports main.py from the checked-out research branch. Its full-file SHA identifies that exact file; strategy_builder_sha256 separately fingerprints build_signal_b. Verify both against the intended production source before interpreting results.",
             "This replay does not model order fills, intrabar stop/target ordering, latency, market impact, funding or portfolio margin.",
             "The adapter is research-only and never changes live signals or places orders.",
+            "Rejection counts describe the checked-out builder's current diagnostic labels; they are not calibrated probabilities and may change when builder wording changes.",
         ],
     }
