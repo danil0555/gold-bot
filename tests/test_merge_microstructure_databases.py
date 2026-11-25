@@ -242,7 +242,16 @@ def test_merge_legacy_first_then_v2_capture_preserves_scoped_payloads(tmp_path):
     legacy = tmp_path / "legacy-first.sqlite3"
     modern = tmp_path / "v2-second.sqlite3"
     output = tmp_path / "mixed-merge.sqlite3"
-    make_capture(legacy, [candle(60_000)], 1)
+    # Build a v1-shaped capture using the real collector schema, then
+    # remove only the v2 tables to model an older collector database.
+    legacy_agg = MarketMinuteAggregator(str(legacy), symbols=["BTC-USDT"])
+    legacy_agg.close()
+    with sqlite3.connect(legacy) as db:
+        for table in (
+            "capture_storage_versions", "capture_minute_features",
+            "capture_minute_candles", "capture_derivatives_snapshots",
+        ):
+            db.execute(f"DROP TABLE {table}")
 
     agg = MarketMinuteAggregator(str(modern), symbols=["BTC-USDT"])
     try:
