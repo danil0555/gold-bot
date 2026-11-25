@@ -720,3 +720,12 @@
 - Reworked the test to create a v1-shaped DB using MarketMinuteAggregator's real schema, then drop only the four v2 tables/marker before merging it ahead of a v2 capture. This preserves realistic core-table column parity while exercising legacy-first ordering.
 - Fix commit: 7311436283ec53e92e2d7745cc5d49f420d2f9bc. New exact-head CI is required; the earlier 119-pass run validated the prior head only. The intermediate added test correctly failed (119 passed, 1 failed) because of the fixture schema mismatch.
 - No production code, DB, credentials, deployment, or exchange order behavior changed.
+
+
+## 2026-11-25 — PR #17 final exact-head deterministic CI
+- Latest PR #17 head `7311436283ec53e92e2d7745cc5d49f420d2f9bc` has two successful GitHub Actions runs: `45687982118` and `45688002614`.
+- Both logs confirm compilation, runtime import/safe-default checks, and **120 deterministic tests passed** (3.47s and 3.34s). No failures.
+- Both runs intentionally skipped public market scans, historical backtests and the 3-minute live microstructure smoke collection because this PR targets a research branch, not production `main`. Therefore this is code/fixture validation, not live-data validation.
+- PR #17 remains Draft/open/unmerged. GitHub reports mergeable=true. No rebase or merge performed.
+- Next validation should use a separate manually dispatched research-only workflow or approved local read-only smoke run, creating a new disposable SQLite DB. Verify capture-scoped feature/candle/derivatives counts, `PRAGMA integrity_check`, foreign-key check, merge row counts, and coverage-gate attribution before any multi-day collection.
+- Production main, production DB, credentials, deployment, strategy/risk settings, and exchange order behavior remain untouched.
