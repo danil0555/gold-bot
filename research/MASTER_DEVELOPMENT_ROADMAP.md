@@ -1,3 +1,9 @@
+## 2026-11-25 — execution timestamp hardening commit record
+- Timestamp alignment fix in `scripts/execution_cost_backtest.py`: `298f7b59c143a6fe64d4b79bd554828ca3ae9b7e`; methodology wording: `941ec7918b05fc8843362de424e3630b7c96a73c`; strict timestamp validation: `4fd816d371af4929dbd4529a034965b7bf0433f8`.
+- Regression tests in `tests/test_execution_cost_backtest.py`: `b62a6de3ebdd56de1d25b2a0df91e510c6d4fe8d` and `e59bb0b23b653fe347d8f5274ad57f793d06551b`.
+- Replay candle continuity/alignment guard: `dd46c0739f0a8953ac1eabfa83ba23fd47c1813a`; regression tests: `985d610365f5105c4f8484af7104b79ab93a092a`.
+- Roadmap entries: `ba590c488a1d7006782f84a005dbef6edcae98ac`, `527b68fda3d4fff5e0f7866a9d83c5f5a6ec85bf`, and this commit.
+- Current PR #12 head before this roadmap-only update: `314cdbca4924ae5af722b7d8d33f220fdd02cf55`. PR remains Draft/open/unmerged; no CI status checks are visible yet.
 ## 2026-11-25 — strict execution timestamp validation
 - Execution evaluator now rejects null, non-numeric, non-finite or non-minute-aligned candle timestamps and rejects non-finite/non-minute-aligned signal close timestamps. This prevents silent truncation or accidental timestamp coercion.
 - Added regression tests for a missing exact exit candle and misaligned signal/candle timestamps.
