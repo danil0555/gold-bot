@@ -145,6 +145,15 @@ class MarketMinuteAggregator:
             ended_at_ms INTEGER,
             symbols_json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS capture_observations (
+            capture_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            observed_at_ms INTEGER NOT NULL,
+            observation_type TEXT NOT NULL CHECK (
+                observation_type IN ('session', 'candle', 'features', 'derivatives')
+            ),
+            PRIMARY KEY(capture_id, symbol, observed_at_ms, observation_type)
+        );
         """)
         self.capture_id = uuid.uuid4().hex
         self.session_started_at_ms = int(time.time() * 1000)
@@ -155,6 +164,12 @@ class MarketMinuteAggregator:
         self.db.execute(
             "INSERT INTO collector_events(ts_ms,event_type,detail) VALUES(?,?,?)",
             (self.session_started_at_ms, "capture_session_started", self.capture_id),
+        )
+        # Distinguish modern empty sessions from legacy sessions with no links.
+        self.db.execute(
+            "INSERT INTO capture_observations "
+            "(capture_id,symbol,observed_at_ms,observation_type) VALUES (?,?,?,?)",
+            (self.capture_id, "", self.session_started_at_ms, "session"),
         )
         self.db.commit()
         self.pending = {}
@@ -245,6 +260,11 @@ class MarketMinuteAggregator:
                 avg_microprice_offset_bps,depth_samples,last_mid
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, row)
+        self.db.execute(
+            "INSERT OR IGNORE INTO capture_observations "
+            "(capture_id,symbol,observed_at_ms,observation_type) VALUES (?,?,?,?)",
+            (self.capture_id, symbol, minute_ts, "features"),
+        )
 
     def flush_before(self, timestamp_ms):
         cutoff = int(timestamp_ms // 60_000 * 60_000)
@@ -305,11 +325,17 @@ class MarketMinuteAggregator:
             # SQLite writes and risks treating an unfinished bar as history.
             if not is_closed:
                 return True
+            normalized_symbol = str(symbol).upper()
             self.db.execute("""
                 INSERT OR REPLACE INTO minute_candles
                 (symbol,minute_ts,close_ts,open,high,low,close,volume,is_closed)
                 VALUES (?,?,?,?,?,?,?,?,?)
-            """, (str(symbol).upper(), minute_ts, close_ts, open_price, high, low, close, volume, 1))
+            """, (normalized_symbol, minute_ts, close_ts, open_price, high, low, close, volume, 1))
+            self.db.execute(
+                "INSERT OR IGNORE INTO capture_observations "
+                "(capture_id,symbol,observed_at_ms,observation_type) VALUES (?,?,?,?)",
+                (self.capture_id, normalized_symbol, minute_ts, "candle"),
+            )
             self.db.commit()
             return True
         except (TypeError, ValueError, KeyError, OverflowError):
@@ -317,11 +343,18 @@ class MarketMinuteAggregator:
 
     def save_derivatives(self, symbol, ts_ms, open_interest=None, funding_rate=None,
                          mark_price=None, index_price=None, next_funding_time=None):
+        normalized_symbol = str(symbol).upper()
+        timestamp_ms = int(ts_ms)
         self.db.execute("""
             INSERT OR REPLACE INTO derivatives_snapshots
             (symbol,ts_ms,open_interest_base,funding_rate,mark_price,index_price,next_funding_time)
             VALUES (?,?,?,?,?,?,?)
-        """, (symbol, int(ts_ms), open_interest, funding_rate, mark_price, index_price, next_funding_time))
+        """, (normalized_symbol, timestamp_ms, open_interest, funding_rate, mark_price, index_price, next_funding_time))
+        self.db.execute(
+            "INSERT OR IGNORE INTO capture_observations "
+            "(capture_id,symbol,observed_at_ms,observation_type) VALUES (?,?,?,?)",
+            (self.capture_id, normalized_symbol, timestamp_ms, "derivatives"),
+        )
         self.db.commit()
 
     def event(self, event_type, detail=""):
@@ -332,18 +365,22 @@ class MarketMinuteAggregator:
         self.db.commit()
 
     def close(self):
-        self.flush_all()
-        ended_at_ms = int(time.time() * 1000)
-        self.db.execute(
-            "UPDATE collector_sessions SET ended_at_ms=? WHERE capture_id=?",
-            (ended_at_ms, self.capture_id),
-        )
-        self.db.execute(
-            "INSERT INTO collector_events(ts_ms,event_type,detail) VALUES(?,?,?)",
-            (ended_at_ms, "capture_session_stopped", self.capture_id),
-        )
-        self.db.commit()
-        self.db.close()
+        try:
+            self.flush_all()
+            ended_at_ms = int(time.time() * 1000)
+            self.db.execute(
+                "UPDATE collector_sessions SET ended_at_ms=? WHERE capture_id=?",
+                (ended_at_ms, self.capture_id),
+            )
+            self.db.execute(
+                "INSERT INTO collector_events(ts_ms,event_type,detail) VALUES(?,?,?)",
+                (ended_at_ms, "capture_session_stopped", self.capture_id),
+            )
+            self.db.commit()
+        finally:
+            # Even if the final flush fails, release the SQLite handle. The
+            # session remains open in metadata so coverage checks fail closed.
+            self.db.close()
 
 
 async def _rest_json(session, path, params=None):

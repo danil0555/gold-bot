@@ -90,3 +90,16 @@ python -m pytest -q tests/test_microstructure_discovery.py
 - Sessions whose time intervals overlap while sharing one or more symbols are listed in `ambiguous_capture_sessions`; each affected session is marked `session_attribution_ambiguous=true`.
 - This ambiguity exists because `minute_candles` is keyed by `(symbol, minute_ts)`, not by `capture_id`. The diagnostic does not guess which capture produced a shared candle and does not silently claim exact per-session attribution.
 - These checks improve provenance diagnostics; they do not establish uninterrupted market-data coverage, data correctness, statistical significance, predictive edge, or profitability.
+
+## Capture-scoped observation provenance v1
+
+- New collector databases create `capture_observations`, keyed by capture UUID, symbol, observation timestamp and type (`candle`, `features`, `derivatives`).
+- Closed candles, flushed minute features and derivatives snapshots each write an idempotent link to the active capture session. Market tables retain their existing de-duplicated keys; the new table records which capture observed each item without rebuilding or rewriting historical market tables.
+- The multi-day gate uses these exact capture links for per-session candle counts and gap diagnostics when the table exists. Legacy databases without the table retain the earlier time-window estimate and identify that source in `attribution_source`.
+- The merger carries the new mapping table and creates it for older first-input databases. Legacy source captures without the mapping table remain accepted; they simply contribute no exact capture links.
+- This is provenance, not a claim that two sessions observing the same market minute represent two independent market outcomes. Research samples must still be deduplicated by market timestamp for statistical inference.
+- Existing market tables and old databases are not migrated or rewritten. The feature is research-only and requires a fresh collector run to populate exact links; old merged captures cannot be retroactively attributed exactly.
+
+- Mixed old/new merged databases use an explicit `session` provenance marker: modern sessions with no candle links correctly report zero exact observations, while legacy sessions without a marker use a clearly labeled time-window estimate. This avoids treating every old session as empty merely because the merged database contains the newer mapping table.
+
+- The merge output upgrades the earlier mapping-table CHECK constraint to allow the explicit session marker, preserving existing observation links. This matters when an older PR #14 capture is the first input and a newer capture is merged after it.

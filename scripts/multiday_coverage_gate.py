@@ -46,6 +46,17 @@ def evaluate_multiday_coverage(
             SELECT capture_id, started_at_ms, ended_at_ms, symbols_json
             FROM collector_sessions ORDER BY started_at_ms, capture_id
         """).fetchall() if session_table_exists else []
+        observation_table_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='capture_observations'"
+        ).fetchone() is not None
+        exact_capture_ids = set()
+        if observation_table_exists:
+            exact_capture_ids = {
+                str(row[0]) for row in db.execute(
+                    "SELECT DISTINCT capture_id FROM capture_observations "
+                    "WHERE observation_type='session'"
+                ).fetchall()
+            }
         daily_rows = db.execute("""
             SELECT symbol, date(minute_ts / 1000, 'unixepoch'),
                    COUNT(DISTINCT minute_ts), MIN(minute_ts), MAX(minute_ts)
@@ -96,13 +107,23 @@ def evaluate_multiday_coverage(
                 start_minute = int(started_at_ms) // 60_000 * 60_000
                 end_value = int(ended_at_ms) if ended_at_ms is not None else int(time.time() * 1000)
                 end_minute = end_value // 60_000 * 60_000
-                timestamps = [
-                    int(row[0]) for row in session_db.execute(
-                        "SELECT minute_ts FROM minute_candles WHERE symbol=? AND is_closed=1 "
-                        "AND minute_ts >= ? AND minute_ts <= ? ORDER BY minute_ts",
-                        (symbol, start_minute, end_minute),
-                    ).fetchall()
-                ]
+                if capture_id in exact_capture_ids:
+                    timestamps = [
+                        int(row[0]) for row in session_db.execute(
+                            "SELECT observed_at_ms FROM capture_observations "
+                            "WHERE capture_id=? AND symbol=? AND observation_type='candle' "
+                            "ORDER BY observed_at_ms",
+                            (capture_id, symbol),
+                        ).fetchall()
+                    ]
+                else:
+                    timestamps = [
+                        int(row[0]) for row in session_db.execute(
+                            "SELECT minute_ts FROM minute_candles WHERE symbol=? AND is_closed=1 "
+                            "AND minute_ts >= ? AND minute_ts <= ? ORDER BY minute_ts",
+                            (symbol, start_minute, end_minute),
+                        ).fetchall()
+                    ]
             finally:
                 session_db.close()
             gaps = [
@@ -123,6 +144,10 @@ def evaluate_multiday_coverage(
             "status": "closed" if ended_at_ms is not None else "open",
             "overlapping_capture_ids": sorted(overlapping_capture_ids),
             "session_attribution_ambiguous": bool(overlapping_capture_ids),
+            "attribution_source": (
+                "capture_observations" if capture_id in exact_capture_ids
+                else "time_window_estimate_legacy_session"
+            ),
             "symbols": per_session,
         })
 
@@ -198,8 +223,11 @@ def evaluate_multiday_coverage(
         "capture_sessions": session_coverage,
         "interpretation": (
             "Daily history sufficiency only. An unclosed capture session blocks holdout readiness. "
-            "Overlapping sessions that share symbols have ambiguous candle attribution because "
-            "minute_candles are not keyed by capture_id. This gate does not establish continuous "
+            "Modern sessions are identified by an explicit provenance marker and use exact "
+            "capture-scoped links. Legacy sessions in mixed merged databases use labeled time-window "
+            "estimates because they have no marker. Overlapping sessions can still "
+            "share market minutes, but their observation provenance remains distinct. This gate "
+            "does not establish continuous "
             "coverage or data quality, statistical significance, predictive value, or profitability. "
             "Inspect capture-session boundaries and within-session gaps separately."
         ),

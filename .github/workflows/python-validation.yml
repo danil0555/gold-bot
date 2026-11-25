@@ -6,9 +6,9 @@ concurrency:
 
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model, research/market-feature-ablation, research/market-walkforward-regimes, research/directional-microstructure-scoring, research/market-discovery-engine-v1, research/multiday-coverage-gate-v2]
+    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model, research/market-feature-ablation, research/market-walkforward-regimes, research/directional-microstructure-scoring, research/market-discovery-engine-v1, research/multiday-coverage-gate-v2, research/capture-observation-provenance-v1]
   pull_request:
-    branches: [main]
+    branches: [main, research/multiday-coverage-gate-v2]
   workflow_dispatch:
 
 jobs:
@@ -35,11 +35,11 @@ jobs:
       - name: Run deterministic strategy and research tests
         run: python -m pytest -q tests/test_addon_strategies.py tests/test_spot_futures_arb.py tests/test_backtest_spot_futures_arb.py tests/test_scalping_100.py tests/test_market_research.py tests/test_market_walkforward.py tests/test_market_data_collector.py tests/test_microstructure_event_study.py tests/test_microstructure_data_quality.py tests/test_microstructure_discovery.py tests/test_market_move_discovery.py tests/test_market_pattern_mining.py tests/test_market_pattern_holdout.py tests/test_merge_microstructure_databases.py tests/test_multiday_coverage_gate.py
       - name: Run read-only public BingX spot-perpetual smoke scan
-        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/research/spot-futures-arbitrage'
+        if: (github.event_name == 'pull_request' && github.base_ref == 'main') || github.ref == 'refs/heads/research/spot-futures-arbitrage'
         run: python -m scripts.spot_futures_arb --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --notional 1000 --funding-periods 3
         timeout-minutes: 5
       - name: Run 180-day read-only spot-perpetual historical backtest
-        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/research/spot-futures-arbitrage'
+        if: (github.event_name == 'pull_request' && github.base_ref == 'main') || github.ref == 'refs/heads/research/spot-futures-arbitrage'
         run: python -m scripts.backtest_spot_futures_arb --days 180 --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --notional 1000
         timeout-minutes: 15
       - name: Run read-only BingX historical backtest (7 days)

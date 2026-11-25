@@ -194,3 +194,58 @@ def test_collector_records_session_start_and_stop(tmp_path):
     assert [item[0] for item in events] == [
         "capture_session_started", "capture_session_stopped"
     ]
+
+
+
+def test_market_observations_are_linked_to_capture_session():
+    agg = MarketMinuteAggregator(":memory:", symbols=["BTC-USDT"])
+    try:
+        capture_id = agg.capture_id
+        now_ms = int(__import__("time").time() * 1000)
+        current_minute = now_ms // 60_000 * 60_000
+        agg.process_trade({
+            "s": "BTC-USDT", "t": "trade-1", "T": current_minute - 50_000,
+            "p": "100", "q": "1", "m": False,
+        })
+        agg.flush_before(now_ms)
+        close_ts = current_minute - 1
+        assert agg.save_candle("BTC-USDT", {
+            "t": current_minute - 60_000, "T": close_ts,
+            "o": "100", "h": "102", "l": "99", "c": "101", "v": "1",
+        })
+        agg.save_derivatives("BTC-USDT", now_ms, open_interest=123.0)
+        rows = agg.db.execute(
+            "SELECT observation_type, COUNT(*) FROM capture_observations "
+            "WHERE capture_id=? GROUP BY observation_type ORDER BY observation_type",
+            (capture_id,),
+        ).fetchall()
+        assert rows == [
+            ("candle", 1), ("derivatives", 1), ("features", 1), ("session", 1)
+        ]
+    finally:
+        agg.close()
+
+
+
+def test_close_releases_database_when_final_flush_fails(tmp_path, monkeypatch):
+    path = tmp_path / "failed-final-flush.sqlite3"
+    agg = MarketMinuteAggregator(str(path), symbols=["BTC-USDT"])
+    capture_id = agg.capture_id
+
+    def fail_flush():
+        raise RuntimeError("simulated final flush failure")
+
+    monkeypatch.setattr(agg, "flush_all", fail_flush)
+    import pytest
+    with pytest.raises(RuntimeError, match="simulated final flush failure"):
+        agg.close()
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        agg.db.execute("SELECT 1")
+    with sqlite3.connect(path) as db:
+        ended_at_ms = db.execute(
+            "SELECT ended_at_ms FROM collector_sessions WHERE capture_id=?",
+            (capture_id,),
+        ).fetchone()[0]
+    # Failed flushes must not be recorded as cleanly completed captures.
+    assert ended_at_ms is None

@@ -12,13 +12,55 @@ import json
 import sqlite3
 from pathlib import Path
 
-TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events", "collector_sessions")
+TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events", "collector_sessions", "capture_observations")
 REQUIRED_TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events")
 KEYED_TABLES = ("minute_candles", "minute_features", "derivatives_snapshots")
 
 
 def _columns(connection: sqlite3.Connection, table: str, schema: str = "main") -> list[str]:
     return [row[1] for row in connection.execute(f"PRAGMA {schema}.table_info({table})")]
+
+
+def _ensure_capture_observations_schema(connection: sqlite3.Connection) -> None:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='capture_observations'"
+    ).fetchone()
+    if row is None:
+        connection.execute("""
+            CREATE TABLE capture_observations (
+                capture_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                observed_at_ms INTEGER NOT NULL,
+                observation_type TEXT NOT NULL CHECK (
+                    observation_type IN ('session', 'candle', 'features', 'derivatives')
+                ),
+                PRIMARY KEY(capture_id, symbol, observed_at_ms, observation_type)
+            )
+        """)
+        return
+
+    # PR #14's first schema version did not allow the session marker. Rebuild
+    # only the newly-created merge output, preserving every existing link.
+    if "'session'" not in str(row[0]).lower():
+        expected = ["capture_id", "symbol", "observed_at_ms", "observation_type"]
+        if _columns(connection, "capture_observations") != expected:
+            raise ValueError("unsupported capture_observations schema")
+        connection.execute("ALTER TABLE capture_observations RENAME TO capture_observations_legacy")
+        connection.execute("""
+            CREATE TABLE capture_observations (
+                capture_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                observed_at_ms INTEGER NOT NULL,
+                observation_type TEXT NOT NULL CHECK (
+                    observation_type IN ('session', 'candle', 'features', 'derivatives')
+                ),
+                PRIMARY KEY(capture_id, symbol, observed_at_ms, observation_type)
+            )
+        """)
+        connection.execute(
+            "INSERT INTO capture_observations SELECT * FROM capture_observations_legacy"
+        )
+        connection.execute("DROP TABLE capture_observations_legacy")
 
 
 def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
@@ -60,6 +102,7 @@ def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
             symbols_json TEXT NOT NULL
         )
     """)
+    _ensure_capture_observations_schema(destination)
     destination.commit()
     before = {
         table: int(destination.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
