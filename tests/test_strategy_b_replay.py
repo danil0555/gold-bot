@@ -273,3 +273,29 @@ def test_default_builder_trend_check_states_are_aggregated(monkeypatch):
         state_a: (calls + 1) // 2,
         state_b: calls // 2,
     }
+
+
+
+def test_default_builder_rejections_are_grouped_by_symbol(monkeypatch):
+    def builder(market, symbol, frames, quote=None, diagnostics=None):
+        diagnostics["reason"] = f"blocked_{symbol.lower()}"
+        diagnostics["stage"] = "strategy_filter"
+        diagnostics["trend_checks"] = f"{symbol}: trend mismatch"
+        return None
+
+    monkeypatch.setattr(
+        "scripts.strategy_b_replay._load_production_builder",
+        lambda: (builder, "10.2.2", "a" * 64, "b" * 64, 30),
+    )
+    result = replay_strategy_b({
+        "BTC-USDT": _all_frames(),
+        "ETH-USDT": _all_frames(),
+    })
+
+    grouped = result["diagnostics"]["builder_rejections_by_symbol"]
+    assert grouped["BTC-USDT"]["reasons"] == {"blocked_btc-usdt": 212}
+    assert grouped["ETH-USDT"]["reasons"] == {"blocked_eth-usdt": 212}
+    assert grouped["BTC-USDT"]["stages"] == {"strategy_filter": 212}
+    assert grouped["ETH-USDT"]["trend_check_states"] == {
+        "ETH-USDT: trend mismatch": 212
+    }
