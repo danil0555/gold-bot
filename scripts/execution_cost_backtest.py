@@ -1,7 +1,8 @@
 """Conservative close-to-close research backtest with explicit execution costs.
 
-Signals are assumed known after the signal candle closes. Entry is the next
-minute's close; exit is the exact configured horizon later. This intentionally
+Signals are assumed known after the signal candle closes. With OPEN-time candle
+keys, entry uses the candle opening at signal_ts (whose close is signal_ts+1m);
+exit uses the candle opening at signal_ts+horizon (whose close is horizon later). This intentionally
 does not model intrabar stops, limit fills, spread dynamics, or order-book impact.
 Funding is charged only from explicitly supplied settlement events. When a
 schedule is supplied, missing expected events invalidate the affected trade.
@@ -91,8 +92,12 @@ def run_close_to_close_backtest(
         if symbol in last_exit and entry_ts <= last_exit[symbol]:
             rejected["overlap"] += 1
             continue
-        entry = price_lookup.get((symbol, entry_ts))
-        exit_price = price_lookup.get((symbol, exit_ts))
+        # minute_ts is the candle OPEN timestamp. The candle opened at
+        # signal_ts closes one minute later and is the first executable
+        # close after the signal candle; looking up entry_ts would shift one
+        # full extra minute because the stored price is that candle's CLOSE.
+        entry = price_lookup.get((symbol, signal_ts))
+        exit_price = price_lookup.get((symbol, signal_ts + horizon_minutes * 60_000))
         if entry is None:
             rejected["missing_entry"] += 1
             continue
