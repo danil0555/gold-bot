@@ -35,8 +35,8 @@ def _validate_signals(name: str, signals: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(signals, pd.DataFrame) or not required.issubset(signals.columns):
         raise ValueError(f"{name}: signals require symbol, signal_ts, direction")
     result = signals[["symbol", "signal_ts", "direction"]].copy()
-    if result[["symbol", "signal_ts", "direction"]].isna().any().any():
-        raise ValueError(f"{name}: signal fields cannot be null")
+    if result[["symbol", "direction"]].isna().any().any():
+        raise ValueError(f"{name}: symbol and direction fields cannot be null")
     result["symbol"] = result["symbol"].astype(str).str.strip()
     if result["symbol"].eq("").any():
         raise ValueError(f"{name}: symbol cannot be empty")
