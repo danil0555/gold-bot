@@ -146,3 +146,44 @@ def test_unaligned_signal_and_candle_timestamps_are_rejected():
             _signals([("BTC", 0, "LONG")]), bad_candles,
             horizon_minutes=1, fee_bps_per_side=0, slippage_bps_per_side=0
         )
+
+
+def test_non_positive_execution_prices_are_classified_as_invalid():
+    candles = _candles().copy()
+    candles.loc[candles.minute_ts == 0, "close"] = 0
+    report = run_close_to_close_backtest(
+        _signals([("BTC", 0, "LONG")]), candles,
+        horizon_minutes=1, fee_bps_per_side=0, slippage_bps_per_side=0
+    )
+    assert report["trade_count"] == 0
+    assert report["rejected_signals"]["invalid_price"] == 1
+    assert report["rejected_signals"]["missing_entry"] == 0
+
+
+def test_invalid_and_duplicate_funding_records_fail_closed():
+    signals = _signals([("BTC", 0, "LONG")])
+    candles = _candles()
+    kwargs = dict(
+        horizon_minutes=2, fee_bps_per_side=0, slippage_bps_per_side=0,
+        expected_funding_timestamps_ms=[2 * 60_000]
+    )
+    bad_rate = pd.DataFrame(
+        [("BTC", 2 * 60_000, float("nan"))],
+        columns=["symbol", "ts_ms", "funding_rate"]
+    )
+    with pytest.raises(ValueError, match="finite"):
+        run_close_to_close_backtest(signals, candles, funding_events=bad_rate, **kwargs)
+
+    duplicate = pd.DataFrame(
+        [("BTC", 2 * 60_000, 0.001), ("BTC", 2 * 60_000, 0.001)],
+        columns=["symbol", "ts_ms", "funding_rate"]
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        run_close_to_close_backtest(signals, candles, funding_events=duplicate, **kwargs)
+
+    with pytest.raises(ValueError, match="integer milliseconds"):
+        run_close_to_close_backtest(
+            signals, candles, funding_events=None,
+            expected_funding_timestamps_ms=[2 * 60_000 + 0.5],
+            horizon_minutes=2, fee_bps_per_side=0, slippage_bps_per_side=0
+        )
