@@ -223,3 +223,14 @@ def test_merge_preserves_capture_scoped_feature_rows(tmp_path):
     assert {row[0] for row in rows} == ids
     assert {row[1] for row in rows} == {100.0, 200.0}
     assert report["rows_after"]["capture_minute_features"] == 2
+
+
+def test_legacy_capture_row_count_treats_missing_optional_table_as_zero(tmp_path):
+    from scripts.merge_microstructure_databases import _count_rows
+
+    path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE minute_candles (symbol TEXT, minute_ts INTEGER)")
+        db.execute("INSERT INTO minute_candles VALUES ('BTC-USDT', 1)")
+    assert _count_rows(path, "minute_candles") == 1
+    assert _count_rows(path, "capture_minute_features") == 0
