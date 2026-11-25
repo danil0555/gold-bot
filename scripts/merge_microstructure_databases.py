@@ -202,7 +202,12 @@ def merge_databases(inputs: list[str | Path], output: str | Path) -> dict:
 def _count_rows(path: Path, table: str) -> int:
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
-        return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        # Older collector captures legitimately predate optional v2 tables.
+        return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) if exists else 0
     finally:
         connection.close()
 
