@@ -89,11 +89,13 @@ def test_minute_candle_rejects_invalid_ohlcv():
 def test_kline_message_matches_bingx_swap_websocket_documented_shape():
     agg = MarketMinuteAggregator(":memory:")
     try:
+        now_ms = int(__import__("time").time() * 1000)
+        minute_ts = (now_ms // 60_000 - 2) * 60_000
         payload = {
-            "e": "kline", "E": int(__import__("time").time() * 1000), "s": "BTC-USDT",
+            "e": "kline", "E": now_ms, "s": "BTC-USDT",
             "K": {
-                "t": (int(__import__("time").time() * 1000) // 60_000 - 1) * 60_000,
-                "T": (int(__import__("time").time() * 1000) // 60_000) * 60_000 - 1,
+                "t": minute_ts,
+                "T": minute_ts + 59_999,
                 "o": "100", "h": "103", "l": "99", "c": "102", "v": "12.5",
             },
         }
