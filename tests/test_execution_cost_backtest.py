@@ -187,3 +187,10 @@ def test_invalid_and_duplicate_funding_records_fail_closed():
             expected_funding_timestamps_ms=[2 * 60_000 + 0.5],
             horizon_minutes=2, fee_bps_per_side=0, slippage_bps_per_side=0
         )
+
+def test_boolean_horizon_is_not_accepted_as_integer():
+    with pytest.raises(ValueError, match="positive integer"):
+        run_close_to_close_backtest(
+            _signals([("BTC", 0, "LONG")]), _candles(),
+            horizon_minutes=True, fee_bps_per_side=0, slippage_bps_per_side=0
+        )
