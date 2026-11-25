@@ -123,3 +123,26 @@ def test_entry_and_exit_use_closes_exactly_one_and_horizon_minutes_after_signal(
     assert trade["exit_ts"] == 180_000
     assert trade["entry_price"] == pytest.approx(100)
     assert trade["exit_price"] == pytest.approx(103)
+
+
+
+def test_missing_exact_exit_is_rejected_not_bridged():
+    candles = _candles().loc[lambda x: x.minute_ts != 60_000]
+    report = run_close_to_close_backtest(
+        _signals([("BTC", 0, "LONG")]), candles,
+        horizon_minutes=1, fee_bps_per_side=0, slippage_bps_per_side=0
+    )
+    assert report["trade_count"] == 0
+    assert report["rejected_signals"]["missing_exit"] == 1
+
+
+def test_unaligned_signal_and_candle_timestamps_are_rejected():
+    with pytest.raises(ValueError, match="signal_ts"):
+        _run(_signals([("BTC", 1, "LONG")]))
+    bad_candles = _candles().copy()
+    bad_candles.loc[0, "minute_ts"] += 1
+    with pytest.raises(ValueError, match="minute_ts"):
+        run_close_to_close_backtest(
+            _signals([("BTC", 0, "LONG")]), bad_candles,
+            horizon_minutes=1, fee_bps_per_side=0, slippage_bps_per_side=0
+        )
