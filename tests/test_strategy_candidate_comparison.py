@@ -74,3 +74,51 @@ def test_no_valid_trades_are_reported_without_inventing_metrics():
     )
     assert result["results"][0]["overall"]["status"] == "no_valid_trades"
     assert result["results"][0]["overall"]["net_expectancy_pct"] is None
+
+
+@pytest.mark.parametrize("bad_ts", [1.5, 60_000.5, float("inf"), float("nan")])
+def test_comparison_rejects_non_integer_or_non_finite_signal_timestamps(bad_ts):
+    bad = pd.DataFrame({
+        "symbol": ["BTC-USDT"], "signal_ts": [bad_ts], "direction": ["LONG"]
+    })
+    with pytest.raises(ValueError, match="signal_ts"):
+        compare_strategy_candidates(
+            {"Strategy B": bad}, _candles(), horizon_minutes=1
+        )
+
+
+def test_comparison_rejects_empty_symbol_and_blank_strategy_name():
+    empty_symbol = pd.DataFrame({
+        "symbol": ["  "], "signal_ts": [0], "direction": ["LONG"]
+    })
+    with pytest.raises(ValueError, match="symbol"):
+        compare_strategy_candidates(
+            {"Strategy B": empty_symbol}, _candles(), horizon_minutes=1
+        )
+    with pytest.raises(ValueError, match="strategy names"):
+        compare_strategy_candidates(
+            {
+                "Strategy B": _signals("BTC-USDT", "LONG"),
+                "   ": _signals("ETH-USDT", "SHORT"),
+            }, _candles(), horizon_minutes=1, baseline_name="Strategy B"
+        )
+
+
+def test_breakdowns_include_drawdown_profit_factor_and_sample_breadth():
+    stamps = tuple(i * 24 * 60 * 60_000 for i in range(4))
+    candles = pd.DataFrame([
+        {"symbol": "BTC-USDT", "minute_ts": ts, "close": 100.0}
+        for ts in range(0, stamps[-1] + 3 * 60_000, 60_000)
+    ])
+    signals = _signals("BTC-USDT", "LONG", stamps=stamps)
+    result = compare_strategy_candidates(
+        {"Strategy B": signals}, candles, horizon_minutes=1,
+        cost_scenarios=[{
+            "name": "zero", "fee_bps_per_side": 0, "slippage_bps_per_side": 0
+        }],
+    )
+    row = result["results"][0]
+    assert row["breadth"]["utc_entry_dates_observed"] == 4
+    assert row["breadth"]["four_or_more_utc_entry_dates_observed"] is True
+    assert row["by_symbol"][0]["max_drawdown_pct"] == 0.0
+    assert row["by_symbol"][0]["profit_factor"] is None

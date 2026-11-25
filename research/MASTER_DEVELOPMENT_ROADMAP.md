@@ -1,3 +1,23 @@
+## 2026-11-26 — backtest input hardening on comparison branch
+- During review of the shared close-to-close evaluator used by the Strategy B comparison layer, found that Python treats `bool` as a subclass of `int`; consequently `horizon_minutes=True` was accepted as a one-minute horizon.
+- Updated `scripts/execution_cost_backtest.py` to explicitly reject boolean horizons while retaining positive integer validation; added regression test in `tests/test_execution_cost_backtest.py`.
+- Commits: source `d3428b891e401e31bbbe2f11f2b52c97ae74f2ed`; regression test `fa65227291b52587277d7298318b7fd0720b60ef`.
+- This is research-branch-only validation hardening. It does not change Strategy B signal rules, fees, slippage, trade timing, risk settings or production behavior.
+- Latest branch head at this note: `fa65227291b52587277d7298318b7fd0720b60ef`. No workflow run is currently returned for this pushed/API-updated head; exact-head CI remains unverified. Do not claim tests pass until CI validates this exact head.
+- PR #18 remains Draft/open/unmerged. Production `main`, production DB, credentials, deployment and live order behavior remain untouched.
+
+## 2026-11-25 — Strategy B candidate comparison hardening (PR #18)
+- Inspected the planned priority C task and confirmed that a comparison helper already existed in `scripts/strategy_candidate_comparison.py`; this update hardens it rather than duplicating the subsystem.
+- Added strict validation for signal timestamps: fractional milliseconds, non-minute-aligned values, NaN and infinity are rejected instead of being silently coerced to integer timestamps. Empty symbols and blank/duplicate normalized strategy names are also rejected.
+- Per-symbol and per-UTC-entry-date reports now include trade count, win rate, net expectancy, compounded net return, profit factor and max drawdown. A descriptive breadth block counts observed symbols/dates and profitable symbol/date groups.
+- Explicitly documented that UTC dates are not necessarily independent statistical clusters and that R-multiples cannot be reported from this close-to-close interface without per-trade stop-risk metadata. No fake R metric is generated.
+- Added regression tests in `tests/test_strategy_candidate_comparison.py`; existing deterministic workflow already includes this module. Enabled push validation for branch `research/strategy-comparison-hardening-v1`.
+- Branch: `research/strategy-comparison-hardening-v1`; Draft PR #18: https://github.com/danil0555/gold-bot/pull/18. Latest code/workflow head before this roadmap update: `6ab300d2230b6218bc362cd2d71eb1924e77b7e8`.
+- First exact workflow run `45702483679` on code/workflow head `6ab300d2230b6218bc362cd2d71eb1924e77b7e8` failed in the deterministic suite: **163 passed, 1 failed**. The only failure was an assertion about the error message for NaN timestamps; the generic null-field check intercepted it before timestamp-specific validation. Compilation and runtime safe-default import passed.
+- Corrected the validation order so null symbol/direction fields are checked separately and NaN signal timestamps reach the explicit finite/numeric timestamp guard. Fix commit: `5b0d986a323d3ff928c0058a7b1a013a3fbf8a46`. New exact-head CI is required; the earlier 163/1 run remains a failure and is not validation of the fix.
+- Research only. No Strategy B production rules, production signals, risk settings, production DB, credentials, deployment or exchange order behavior changed. PR remains Draft/open/unmerged.
+- Next: verify exact-head CI, then continue integrating candidate generation and walk-forward/holdout evidence with Strategy B as the immutable baseline. Trade-lifecycle implementation remains separately gated by schema/DB review.
+
 ## 2026-11-25 — exact latest PR-head validation and coverage-gate clarification
 - Re-ran validation after the roadmap update. GitHub Actions run `45612012450` completed successfully on exact PR #12 head `47a4fcda6cf6f3a54fdfcd152b90f9b73dc0b549`; the log confirms **158 passed in 9.51s**, runtime import succeeded, and real orders/add-on strategies remained disabled in CI.
 - Capture run `45573371850` used older checked-out SHA `5bf6a78598c2e06f80a1a3d21b6f81b747c06203`. Its merged-data check reported `753 unique minutes across 2 UTC dates; holdout_ready=False`. No frozen holdout or pattern-mining run was performed.

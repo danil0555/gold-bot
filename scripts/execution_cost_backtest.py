@@ -37,7 +37,7 @@ def run_close_to_close_backtest(
     Funding events, when supplied, are exact settlement records with
     symbol, ts_ms, funding_rate (fraction, e.g. 0.0001 = 1 bp).
     """
-    if not isinstance(horizon_minutes, int) or horizon_minutes < 1:
+    if isinstance(horizon_minutes, bool) or not isinstance(horizon_minutes, int) or horizon_minutes < 1:
         raise ValueError("horizon_minutes must be a positive integer")
     fee = _validate_bps("fee_bps_per_side", fee_bps_per_side)
     slip = _validate_bps("slippage_bps_per_side", slippage_bps_per_side)
