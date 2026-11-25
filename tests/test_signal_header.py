@@ -42,3 +42,17 @@ def test_long_signal_starts_with_green_indicator_and_symbol():
 def test_risk_default_is_ten_percent_and_leverage_is_unchanged():
     assert RISK_PERCENT == 10.0
     assert FUTURES_LEVERAGE == 5
+
+def test_signal_shows_position_size_from_saved_balance():
+    rendered = signal_text(make_signal("LONG"), balance_usdt=1000.0)
+    assert "Риск до SL (10.0%): <code>100.00 USDT</code>" in rendered
+    assert "Объём: <code>50 BTC</code>" in rendered
+    assert "Номинал позиции: <code>5,000.00 USDT</code>" in rendered
+    assert "Маржа при 5x: <code>1,000.00 USDT</code>" in rendered
+
+
+def test_signal_warns_when_required_margin_exceeds_balance():
+    signal = make_signal("LONG")
+    signal["sl"] = 99.8
+    rendered = signal_text(signal, balance_usdt=1000.0)
+    assert "Не хватает баланса под расчётную маржу" in rendered
