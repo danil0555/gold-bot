@@ -396,3 +396,14 @@
 - Validation: commit `4ee76517eb102c6d9df37d55b221d534318f8e43` passed Python compilation, runtime safe-default checks and all 126 deterministic strategy/research tests in both push and PR CI runs. Extended read-only exchange scans/backtests were skipped in these runs, so they are not claimed as validated here. No research performance or profitability claim is made.
 - Follow-up hardening: rolling evaluation now discards a trailing fragment shorter than one full holdout window rather than reporting a tiny partial fold. The collector kline test now uses one fixed timestamp safely in the past, avoiding a wall-clock boundary race in its closed-candle assertion.
 - Production `main`, `trading_bot_v9.db`, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
+
+
+## 2026-11-25 — conservative execution-cost backtest foundation (CI pending)
+- Added a separate research-only close-to-close evaluator. A signal is considered known only after its candle closes; entry uses the next exact minute close and exit uses the exact configured horizon. Missing timestamps are rejected rather than bridged.
+- Added LONG/SHORT return handling, configurable per-side fees and slippage, one open position per symbol, exact settlement-time funding cashflows, and rejection of trades when a supplied funding schedule has missing settlement records.
+- Reports include gross/net expectancy, win rate, compounded return, profit factor, drawdown, holding time, funding counts and rejection reasons.
+- This is deliberately not described as a realistic fill engine: no intrabar stops/targets, order-book execution, dynamic spread, latency, market impact, liquidation or capital/margin allocation. Funding correctness depends on a complete settlement schedule and exact event records.
+- Added deterministic tests for direction, cost arithmetic, missing candles, overlap prevention, funding sign/coverage and invalid inputs. Added the test module to Python validation CI.
+- Commits: evaluator `e527e605c9d69b57f85b9149bdc2bd8896ac2687`; tests and corrected expectations `32b21bdaa77a59ed12ec3157d61831528437ff61`; CI/roadmap update follows.
+- Validation is pending on the latest branch head. No performance result has been generated because no verified historical execution dataset has been supplied to this evaluator.
+- Production `main`, `trading_bot_v9.db`, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
