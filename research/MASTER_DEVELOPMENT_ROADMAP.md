@@ -1,3 +1,10 @@
+## 2026-11-25 — exact latest PR-head validation and coverage-gate clarification
+- Re-ran validation after the roadmap update. GitHub Actions run `45612012450` completed successfully on exact PR #12 head `47a4fcda6cf6f3a54fdfcd152b90f9b73dc0b549`; the log confirms **158 passed in 9.51s**, runtime import succeeded, and real orders/add-on strategies remained disabled in CI.
+- Capture run `45573371850` used older checked-out SHA `5bf6a78598c2e06f80a1a3d21b6f81b747c06203`. Its merged-data check reported `753 unique minutes across 2 UTC dates; holdout_ready=False`. No frozen holdout or pattern-mining run was performed.
+- The latest research branch now contains `scripts/multiday_coverage_gate.py`, which checks each expected symbol independently for at least 600 closed minutes and 3 UTC dates. That newer per-symbol gate was added after the capture run's checked-out SHA, so it was not the gate executed in run `45573371850`; it will apply to a future capture dispatched from the updated branch.
+- The 4h raw capture itself is clean for candle continuity; the merged historical sample consists of three separate capture windows, not continuous history. Preserve this distinction in every downstream analysis.
+- PR #12 remains Draft/open/unmerged and non-mergeable/dirty due to its stacked base advancing. No rebase or merge attempted.
+
 ## 2026-11-25 — BingX capture analysis and validation result
 - Four-hour capture workflow `45573371850` completed successfully on `research/market-discovery-engine-v1` at SHA `5bf6a78598c2e06f80a1a3d21b6f81b747c06203`.
 - Current capture data quality: 7 symbols (ADA, BTC, DOGE, ETH, LINK, SOL, XRP); 1,687 closed 1m candles; 1,680 feature minutes; 283,396 depth samples; 314,174 trades; 3,360 derivatives snapshots; zero missing 1m candles in the current four-hour interval; depth minute coverage 98.75–100%; maximum derivatives gap 30s; no collector warnings.
