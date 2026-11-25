@@ -121,3 +121,20 @@ def test_additive_balance_schema_keeps_existing_rows_and_creates_backup(tmp_path
     assert profile_table is not None
     backups = list(backup_dir.glob("existing_bot_pre_migration_*.db"))
     assert len(backups) == 1
+
+
+def test_init_db_refuses_migration_when_backup_returns_none(tmp_path, monkeypatch):
+    db_path = tmp_path / 'old.sqlite3'
+    with sqlite3.connect(db_path) as con:
+        con.execute('CREATE TABLE legacy_marker (value TEXT)')
+        con.execute("INSERT INTO legacy_marker VALUES ('keep')")
+    monkeypatch.setattr(main, 'DB_PATH', db_path)
+    monkeypatch.setattr(main, 'BACKUP_DIR', tmp_path / 'backups')
+    monkeypatch.setattr(main, 'backup_and_verify_db', lambda: None)
+    with pytest.raises(RuntimeError, match='Резервная копия БД'):
+        main.init_db()
+    with sqlite3.connect(db_path) as con:
+        names = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        value = con.execute('SELECT value FROM legacy_marker').fetchone()[0]
+    assert value == 'keep'
+    assert 'user_risk_profiles' not in names
