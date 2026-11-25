@@ -87,3 +87,30 @@ def test_invalid_thresholds_are_rejected(tmp_path, minutes, days):
         evaluate_multiday_coverage(
             str(path), min_closed_minutes=minutes, min_utc_days=days
         )
+
+
+def test_sparse_utc_days_do_not_pass_daily_minimum(tmp_path):
+    path = tmp_path / "coverage.sqlite3"
+    rows = _minutes("BTC-USDT", 20_000, 590)
+    rows.extend(_minutes("BTC-USDT", 20_001, 5))
+    rows.extend(_minutes("BTC-USDT", 20_002, 5))
+    _database(path, rows)
+    report = evaluate_multiday_coverage(
+        str(path), min_closed_minutes=600, min_utc_days=3,
+        min_closed_minutes_per_utc_day=120,
+    )
+    metrics = report["per_symbol"]["BTC-USDT"]
+    assert metrics["minutes_ready"] is True
+    assert metrics["days_ready"] is True
+    assert metrics["daily_minutes_ready"] is False
+    assert metrics["undercovered_utc_days"] == ["2024-10-05", "2024-10-06"]
+    assert report["holdout_ready"] is False
+
+
+def test_daily_minimum_must_be_positive(tmp_path):
+    path = tmp_path / "coverage.sqlite3"
+    _database(path, [])
+    with pytest.raises(ValueError):
+        evaluate_multiday_coverage(
+            str(path), min_closed_minutes_per_utc_day=0
+        )
