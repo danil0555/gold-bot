@@ -439,3 +439,12 @@
 - Added deterministic tests for common cost application, baseline deltas, duplicate signals/scenarios, and no-valid-trade handling; registered them in Python validation CI.
 - This commit adds the comparison framework only. It does not generate strategy signals, claim a performance winner, or approve any candidate. A verified historical dataset and leakage-safe signal adapters are still required before a meaningful comparison can be run.
 - Production `main`, `trading_bot_v9.db`, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
+
+
+## 2026-11-25 — leakage-safe historical replay adapter for production Strategy B
+- Added `scripts/strategy_b_replay.py`. It lazily loads the unchanged `build_signal_b` function from the checked-out `main.py`; it does not start the bot, initialize its database, or place orders. The replay report records the production strategy version and SHA-256 of the loaded source file so results can be traced to the exact logic revision.
+- Input candles use explicit OPEN timestamps in milliseconds. At each 1m decision close, every timeframe is truncated to candles whose full interval has closed by that timestamp. Incomplete/future 5m/15m/1h/4h candles cannot enter the feature calculation. Each Strategy B `setup_key` is emitted only once.
+- Replay output is already shaped for the shared candidate comparator: symbol, decision timestamp, LONG/SHORT direction, and traceable setup metadata. Historical quotes can be supplied; otherwise Strategy B's configured synthetic-spread fallback is used and is disclosed.
+- Added deterministic tests for timeframe close-boundaries, setup deduplication, invalid/missing data, and loading the actual production builder without starting the bot. Registered tests in validation CI.
+- This is an adapter foundation, not a completed backtest. It still requires verified historical OHLCV for all five timeframes, correct exchange candle semantics, and a comparison run on the same 1m execution candles. The replay uses the `main.py` present in the checked-out branch; compare its recorded SHA/version with production before interpreting results.
+- Production `main`, database, credentials, hosting, live signals and exchange orders remain untouched. PR #12 remains draft and unmerged.
