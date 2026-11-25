@@ -240,9 +240,83 @@ def test_session_coverage_uses_exact_capture_observation_links(tmp_path):
                 for ts in [row[1] for row in rows[80:130]]
             ],
         )
+        db.executemany(
+            "INSERT INTO capture_observations VALUES (?, '', ?, 'session')",
+            [("capture-a", start), ("capture-b", start + 50 * 60_000)],
+        )
     report = evaluate_multiday_coverage(str(path), min_closed_minutes=1, min_utc_days=1)
     sessions = {item["capture_id"]: item for item in report["capture_sessions"]}
     assert sessions["capture-a"]["symbols"]["BTC-USDT"]["closed_minutes"] == 80
     assert sessions["capture-b"]["symbols"]["BTC-USDT"]["closed_minutes"] == 50
     assert sessions["capture-a"]["attribution_source"] == "capture_observations"
     assert sessions["capture-b"]["attribution_source"] == "capture_observations"
+
+
+def test_mixed_database_uses_time_window_estimate_for_legacy_session(tmp_path):
+    path = tmp_path / "mixed-coverage.sqlite3"
+    rows = _minutes("BTC-USDT", 20_000, 200)
+    _database(path, rows)
+    start = 20_000 * 86_400_000
+    with sqlite3.connect(path) as db:
+        db.executescript("""
+            CREATE TABLE collector_sessions (
+                capture_id TEXT PRIMARY KEY,
+                started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER,
+                symbols_json TEXT NOT NULL
+            );
+            CREATE TABLE capture_observations (
+                capture_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                observed_at_ms INTEGER NOT NULL,
+                observation_type TEXT NOT NULL CHECK (
+                    observation_type IN ('session', 'candle', 'features', 'derivatives')
+                ),
+                PRIMARY KEY(capture_id, symbol, observed_at_ms, observation_type)
+            );
+        """)
+        db.execute(
+            "INSERT INTO collector_sessions VALUES (?, ?, ?, ?)",
+            ("legacy-capture", start, start + 200 * 60_000, '["BTC-USDT"]'),
+        )
+    report = evaluate_multiday_coverage(str(path), min_closed_minutes=1, min_utc_days=1)
+    session = report["capture_sessions"][0]
+    assert session["symbols"]["BTC-USDT"]["closed_minutes"] == 200
+    assert session["attribution_source"] == "time_window_estimate_legacy_session"
+
+
+def test_modern_session_with_no_candle_links_is_not_misclassified_as_legacy(tmp_path):
+    path = tmp_path / "empty-modern-session.sqlite3"
+    rows = _minutes("BTC-USDT", 20_000, 200)
+    _database(path, rows)
+    start = 20_000 * 86_400_000
+    with sqlite3.connect(path) as db:
+        db.executescript("""
+            CREATE TABLE collector_sessions (
+                capture_id TEXT PRIMARY KEY,
+                started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER,
+                symbols_json TEXT NOT NULL
+            );
+            CREATE TABLE capture_observations (
+                capture_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                observed_at_ms INTEGER NOT NULL,
+                observation_type TEXT NOT NULL CHECK (
+                    observation_type IN ('session', 'candle', 'features', 'derivatives')
+                ),
+                PRIMARY KEY(capture_id, symbol, observed_at_ms, observation_type)
+            );
+        """)
+        db.execute(
+            "INSERT INTO collector_sessions VALUES (?, ?, ?, ?)",
+            ("modern-empty", start, start + 200 * 60_000, '["BTC-USDT"]'),
+        )
+        db.execute(
+            "INSERT INTO capture_observations VALUES (?, '', ?, 'session')",
+            ("modern-empty", start),
+        )
+    report = evaluate_multiday_coverage(str(path), min_closed_minutes=1, min_utc_days=1)
+    session = report["capture_sessions"][0]
+    assert session["symbols"]["BTC-USDT"]["closed_minutes"] == 0
+    assert session["attribution_source"] == "capture_observations"
