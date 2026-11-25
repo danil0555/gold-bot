@@ -93,6 +93,7 @@ def test_default_replay_loads_production_builder_without_starting_bot():
     assert result["checked_out_bot_version"] == "10.2.2"
     assert len(result["checked_out_main_sha256"]) == 64
     assert len(result["strategy_builder_sha256"]) == 64
+    assert result["signal_cooldown_minutes"] == 30
     assert result["status"] in {"evaluated", "no_signals"}
 
 
@@ -165,3 +166,55 @@ def test_replay_rejects_timeframe_misaligned_candle_open():
         replay_strategy_b(
             {"BTC-USDT": frames}, signal_builder=lambda *a, **k: None
         )
+
+
+
+def test_replay_applies_exact_production_cooldown_boundary():
+    calls = 0
+
+    def builder(market, symbol, frames, quote=None):
+        nonlocal calls
+        calls += 1
+        return {
+            "setup_key": f"unique-{calls}", "strategy_version": "B",
+            "side": "BUY", "entry": 100.0, "sl": 99.0,
+            "tp1": 101.8, "tp2": 103.0, "quality_score": 90.0,
+        }
+
+    result = replay_strategy_b(
+        {"BTC-USDT": _all_frames()}, signal_builder=builder
+    )
+    accepted = result["signals"]
+    assert result["signal_cooldown_minutes"] == 30
+    assert len(accepted) >= 2
+    assert all(
+        right["signal_ts"] - left["signal_ts"] == 31 * 60_000
+        for left, right in zip(accepted, accepted[1:])
+    )
+    assert result["diagnostics"]["cooldown_rejected"] > 0
+
+
+def test_replay_cooldown_is_separate_for_long_and_short_sides():
+    calls = 0
+
+    def builder(market, symbol, frames, quote=None):
+        nonlocal calls
+        side = "BUY" if calls % 2 == 0 else "SELL"
+        calls += 1
+        if side == "BUY":
+            levels = {"entry": 100.0, "sl": 99.0, "tp1": 101.8, "tp2": 103.0}
+        else:
+            levels = {"entry": 100.0, "sl": 101.0, "tp1": 98.2, "tp2": 97.0}
+        return {
+            "setup_key": f"side-unique-{calls}", "strategy_version": "B",
+            "side": side, **levels, "quality_score": 90.0,
+        }
+
+    result = replay_strategy_b(
+        {"BTC-USDT": _all_frames()}, signal_builder=builder
+    )
+    longs = [row for row in result["signals"] if row["direction"] == "LONG"]
+    shorts = [row for row in result["signals"] if row["direction"] == "SHORT"]
+    assert len(longs) >= 2 and len(shorts) >= 2
+    assert longs[1]["signal_ts"] - longs[0]["signal_ts"] == 32 * 60_000
+    assert shorts[1]["signal_ts"] - shorts[0]["signal_ts"] == 32 * 60_000
