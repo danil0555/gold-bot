@@ -221,6 +221,9 @@ def test_rolling_transfer_uses_expanding_train_and_non_overlapping_holdouts(monk
 
     assert report["report_type"] == "rolling_cross_symbol_pattern_transfer_v1"
     assert report["configuration"]["folds_evaluated"] == 4
+    assert report["configuration"]["trailing_eligible_timestamps_discarded"] == 2
+    assert report["configuration"]["trailing_fragment_start_utc_ms"] == 268 * 60_000
+    assert report["configuration"]["trailing_fragment_end_utc_ms"] == 269 * 60_000
     assert len(evaluation_calls) == 4
     previous_end = None
     previous_train_rows = 0
