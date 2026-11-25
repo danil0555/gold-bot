@@ -1605,6 +1605,7 @@ def position_size_text(signal, balance_usdt: float | None) -> str:
             for key in ("quantity", "risk_usdt", "notional_usdt", "margin_usdt"):
                 source = {"quantity": "quantity", "risk_usdt": "risk_usdt", "notional_usdt": "notional_usdt", "margin_usdt": "margin_usdt"}[key]
                 sizing[key] = float(checked[source])
+            sizing["fits_balance"] = sizing["margin_usdt"] <= balance_usdt
             contract_note = f"Биржевые ограничения BingX: <b>проверены</b> (точность {checked['quantity_precision']} знаков).\n"
         else:
             contract_note = "⛔ <b>Объём не подтверждён биржей:</b> " + html.escape(" / ".join(checked.get("reasons", []))) + ". Не используй расчёт как готовый ордер.\n"
