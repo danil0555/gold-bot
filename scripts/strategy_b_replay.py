@@ -54,7 +54,9 @@ def _load_production_builder():
     return builder, version, source_sha256, builder_sha256
 
 
-def _prepare_frame(symbol: str, timeframe: str, frame: pd.DataFrame) -> pd.DataFrame:
+def _prepare_frame(
+    symbol: str, timeframe: str, frame: pd.DataFrame, interval_ms: int
+) -> pd.DataFrame:
     missing = REQUIRED_COLUMNS - set(frame.columns)
     if missing:
         raise ValueError(f"{symbol} {timeframe}: missing columns {sorted(missing)}")
@@ -68,6 +70,11 @@ def _prepare_frame(symbol: str, timeframe: str, frame: pd.DataFrame) -> pd.DataF
     if out.duplicated("open_time").any():
         raise ValueError(f"{symbol} {timeframe}: duplicate candle timestamps")
     out = out.sort_values("open_time").reset_index(drop=True)
+    timestamps = out.open_time.to_numpy(dtype="int64")
+    if (timestamps % interval_ms != 0).any():
+        raise ValueError(f"{symbol} {timeframe}: candle open times are not timeframe-aligned")
+    if len(timestamps) > 1 and (timestamps[1:] - timestamps[:-1] != interval_ms).any():
+        raise ValueError(f"{symbol} {timeframe}: missing or non-contiguous candles")
     if (out[["open", "high", "low", "close"]] <= 0).any().any():
         raise ValueError(f"{symbol} {timeframe}: OHLC prices must be positive")
     if (out.volume < 0).any():
@@ -114,8 +121,8 @@ def replay_strategy_b(
         if missing_tf:
             raise ValueError(f"{symbol}: missing timeframes {sorted(missing_tf)}")
         prepared = {
-            tf: _prepare_frame(symbol, tf, frames[tf])
-            for tf in TIMEFRAME_MS
+            tf: _prepare_frame(symbol, tf, frames[tf], interval_ms)
+            for tf, interval_ms in TIMEFRAME_MS.items()
         }
         decision_times = (
             prepared["1m"].open_time + TIMEFRAME_MS["1m"]
