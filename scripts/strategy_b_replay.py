@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import inspect
 import os
 from pathlib import Path
 import tempfile
@@ -47,7 +48,9 @@ def _load_production_builder():
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
-    return builder, version, source_sha256
+    builder_source = inspect.getsource(builder).encode("utf-8")
+    builder_sha256 = hashlib.sha256(builder_source).hexdigest()
+    return builder, version, source_sha256, builder_sha256
 
 
 def _prepare_frame(symbol: str, timeframe: str, frame: pd.DataFrame) -> pd.DataFrame:
@@ -94,11 +97,12 @@ def replay_strategy_b(
     if min_history_rows < 205:
         raise ValueError("min_history_rows cannot be below production MIN_CANDLE_ROWS")
     if signal_builder is None:
-        builder, production_version, source_sha256 = _load_production_builder()
+        builder, checked_out_version, checked_out_main_sha256, builder_sha256 = _load_production_builder()
     else:
         builder = signal_builder
-        production_version = None
-        source_sha256 = None
+        checked_out_version = None
+        checked_out_main_sha256 = None
+        builder_sha256 = None
 
     output = []
     diagnostics = {"decisions": 0, "insufficient_history": 0,
@@ -132,13 +136,42 @@ def replay_strategy_b(
                 diagnostics["insufficient_history"] += 1
                 continue
             diagnostics["decisions"] += 1
-            signal = builder(
-                "swap", symbol, aligned,
-                quote=(quote_by_symbol or {}).get(symbol),
-            )
-            if not signal:
+            quote = (quote_by_symbol or {}).get(symbol)
+            if quote is not None and not isinstance(quote, Mapping):
+                raise ValueError(f"{symbol}: quote must be a mapping")
+            signal = builder("swap", symbol, aligned, quote=quote)
+            if signal is None:
                 diagnostics["no_signal"] += 1
                 continue
+            if not isinstance(signal, Mapping):
+                raise ValueError(f"{symbol}: Strategy B builder must return a mapping or None")
+            side = str(signal.get("side", "")).upper()
+            if side not in {"BUY", "SELL"}:
+                raise ValueError(f"{symbol}: Strategy B returned unsupported side {side!r}")
+            required_signal_fields = ("entry", "sl", "tp1", "tp2", "quality_score")
+            missing_signal_fields = [key for key in required_signal_fields if key not in signal]
+            if missing_signal_fields:
+                raise ValueError(
+                    f"{symbol}: Strategy B signal missing fields {missing_signal_fields}"
+                )
+            levels = {}
+            for key in required_signal_fields:
+                try:
+                    value = float(signal[key])
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError(f"{symbol}: invalid signal field {key}") from exc
+                if not pd.notna(value) or not __import__("math").isfinite(value):
+                    raise ValueError(f"{symbol}: non-finite signal field {key}")
+                levels[key] = value
+            entry, sl, tp1, tp2 = (
+                levels["entry"], levels["sl"], levels["tp1"], levels["tp2"]
+            )
+            if min(entry, sl, tp1, tp2) <= 0:
+                raise ValueError(f"{symbol}: signal price levels must be positive")
+            if side == "BUY" and not (sl < entry < tp1 < tp2):
+                raise ValueError(f"{symbol}: invalid BUY SL/entry/TP ordering")
+            if side == "SELL" and not (tp2 < tp1 < entry < sl):
+                raise ValueError(f"{symbol}: invalid SELL SL/entry/TP ordering")
             setup_key = str(signal.get("setup_key") or "")
             if not setup_key:
                 raise ValueError("Strategy B signal missing setup_key; cannot deduplicate safely")
@@ -149,22 +182,23 @@ def replay_strategy_b(
             output.append({
                 "symbol": symbol,
                 "signal_ts": int(decision_ts),
-                "direction": "LONG" if str(signal.get("side", "")).upper() == "BUY" else "SHORT",
+                "direction": "LONG" if side == "BUY" else "SHORT",
                 "setup_key": setup_key,
                 "strategy_version": str(signal.get("strategy_version", "B")),
-                "entry_reference": float(signal["entry"]),
-                "sl": float(signal["sl"]),
-                "tp1": float(signal["tp1"]),
-                "tp2": float(signal["tp2"]),
-                "quality_score": float(signal["quality_score"]),
+                "entry_reference": entry,
+                "sl": sl,
+                "tp1": tp1,
+                "tp2": tp2,
+                "quality_score": levels["quality_score"],
                 "market_regime": str(signal.get("market_regime", "unknown")),
             })
 
     return {
         "report_type": "strategy_b_historical_replay_v1",
         "status": "evaluated" if output else "no_signals",
-        "production_strategy_version": production_version,
-        "production_main_sha256": source_sha256,
+        "checked_out_bot_version": checked_out_version,
+        "checked_out_main_sha256": checked_out_main_sha256,
+        "strategy_builder_sha256": builder_sha256,
         "signal_count": len(output),
         "diagnostics": diagnostics,
         "signals": output,
@@ -177,7 +211,7 @@ def replay_strategy_b(
         ],
         "limitations": [
             "Historical spread snapshots are optional; absent quotes use Strategy B's configured synthetic spread fallback.",
-            "The replay uses the main.py version present in the checked-out research branch; compare its source SHA/version with production before interpreting results.",
+            "The replay imports main.py from the checked-out research branch. Its full-file SHA identifies that exact file; strategy_builder_sha256 separately fingerprints build_signal_b. Verify both against the intended production source before interpreting results.",
             "This replay does not model order fills, intrabar stop/target ordering, latency, market impact, funding or portfolio margin.",
             "The adapter is research-only and never changes live signals or places orders.",
         ],
