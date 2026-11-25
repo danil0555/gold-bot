@@ -648,3 +648,12 @@
 - Job log confirms: Python compilation passed; runtime import/safe defaults passed with real trading and add-on strategies disabled; deterministic reliability/add-on/API suite **21 passed**; signal, balance persistence and position-sizing suite **25 passed**. Optional read-only 7-day BingX historical backtest was skipped.
 - The 25-test signal/sizing group includes the new six-case balance/stop-distance/precision stress parameterization and the explicit demonstration that three independent 10% positions can sum to 30% nominal aggregate risk. Rounded-down size remained at or below the per-trade 10% budget in all six cases.
 - PR #16 is still Draft/open/unmerged. Latest GitHub snapshot reports `mergeable=true`; no merge, deployment, database migration or real orders were performed. Production `main` remains untouched.
+
+
+## 2026-11-25 — PR #14 collector shutdown safety and CI activation
+- Read-only audit found `MarketMinuteAggregator.close()` closed the SQLite connection only after `flush_all()` succeeded. A final flush exception could therefore leak the DB handle while leaving the session open.
+- Hardened `close()` with `finally: self.db.close()`. If flush fails, the session's `ended_at_ms` is intentionally left NULL and no clean stop event is written; this preserves fail-closed coverage semantics while releasing the file handle.
+- Added regression test `test_close_releases_database_when_final_flush_fails` to verify the handle is closed and the capture remains marked open after a simulated flush error.
+- Enabled pull-request validation for the research base `research/multiday-coverage-gate-v2` and restricted unrelated spot/perpetual live smoke and 180-day backtest steps to PRs targeting production `main` only.
+- The first validation run `45681463142` was superseded/cancelled during the workflow update before deterministic tests completed. Replacement run `45681566207` is in progress on the updated PR #14 head; no CI pass is claimed yet.
+- PR #14 remains Draft/open/unmerged. Production `main`, production DB, credentials, deployment and exchange orders remain untouched.
