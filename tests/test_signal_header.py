@@ -48,6 +48,7 @@ def test_risk_default_is_ten_percent_and_leverage_is_unchanged():
     assert RISK_PERCENT == 10.0
     assert FUTURES_LEVERAGE == 5
 
+
 def test_signal_shows_position_size_from_saved_balance():
     rendered = signal_text(make_signal("LONG"), balance_usdt=1000.0)
     assert "Риск до SL (10.0%): <code>100.00 USDT</code>" in rendered
@@ -61,6 +62,28 @@ def test_signal_warns_when_required_margin_exceeds_balance():
     signal["sl"] = 99.8
     rendered = signal_text(signal, balance_usdt=1000.0)
     assert "Не хватает баланса под расчётную маржу" in rendered
+
+
+def test_signal_renders_when_bingx_contract_constraints_are_valid(monkeypatch):
+    from decimal import Decimal
+
+    monkeypatch.setattr(main, "contract_specs_cache", {
+        "BTC-USDT": {
+            "quantity_precision": 2,
+            "min_quantity": Decimal("0.001"),
+            "min_notional": Decimal("5"),
+            "active": True,
+            "api_open": True,
+            "max_long_leverage": Decimal("20"),
+        }
+    })
+    monkeypatch.setattr(main, "contract_specs_updated_at", main.time.time())
+
+    rendered = signal_text(make_signal("LONG"), balance_usdt=1000.0)
+
+    assert "Биржевые ограничения BingX: <b>проверены</b> (точность 2 знаков)." in rendered
+    assert "Объём не подтверждён биржей" not in rendered
+    assert "Объём: <code>50 BTC</code>" in rendered
 
 
 def test_user_balance_is_saved_per_user_in_additive_profile_table(tmp_path, monkeypatch):
