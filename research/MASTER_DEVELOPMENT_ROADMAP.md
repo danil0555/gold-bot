@@ -1,3 +1,11 @@
+## 2026-11-26 — backtest input hardening on comparison branch
+- During review of the shared close-to-close evaluator used by the Strategy B comparison layer, found that Python treats `bool` as a subclass of `int`; consequently `horizon_minutes=True` was accepted as a one-minute horizon.
+- Updated `scripts/execution_cost_backtest.py` to explicitly reject boolean horizons while retaining positive integer validation; added regression test in `tests/test_execution_cost_backtest.py`.
+- Commits: source `d3428b891e401e31bbbe2f11f2b52c97ae74f2ed`; regression test `fa65227291b52587277d7298318b7fd0720b60ef`.
+- This is research-branch-only validation hardening. It does not change Strategy B signal rules, fees, slippage, trade timing, risk settings or production behavior.
+- Latest branch head at this note: `fa65227291b52587277d7298318b7fd0720b60ef`. No workflow run is currently returned for this pushed/API-updated head; exact-head CI remains unverified. Do not claim tests pass until CI validates this exact head.
+- PR #18 remains Draft/open/unmerged. Production `main`, production DB, credentials, deployment and live order behavior remain untouched.
+
 ## 2026-11-25 — Strategy B candidate comparison hardening (PR #18)
 - Inspected the planned priority C task and confirmed that a comparison helper already existed in `scripts/strategy_candidate_comparison.py`; this update hardens it rather than duplicating the subsystem.
 - Added strict validation for signal timestamps: fractional milliseconds, non-minute-aligned values, NaN and infinity are rejected instead of being silently coerced to integer timestamps. Empty symbols and blank/duplicate normalized strategy names are also rejected.
