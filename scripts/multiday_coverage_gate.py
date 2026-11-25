@@ -62,15 +62,22 @@ def evaluate_multiday_coverage(
             session_symbols = []
         per_session = {}
         for symbol in session_symbols:
-            timestamps = [
-                int(row[0]) for row in sqlite3.connect(
-                    f"file:{Path(db_path).resolve()}?mode=ro", uri=True
-                ).execute(
-                    "SELECT minute_ts FROM minute_candles WHERE symbol=? AND is_closed=1 "
-                    "AND minute_ts >= ? AND minute_ts <= ? ORDER BY minute_ts",
-                    (symbol, int(started_at_ms), int(ended_at_ms or started_at_ms)),
-                ).fetchall()
-            ]
+            session_db = sqlite3.connect(
+                f"file:{Path(db_path).resolve()}?mode=ro", uri=True
+            )
+            try:
+                start_minute = int(started_at_ms) // 60_000 * 60_000
+                end_value = int(ended_at_ms) if ended_at_ms is not None else int(__import__("time").time() * 1000)
+                end_minute = end_value // 60_000 * 60_000
+                timestamps = [
+                    int(row[0]) for row in session_db.execute(
+                        "SELECT minute_ts FROM minute_candles WHERE symbol=? AND is_closed=1 "
+                        "AND minute_ts >= ? AND minute_ts <= ? ORDER BY minute_ts",
+                        (symbol, start_minute, end_minute),
+                    ).fetchall()
+                ]
+            finally:
+                session_db.close()
             gaps = [
                 max(0, (right - left) // 60_000 - 1)
                 for left, right in zip(timestamps, timestamps[1:])
