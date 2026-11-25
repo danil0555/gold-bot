@@ -1,3 +1,14 @@
+## 2026-11-25 — rolling transfer tail-coverage diagnostics
+- Audited the rolling cross-symbol transfer evaluator after the prior CI success.
+- Found that the evaluator intentionally discards a trailing eligible fragment shorter than a complete holdout window, but the report did not quantify that discarded fragment.
+- Added `trailing_eligible_timestamps_discarded`, `trailing_fragment_start_utc_ms`, and `trailing_fragment_end_utc_ms` to the rolling transfer configuration. This is reporting-only; fold boundaries, labels, training, holdout samples, and pattern selection are unchanged.
+- Added a deterministic test for the two trailing eligible timestamps in the 300-minute synthetic panel.
+- Commits: implementation `9ab5cfb486ba20ed523c1b56848dc2c62e082f4f`; test `0f86b7e2eef7adf29af77c5e1688d733698beda8`.
+- Validation: CI for the new HEAD is pending; do not treat this addition as validated until its workflow run succeeds.
+- The four-hour BingX capture run `45573371850` remains a separate read-only workflow; inspect its final artifacts before interpreting market patterns.
+- Production `main`, production database, credentials, deployment, and exchange orders remain untouched. PR #12 remains draft and unmerged.
+- Next: confirm CI for this commit, then inspect the four-hour capture report and data-quality audit.
+  
 # Master Development Roadmap — Trading Bot
 
 > Единая точка отсчёта для продолжения разработки в новых чатах. Обновлять этот файл при каждом согласованном изменении плана, реализации, проверке или переносе задачи.
