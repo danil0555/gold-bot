@@ -82,3 +82,11 @@ python -m pytest -q tests/test_microstructure_discovery.py
 - Regression tests cover session diagnostics, sparse UTC dates and legacy-capture compatibility.
 - Next: validate the exact branch through CI before relying on this metadata in another research run. Consider a strict gap gate only after inspecting real within-session gap distributions.
 - Research-only: production code, production DB, credentials, deployment and exchange orders untouched.
+
+## Capture-session integrity follow-up
+
+- The collector runs its normal shutdown path in a `finally` block, but an abrupt process/host termination can leave `collector_sessions.ended_at_ms` null.
+- The multi-day coverage gate now reports these as `open_capture_sessions` and blocks `holdout_ready` until every recorded capture session is closed. This avoids treating a potentially incomplete capture as a finalized research dataset.
+- Sessions whose time intervals overlap while sharing one or more symbols are listed in `ambiguous_capture_sessions`; each affected session is marked `session_attribution_ambiguous=true`.
+- This ambiguity exists because `minute_candles` is keyed by `(symbol, minute_ts)`, not by `capture_id`. The diagnostic does not guess which capture produced a shared candle and does not silently claim exact per-session attribution.
+- These checks improve provenance diagnostics; they do not establish uninterrupted market-data coverage, data correctness, statistical significance, predictive edge, or profitability.
