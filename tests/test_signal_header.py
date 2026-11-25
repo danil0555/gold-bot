@@ -29,13 +29,13 @@ def make_signal(side: str) -> dict:
 
 def test_short_signal_starts_with_red_indicator_and_symbol():
     rendered = signal_text(make_signal("SHORT"))
-    assert rendered.startswith("🔴 <b>SHORT — BTC-USDT</b>\\n")
+    assert rendered.startswith("🔴 <b>SHORT — BTC-USDT</b>\n")
     assert "FUTURES SCALP — СИГНАЛ" not in rendered
 
 
 def test_long_signal_starts_with_green_indicator_and_symbol():
     rendered = signal_text(make_signal("LONG"))
-    assert rendered.startswith("🟢 <b>LONG — BTC-USDT</b>\\n")
+    assert rendered.startswith("🟢 <b>LONG — BTC-USDT</b>\n")
     assert "FUTURES SCALP — СИГНАЛ" not in rendered
 
 
