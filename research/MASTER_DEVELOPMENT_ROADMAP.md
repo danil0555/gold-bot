@@ -1,3 +1,14 @@
+## 2026-11-25 — Strategy B candidate comparison hardening (PR #18)
+- Inspected the planned priority C task and confirmed that a comparison helper already existed in `scripts/strategy_candidate_comparison.py`; this update hardens it rather than duplicating the subsystem.
+- Added strict validation for signal timestamps: fractional milliseconds, non-minute-aligned values, NaN and infinity are rejected instead of being silently coerced to integer timestamps. Empty symbols and blank/duplicate normalized strategy names are also rejected.
+- Per-symbol and per-UTC-entry-date reports now include trade count, win rate, net expectancy, compounded net return, profit factor and max drawdown. A descriptive breadth block counts observed symbols/dates and profitable symbol/date groups.
+- Explicitly documented that UTC dates are not necessarily independent statistical clusters and that R-multiples cannot be reported from this close-to-close interface without per-trade stop-risk metadata. No fake R metric is generated.
+- Added regression tests in `tests/test_strategy_candidate_comparison.py`; existing deterministic workflow already includes this module. Enabled push validation for branch `research/strategy-comparison-hardening-v1`.
+- Branch: `research/strategy-comparison-hardening-v1`; Draft PR #18: https://github.com/danil0555/gold-bot/pull/18. Latest code/workflow head before this roadmap update: `6ab300d2230b6218bc362cd2d71eb1924e77b7e8`.
+- GitHub Actions run `45702483679` on code/workflow head `6ab300d2230b6218bc362cd2d71eb1924e77b7e8`: compilation and runtime safe-default import passed; deterministic test step was in progress at last inspection. Do not claim test success until a completed run validates the exact final head.
+- Research only. No Strategy B production rules, production signals, risk settings, production DB, credentials, deployment or exchange order behavior changed. PR remains Draft/open/unmerged.
+- Next: verify exact-head CI, then continue integrating candidate generation and walk-forward/holdout evidence with Strategy B as the immutable baseline. Trade-lifecycle implementation remains separately gated by schema/DB review.
+
 ## 2026-11-25 — exact latest PR-head validation and coverage-gate clarification
 - Re-ran validation after the roadmap update. GitHub Actions run `45612012450` completed successfully on exact PR #12 head `47a4fcda6cf6f3a54fdfcd152b90f9b73dc0b549`; the log confirms **158 passed in 9.51s**, runtime import succeeded, and real orders/add-on strategies remained disabled in CI.
 - Capture run `45573371850` used older checked-out SHA `5bf6a78598c2e06f80a1a3d21b6f81b747c06203`. Its merged-data check reported `753 unique minutes across 2 UTC dates; holdout_ready=False`. No frozen holdout or pattern-mining run was performed.
