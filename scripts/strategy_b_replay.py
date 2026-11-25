@@ -130,6 +130,7 @@ def replay_strategy_b(
         "cooldown_rejected": 0,
         "builder_rejection_reasons": {},
         "builder_rejection_stages": {},
+        "builder_trend_check_states": {},
     }
     last_accepted_by_cooldown: dict[tuple[str, str, str, str], int] = {}
     for symbol, frames in candles_by_symbol.items():
@@ -182,6 +183,11 @@ def replay_strategy_b(
                     stages = diagnostics["builder_rejection_stages"]
                     reasons[reason] = reasons.get(reason, 0) + 1
                     stages[stage] = stages.get(stage, 0) + 1
+                    trend_state = builder_diagnostics.get("trend_checks")
+                    if trend_state:
+                        trend_states = diagnostics["builder_trend_check_states"]
+                        trend_state = str(trend_state)
+                        trend_states[trend_state] = trend_states.get(trend_state, 0) + 1
                 continue
             if not isinstance(signal, Mapping):
                 raise ValueError(f"{symbol}: Strategy B builder must return a mapping or None")
@@ -264,6 +270,7 @@ def replay_strategy_b(
             "Each accepted Strategy B setup_key is emitted once; cooldown-rejected setups are not marked as saved.",
             "Production SIGNAL_COOLDOWN_MINUTES is applied per market/symbol/side/strategy_version; the exact boundary is rejected just as in save_signal.",
             "When using the checked-out production builder, its existing rejection reason/stage diagnostics are counted without changing strategy decisions or thresholds.",
+            "When trend alignment fails, the builder's existing BUY/SELL sub-check state is aggregated verbatim to expose which timeframe checks most often disagree.",
             "Signal timestamp is the decision candle close; the execution-cost evaluator enters at the next exact 1m close.",
         ],
         "limitations": [
@@ -272,5 +279,6 @@ def replay_strategy_b(
             "This replay does not model order fills, intrabar stop/target ordering, latency, market impact, funding or portfolio margin.",
             "The adapter is research-only and never changes live signals or places orders.",
             "Rejection counts describe the checked-out builder's current diagnostic labels; they are not calibrated probabilities and may change when builder wording changes.",
+            "Trend-check state counts are exact combinations from the builder, not independent causal estimates for each filter.",
         ],
     }
