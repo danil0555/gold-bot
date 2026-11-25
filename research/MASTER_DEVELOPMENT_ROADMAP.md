@@ -626,3 +626,11 @@
 - Public endpoint schema confirmed in BingX API reference: `/openApi/swap/v2/quote/contracts`; the same reference documents `quantityPrecision`, `tradeMinQuantity`, `tradeMinUSDT`, `status`, `apiStateOpen`, and max leverage. `/openApi/swap/v1/tradingRules` additionally documents min-size and price-protection fields, but it does not expose a distinct quantity-step property.
 - Exact-head CI for commit `2fe7d05fe4a9e213117f5ef388b93dce85f975ed`, run `45650662441`, passed compile, runtime safe-default checks, 21 deterministic tests and 17 signal/balance/position-sizing tests. Optional 7-day backtest was skipped. A subsequent small retry-loop adjustment was committed as `b8d51e1c9da1f36ac74adaf5ddda02750207c8c8`; exact-head CI for that final adjustment has not yet been confirmed.
 - No credentials, account balances, private account endpoints, live DB, real orders, or production `main` were touched. PR #16 remains Draft/unmerged.
+
+
+## 2026-11-25 — PR #16 BingX validated-signal rendering regression fix
+- A code-path audit found that `position_size_text()` read `checked["quantity_precision"]` after a successful contract validation, but `apply_bingx_contract_constraints()` did not return that field. Consequently, a valid BingX contract could trigger a KeyError while formatting the Telegram signal.
+- Fixed the helper to include the validated integer precision in its result. Added a unit assertion for the returned precision and an integration regression test that renders a LONG signal with fresh, valid BTC-USDT contract metadata and checks the verified-status text.
+- Commits: helper fix `f92cf8e3148662ab7852c5d1ef45ec8e831d0760`; helper test `b3c07e1726eee9aa18b7d4d01ab3749967b2b81e`; signal-rendering integration test `12a0c541e4b84d0329e3e3e6acbb905c82dc4379`.
+- Exact-head CI for `12a0c541e4b84d0329e3e3e6acbb905c82dc4379` has not yet been reported. Earlier CI run `45650662441` validated only the older commit `2fe7d05fe4a9e213117f5ef388b93dce85f975ed`; it does not validate this regression fix.
+- PR #16 remains Draft/open/unmerged. Production `main`, live database, credentials, deployment and exchange orders remain untouched. No real exchange order placement is enabled.
