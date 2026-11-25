@@ -131,6 +131,7 @@ def replay_strategy_b(
         "builder_rejection_reasons": {},
         "builder_rejection_stages": {},
         "builder_trend_check_states": {},
+        "builder_rejections_by_symbol": {},
     }
     last_accepted_by_cooldown: dict[tuple[str, str, str, str], int] = {}
     for symbol, frames in candles_by_symbol.items():
@@ -188,6 +189,17 @@ def replay_strategy_b(
                         trend_states = diagnostics["builder_trend_check_states"]
                         trend_state = str(trend_state)
                         trend_states[trend_state] = trend_states.get(trend_state, 0) + 1
+
+                    symbol_stats = diagnostics["builder_rejections_by_symbol"].setdefault(
+                        symbol, {"reasons": {}, "stages": {}, "trend_check_states": {}}
+                    )
+                    symbol_reasons = symbol_stats["reasons"]
+                    symbol_stages = symbol_stats["stages"]
+                    symbol_reasons[reason] = symbol_reasons.get(reason, 0) + 1
+                    symbol_stages[stage] = symbol_stages.get(stage, 0) + 1
+                    if trend_state:
+                        symbol_trends = symbol_stats["trend_check_states"]
+                        symbol_trends[trend_state] = symbol_trends.get(trend_state, 0) + 1
                 continue
             if not isinstance(signal, Mapping):
                 raise ValueError(f"{symbol}: Strategy B builder must return a mapping or None")
@@ -271,6 +283,7 @@ def replay_strategy_b(
             "Production SIGNAL_COOLDOWN_MINUTES is applied per market/symbol/side/strategy_version; the exact boundary is rejected just as in save_signal.",
             "When using the checked-out production builder, its existing rejection reason/stage diagnostics are counted without changing strategy decisions or thresholds.",
             "When trend alignment fails, the builder's existing BUY/SELL sub-check state is aggregated verbatim to expose which timeframe checks most often disagree.",
+            "Rejection reasons, stages, and trend-check combinations are also grouped by symbol so cross-symbol bottlenecks are visible.",
             "Signal timestamp is the decision candle close; the execution-cost evaluator enters at the next exact 1m close.",
         ],
         "limitations": [
