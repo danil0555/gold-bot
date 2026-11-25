@@ -101,3 +101,5 @@ python -m pytest -q tests/test_microstructure_discovery.py
 - Existing market tables and old databases are not migrated or rewritten. The feature is research-only and requires a fresh collector run to populate exact links; old merged captures cannot be retroactively attributed exactly.
 
 - Mixed old/new merged databases use an explicit `session` provenance marker: modern sessions with no candle links correctly report zero exact observations, while legacy sessions without a marker use a clearly labeled time-window estimate. This avoids treating every old session as empty merely because the merged database contains the newer mapping table.
+
+- The merge output upgrades the earlier mapping-table CHECK constraint to allow the explicit session marker, preserving existing observation links. This matters when an older PR #14 capture is the first input and a newer capture is merged after it.
