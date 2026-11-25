@@ -81,7 +81,7 @@ def depth_snapshot_features(data):
 
 
 class MarketMinuteAggregator:
-    def __init__(self, db_path):
+    def __init__(self, db_path, symbols=None):
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self.db = sqlite3.connect(db_path)
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -139,7 +139,23 @@ class MarketMinuteAggregator:
             event_type TEXT NOT NULL,
             detail TEXT
         );
+        CREATE TABLE IF NOT EXISTS collector_sessions (
+            capture_id TEXT PRIMARY KEY,
+            started_at_ms INTEGER NOT NULL,
+            ended_at_ms INTEGER,
+            symbols_json TEXT NOT NULL
+        );
         """)
+        self.capture_id = uuid.uuid4().hex
+        self.session_started_at_ms = int(time.time() * 1000)
+        self.db.execute(
+            "INSERT INTO collector_sessions(capture_id, started_at_ms, symbols_json) VALUES (?, ?, ?)",
+            (self.capture_id, self.session_started_at_ms, json.dumps(sorted(set(symbols or [])))),
+        )
+        self.db.execute(
+            "INSERT INTO collector_events(ts_ms,event_type,detail) VALUES(?,?,?)",
+            (self.session_started_at_ms, "capture_session_started", self.capture_id),
+        )
         self.db.commit()
         self.pending = {}
         self.seen_trade_ids = set()
@@ -317,6 +333,16 @@ class MarketMinuteAggregator:
 
     def close(self):
         self.flush_all()
+        ended_at_ms = int(time.time() * 1000)
+        self.db.execute(
+            "UPDATE collector_sessions SET ended_at_ms=? WHERE capture_id=?",
+            (ended_at_ms, self.capture_id),
+        )
+        self.db.execute(
+            "INSERT INTO collector_events(ts_ms,event_type,detail) VALUES(?,?,?)",
+            (ended_at_ms, "capture_session_stopped", self.capture_id),
+        )
+        self.db.commit()
         self.db.close()
 
 
@@ -463,7 +489,7 @@ async def websocket_loop(session, aggregator, symbols):
 
 
 async def run_collector(symbols, db_path, duration_hours, derivatives_interval):
-    aggregator = MarketMinuteAggregator(db_path)
+    aggregator = MarketMinuteAggregator(db_path, symbols=symbols)
     timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:

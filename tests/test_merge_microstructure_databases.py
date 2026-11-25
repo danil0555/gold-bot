@@ -24,6 +24,10 @@ CREATE TABLE collector_events (
  id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL,
  event_type TEXT NOT NULL, detail TEXT
 );
+CREATE TABLE collector_sessions (
+ capture_id TEXT PRIMARY KEY, started_at_ms INTEGER NOT NULL,
+ ended_at_ms INTEGER, symbols_json TEXT NOT NULL
+);
 """
 
 
@@ -46,6 +50,10 @@ def make_capture(path, candle_rows, event):
         "INSERT INTO collector_events(ts_ms, event_type, detail) VALUES (?, ?, ?)",
         (event, "test", str(event)),
     )
+    db.execute(
+        "INSERT INTO collector_sessions(capture_id, started_at_ms, ended_at_ms, symbols_json) VALUES (?, ?, ?, ?)",
+        (f"capture-{event}", event, event + 1000, '["BTC-USDT"]'),
+    )
     db.commit()
     db.close()
 
@@ -66,11 +74,13 @@ def test_merge_deduplicates_market_rows_and_appends_diagnostics(tmp_path):
     assert report["rows_after"]["minute_features"] == 3
     assert report["rows_after"]["derivatives_snapshots"] == 2
     assert report["rows_after"]["collector_events"] == 2
+    assert report["rows_after"]["collector_sessions"] == 2
     assert report["duplicate_key_rows_ignored"]["minute_candles"] == 1
 
     db = sqlite3.connect(output)
     assert db.execute("SELECT COUNT(*) FROM minute_candles").fetchone()[0] == 3
     assert db.execute("SELECT COUNT(*) FROM collector_events").fetchone()[0] == 2
+    assert db.execute("SELECT COUNT(*) FROM collector_sessions").fetchone()[0] == 2
     db.close()
 
 
@@ -91,3 +101,21 @@ def test_merge_rejects_output_overwriting_input(tmp_path):
 
     with pytest.raises(ValueError, match="must not be one of the input"):
         merge_databases([source], source)
+
+
+def test_merge_accepts_legacy_capture_without_session_table(tmp_path):
+    legacy = tmp_path / "legacy.db"
+    output = tmp_path / "merged.db"
+    db = sqlite3.connect(legacy)
+    legacy_schema = SCHEMA.split("CREATE TABLE collector_sessions")[0]
+    db.executescript(legacy_schema)
+    db.execute(
+        "INSERT INTO minute_candles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        candle(60_000),
+    )
+    db.commit()
+    db.close()
+
+    report = merge_databases([legacy], output)
+    assert report["rows_after"]["minute_candles"] == 1
+    assert report["rows_after"]["collector_sessions"] == 0

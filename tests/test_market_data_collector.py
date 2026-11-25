@@ -166,3 +166,31 @@ def test_flush_all_persists_elapsed_minutes_but_discards_active_partial_minute(m
         assert rows == [(current_minute - 60_000, 1)]
     finally:
         agg.close()
+
+
+def test_collector_records_session_start_and_stop(tmp_path):
+    path = tmp_path / "capture.sqlite3"
+    agg = MarketMinuteAggregator(str(path), symbols=["BTC-USDT", "ETH-USDT"])
+    capture_id = agg.capture_id
+    with sqlite3.connect(path) as db:
+        row = db.execute(
+            "SELECT started_at_ms, ended_at_ms, symbols_json FROM collector_sessions WHERE capture_id=?",
+            (capture_id,),
+        ).fetchone()
+        assert row[0] > 0
+        assert row[1] is None
+        assert json.loads(row[2]) == ["BTC-USDT", "ETH-USDT"]
+    agg.close()
+    with sqlite3.connect(path) as db:
+        ended = db.execute(
+            "SELECT ended_at_ms FROM collector_sessions WHERE capture_id=?",
+            (capture_id,),
+        ).fetchone()[0]
+        events = db.execute(
+            "SELECT event_type FROM collector_events WHERE detail=? ORDER BY ts_ms",
+            (capture_id,),
+        ).fetchall()
+    assert ended is not None and ended >= row[0]
+    assert [item[0] for item in events] == [
+        "capture_session_started", "capture_session_stopped"
+    ]

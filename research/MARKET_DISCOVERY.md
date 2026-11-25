@@ -66,3 +66,27 @@ Run locally:
 python -m scripts.microstructure_discovery --db /path/to/market_microstructure.sqlite3 --cost-bps 12
 python -m pytest -q tests/test_microstructure_discovery.py
 ```
+
+
+## 2026-11-25 — daily coverage gate hardening
+- The original multi-day gate could accept 600 closed minutes spread very unevenly across three UTC dates (for example, 590 + 5 + 5). A total-count threshold and a date-count threshold alone do not guarantee meaningful observations on each date.
+- Added a configurable minimum of 120 closed minutes per symbol per UTC date (default), included per-day counts and undercovered-date diagnostics in the report, and made any undercovered observed date block `holdout_ready`.
+- This remains a history-sufficiency check, not a continuous-coverage or data-quality certification. Capture-session breaks and within-session gaps still require separate diagnostics because the current table does not encode session identity.
+- Added regression tests for sparse dates and invalid daily thresholds. Research-only; no production files, database, credentials, deployment or exchange orders changed.
+
+
+## 2026-11-25 — explicit collector session metadata and gap diagnostics
+- Collector creates a unique capture session row with start/end UTC epoch milliseconds and the exact symbol list, plus start/stop diagnostic events.
+- Database merger carries `collector_sessions` metadata and remains backward-compatible with older captures that lack the table.
+- Multi-day coverage report emits per-session, per-symbol candle counts, maximum internal gap and number of internal gaps. These are diagnostics only; they do not yet block holdout readiness.
+- Regression tests cover session diagnostics, sparse UTC dates and legacy-capture compatibility.
+- Next: validate the exact branch through CI before relying on this metadata in another research run. Consider a strict gap gate only after inspecting real within-session gap distributions.
+- Research-only: production code, production DB, credentials, deployment and exchange orders untouched.
+
+## Capture-session integrity follow-up
+
+- The collector runs its normal shutdown path in a `finally` block, but an abrupt process/host termination can leave `collector_sessions.ended_at_ms` null.
+- The multi-day coverage gate now reports these as `open_capture_sessions` and blocks `holdout_ready` until every recorded capture session is closed. This avoids treating a potentially incomplete capture as a finalized research dataset.
+- Sessions whose time intervals overlap while sharing one or more symbols are listed in `ambiguous_capture_sessions`; each affected session is marked `session_attribution_ambiguous=true`.
+- This ambiguity exists because `minute_candles` is keyed by `(symbol, minute_ts)`, not by `capture_id`. The diagnostic does not guess which capture produced a shared candle and does not silently claim exact per-session attribution.
+- These checks improve provenance diagnostics; they do not establish uninterrupted market-data coverage, data correctness, statistical significance, predictive edge, or profitability.
