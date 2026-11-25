@@ -1,3 +1,14 @@
+## 2026-11-25 — CI failure audit and regression-test corrections
+- Inspected failed GitHub Actions run `45598368312` on PR #12 head `e435f6d3be1c7a659ec72ff3ba906f90e98fd0f5`: compileall and runtime safe-default import passed; deterministic suite reported 5 failures and 153 passes.
+- Three failures were stale execution-cost assertions: a profitable SHORT must have positive direction-adjusted gross return, and removing the candle keyed by `signal_ts` removes the entry candle (removing `signal_ts + 1m` removes the exit candle).
+- Two replay failures were caused by an undersized 1m fixture: only 8 decisions had the required 205 closed 1m bars, so it could not exercise the 30-minute cooldown or support the asserted 212 rejection observations. Extended the 1m fixture from 212 to 416 rows; this yields 212 eligible decisions while preserving the 205-row minimum-history condition.
+- Updated tests only; no strategy, production code, execution model, or thresholds changed. Test commits: replay fixture `93234b5dad8f042de7602d12766e0fe0d1cfc846`; execution-cost expectations `a63894fa70d95b1decee56c2a00c77aacb547665`.
+- New CI must validate the resulting branch head. The previous failure remains recorded and is not to be treated as a pass.
+- PR #12 remains Draft/open/unmerged. Its base branch has advanced relative to the PR head and GitHub reports a non-mergeable/dirty state; no rebase, retarget, merge, or force-push was attempted.
+- BingX capture run `45573371850` is still in progress on the older capture branch/SHA, stuck in the public-data capture step, with zero artifacts at the latest inspection. No data-derived conclusions are available.
+- Production `main`, production database, hosting, credentials, deployment, and exchange orders remain untouched.
+- Next: verify CI on the new head; if green, separately resolve the stacked-PR base divergence with an explicit, reviewable plan before any merge consideration.
+
 ## 2026-11-25 — per-symbol Strategy B rejection breakdown
 - Extended the historical replay diagnostics to group rejection reasons, stages, and trend-check combinations by symbol as well as globally.
 - This prevents aggregate statistics from hiding that a filter may be restrictive on one instrument but not another. It remains descriptive diagnostics only; no filter thresholds, signal criteria, or Strategy B decisions changed.
