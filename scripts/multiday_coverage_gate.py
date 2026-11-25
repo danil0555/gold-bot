@@ -38,6 +38,13 @@ def evaluate_multiday_coverage(
             GROUP BY symbol
             ORDER BY symbol
         """).fetchall()
+        session_table_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='collector_sessions'"
+        ).fetchone()
+        sessions = db.execute("""
+            SELECT capture_id, started_at_ms, ended_at_ms, symbols_json
+            FROM collector_sessions ORDER BY started_at_ms, capture_id
+        """).fetchall() if session_table_exists else []
         daily_rows = db.execute("""
             SELECT symbol, date(minute_ts / 1000, 'unixepoch'),
                    COUNT(DISTINCT minute_ts), MIN(minute_ts), MAX(minute_ts)
@@ -46,6 +53,41 @@ def evaluate_multiday_coverage(
             GROUP BY symbol, date(minute_ts / 1000, 'unixepoch')
             ORDER BY symbol, date(minute_ts / 1000, 'unixepoch')
         """).fetchall()
+
+    session_coverage = []
+    for capture_id, started_at_ms, ended_at_ms, symbols_json in sessions:
+        try:
+            session_symbols = json.loads(symbols_json)
+        except (TypeError, ValueError):
+            session_symbols = []
+        per_session = {}
+        for symbol in session_symbols:
+            timestamps = [
+                int(row[0]) for row in sqlite3.connect(
+                    f"file:{Path(db_path).resolve()}?mode=ro", uri=True
+                ).execute(
+                    "SELECT minute_ts FROM minute_candles WHERE symbol=? AND is_closed=1 "
+                    "AND minute_ts >= ? AND minute_ts <= ? ORDER BY minute_ts",
+                    (symbol, int(started_at_ms), int(ended_at_ms or started_at_ms)),
+                ).fetchall()
+            ]
+            gaps = [
+                max(0, (right - left) // 60_000 - 1)
+                for left, right in zip(timestamps, timestamps[1:])
+            ]
+            per_session[str(symbol)] = {
+                "closed_minutes": len(timestamps),
+                "first_minute_ts": timestamps[0] if timestamps else None,
+                "last_minute_ts": timestamps[-1] if timestamps else None,
+                "max_internal_gap_minutes": max(gaps, default=0),
+                "internal_gap_count": sum(1 for gap in gaps if gap > 0),
+            }
+        session_coverage.append({
+            "capture_id": str(capture_id),
+            "started_at_ms": int(started_at_ms),
+            "ended_at_ms": int(ended_at_ms) if ended_at_ms is not None else None,
+            "symbols": per_session,
+        })
 
     observed = {
         str(symbol): {
@@ -103,6 +145,8 @@ def evaluate_multiday_coverage(
         "missing_expected_symbols": missing_symbols,
         "not_ready_symbols": not_ready,
         "per_symbol": per_symbol,
+        "capture_session_count": len(session_coverage),
+        "capture_sessions": session_coverage,
         "interpretation": (
             "Daily history sufficiency only. This gate does not establish continuous coverage "
             "or data quality, statistical significance, predictive value, or strategy profitability. "
