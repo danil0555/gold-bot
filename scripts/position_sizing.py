@@ -57,3 +57,78 @@ def calculate_linear_usdtm_position_size(
         "margin_usdt": margin_usdt,
         "fits_balance": margin_usdt <= balance,
     }
+
+
+def parse_bingx_contract_specs(payload):
+    """Parse BingX public contract-info response."""
+    from decimal import Decimal
+    if not isinstance(payload, dict) or str(payload.get("code", "0")) not in {"0", "None"}:
+        raise ValueError("Invalid BingX contract response")
+    data = payload.get("data")
+    if isinstance(data, dict):
+        data = data.get("data", data.get("list", data.get("rows")))
+    if not isinstance(data, list) or not data:
+        raise ValueError("Missing BingX contract list")
+    result = {}
+    for item in data:
+        if not isinstance(item, dict) or not item.get("symbol"):
+            continue
+        try:
+            precision = int(item.get("quantityPrecision"))
+            if not 0 <= precision <= 18:
+                precision = None
+        except (TypeError, ValueError, OverflowError):
+            precision = None
+        def positive(key):
+            try:
+                value = Decimal(str(item.get(key)))
+                return value if value.is_finite() and value > 0 else None
+            except Exception:
+                return None
+        status = item.get("status")
+        result[str(item["symbol"]).upper()] = {
+            "quantity_precision": precision,
+            "min_quantity": positive("tradeMinQuantity"),
+            "min_notional": positive("tradeMinUSDT"),
+            "active": str(status) == "1",
+            "api_open": str(item.get("apiStateOpen", "")).lower() == "true",
+            "max_long_leverage": positive("maxLongLeverage"),
+            "max_short_leverage": positive("maxShortLeverage"),
+        }
+    if not result:
+        raise ValueError("No valid BingX contract records")
+    return result
+
+
+def apply_bingx_contract_constraints(sizing, spec, side, leverage):
+    """Round down to quantityPrecision and verify minimums and API status."""
+    from decimal import Decimal, ROUND_DOWN
+    precision = spec.get("quantity_precision")
+    if precision is None:
+        return {"validated": False, "reasons": ["unknown_quantity_precision"]}
+    quantity = Decimal(str(sizing["quantity"])).quantize(
+        Decimal(1).scaleb(-int(precision)), rounding=ROUND_DOWN
+    )
+    entry = Decimal(str(sizing["entry_price"]))
+    distance = Decimal(str(sizing["stop_distance"]))
+    lev = Decimal(str(leverage))
+    notional = quantity * entry
+    min_qty, min_value = spec.get("min_quantity"), spec.get("min_notional")
+    min_qty_ok = None if min_qty is None else quantity >= min_qty
+    min_value_ok = None if min_value is None else notional >= min_value
+    key = "max_long_leverage" if str(side).upper() in {"LONG", "BUY"} else "max_short_leverage"
+    max_lev = spec.get(key)
+    lev_ok = None if max_lev is None else lev <= max_lev
+    reasons = []
+    if quantity <= 0: reasons.append("quantity_rounds_to_zero")
+    if min_qty_ok is not True: reasons.append("minimum_quantity_unknown_or_failed")
+    if min_value_ok is not True: reasons.append("minimum_notional_unknown_or_failed")
+    if spec.get("active") is not True: reasons.append("contract_not_active")
+    if spec.get("api_open") is not True: reasons.append("api_open_not_confirmed")
+    if lev_ok is not True: reasons.append("leverage_unknown_or_too_high")
+    return {
+        "validated": not reasons, "reasons": reasons, "quantity": quantity,
+        "notional_usdt": notional, "risk_usdt": quantity * distance,
+        "margin_usdt": notional / lev, "min_quantity_ok": min_qty_ok,
+        "min_notional_ok": min_value_ok, "leverage_ok": lev_ok,
+    }
