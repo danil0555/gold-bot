@@ -634,3 +634,10 @@
 - Commits: helper fix `f92cf8e3148662ab7852c5d1ef45ec8e831d0760`; helper test `b3c07e1726eee9aa18b7d4d01ab3749967b2b81e`; signal-rendering integration test `12a0c541e4b84d0329e3e3e6acbb905c82dc4379`.
 - Exact-head CI for `12a0c541e4b84d0329e3e3e6acbb905c82dc4379` has not yet been reported. Earlier CI run `45650662441` validated only the older commit `2fe7d05fe4a9e213117f5ef388b93dce85f975ed`; it does not validate this regression fix.
 - PR #16 remains Draft/open/unmerged. Production `main`, live database, credentials, deployment and exchange orders remain untouched. No real exchange order placement is enabled.
+
+
+## 2026-11-25 — PR #16 exact-head regression CI and risk-rounding stress tests
+- Exact-head GitHub Actions run `45675272507` completed successfully for PR #16 commit `12a0c541e4b84d0329e3e3e6acbb905c82dc4379`. All nine job steps completed successfully except the optional 7-day read-only historical backtest, which was skipped. In particular, compilation, runtime safe-default import, deterministic add-on tests and signal/balance/position-sizing tests passed.
+- Added a further parameterized stress-test commit `08637f82a11f2a9f16e0fba543ca07a30ee531b3`: six balance/entry/stop-distance/precision combinations assert that exchange rounding DOWN never raises the individual trade's calculated stop-loss risk above the 10% budget. Added an explicit test documenting that three separately valid 10%-risk signals can stack to 30% aggregate nominal risk; this is a known absence of portfolio-level exposure control, not a feature claim.
+- CI for the new stress-test head `08637f8` has not yet been reported. Do not treat run `45675272507` as validation of the newer commit.
+- PR #16 remains Draft/open/unmerged. GitHub currently reports `mergeable=false`; no rebase, retarget, merge, or force-push was attempted. Production `main`, live database, credentials, deployment and exchange orders remain untouched.
