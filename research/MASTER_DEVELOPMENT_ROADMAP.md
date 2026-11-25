@@ -1,3 +1,6 @@
+## 2026-11-25 — strict execution timestamp validation
+- Execution evaluator now rejects null, non-numeric, non-finite or non-minute-aligned candle timestamps and rejects non-finite/non-minute-aligned signal close timestamps. This prevents silent truncation or accidental timestamp coercion.
+- Added regression tests for a missing exact exit candle and misaligned signal/candle timestamps.
 ## 2026-11-25 — execution model follow-up
 - Corrected the evaluator's methodology text to describe the actual OPEN-time candle lookup precisely: signal candle close is timestamp `signal_ts`; entry is the close of the candle opening at `signal_ts`; exit is the close of the candle opening at `signal_ts + horizon_minutes`.
 - The recorded execution times are those candle closes, one minute after each corresponding OPEN timestamp.
