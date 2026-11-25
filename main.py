@@ -100,7 +100,7 @@ MAX_EXTENSION_ATR = 2.20
 TP1_R = 1.8
 TP2_R = 3.0
 
-RISK_PERCENT = 2.0
+RISK_PERCENT = 10.0
 FUTURES_LEVERAGE = 5
 
 MAX_SIGNALS_PER_CYCLE = 3
@@ -360,7 +360,7 @@ def init_db() -> None:
         )""")
         con.execute("""CREATE TABLE IF NOT EXISTS user_settings (
             user_id INTEGER PRIMARY KEY,
-            risk_percent REAL DEFAULT 2.0,
+            risk_percent REAL DEFAULT 10.0,
             leverage INTEGER DEFAULT 5,
             notifications INTEGER DEFAULT 1,
             strategy_version TEXT DEFAULT 'B',
@@ -1555,10 +1555,12 @@ def signal_text(signal):
             f"<b>ЗОНА ВХОДА:</b> <code>{format_price(zone_low)} — {format_price(zone_high)}</code>\n"
             f"<b>Подтверждение:</b> {html.escape(str(signal.get('confirmation_rule') or 'Дождаться подтверждения на 5м.'))}\n"
         )
+    direction = "LONG" if is_long_side(signal["side"]) else "SHORT"
+    indicator = "🟢" if direction == "LONG" else "🔴"
+    symbol = html.escape(str(signal["symbol"]))
     return (
-        "🚨 <b>FUTURES SCALP — СИГНАЛ</b>\n"
+        f"{indicator} <b>{direction} — {symbol}</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"<b>{html.escape(str(signal['symbol']))}</b>  |  <b>{side}</b>\n"
         f"<b>Стратегия:</b> {html.escape(str(signal.get('strategy_version', STRATEGY_B)))}\n"
         f"<b>Качество сетапа:</b> <code>{quality:.0f}/100</code>\n"
         f"<b>Рынок:</b> USDT-M Futures  |  <b>ТФ:</b> 1m / 5m / 15m / 1h\n"
