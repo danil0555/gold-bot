@@ -141,3 +141,61 @@ def test_session_gap_diagnostics_are_reported(tmp_path):
     assert session["capture_id"] == "session-a"
     assert session["symbols"]["BTC-USDT"]["closed_minutes"] == 200
     assert session["symbols"]["BTC-USDT"]["max_internal_gap_minutes"] == 0
+
+
+
+def test_unclosed_capture_session_blocks_holdout_readiness(tmp_path):
+    path = tmp_path / "coverage.sqlite3"
+    rows = []
+    for day in (20_000, 20_001, 20_002):
+        rows.extend(_minutes("BTC-USDT", day, 200))
+    _database(path, rows)
+    with sqlite3.connect(path) as db:
+        db.execute("""
+            CREATE TABLE collector_sessions (
+                capture_id TEXT PRIMARY KEY,
+                started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER,
+                symbols_json TEXT NOT NULL
+            )
+        """)
+        db.execute(
+            "INSERT INTO collector_sessions VALUES (?, ?, ?, ?)",
+            ("still-running", 20_000 * 86_400_000, None, '["BTC-USDT"]'),
+        )
+    report = evaluate_multiday_coverage(
+        str(path), min_closed_minutes=600, min_utc_days=3,
+        min_closed_minutes_per_utc_day=120,
+    )
+    assert report["holdout_ready"] is False
+    assert report["open_capture_sessions"] == ["still-running"]
+    assert report["capture_sessions"][0]["status"] == "open"
+
+
+def test_overlapping_sessions_for_same_symbol_are_flagged_ambiguous(tmp_path):
+    path = tmp_path / "coverage.sqlite3"
+    rows = _minutes("BTC-USDT", 20_000, 200)
+    _database(path, rows)
+    start = 20_000 * 86_400_000
+    with sqlite3.connect(path) as db:
+        db.execute("""
+            CREATE TABLE collector_sessions (
+                capture_id TEXT PRIMARY KEY,
+                started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER,
+                symbols_json TEXT NOT NULL
+            )
+        """)
+        db.executemany(
+            "INSERT INTO collector_sessions VALUES (?, ?, ?, ?)",
+            [
+                ("session-a", start, start + 120 * 60_000, '["BTC-USDT"]'),
+                ("session-b", start + 60 * 60_000, start + 180 * 60_000, '["BTC-USDT"]'),
+            ],
+        )
+    report = evaluate_multiday_coverage(str(path), min_closed_minutes=1, min_utc_days=1)
+    assert report["ambiguous_capture_sessions"] == ["session-a", "session-b"]
+    assert all(
+        session["session_attribution_ambiguous"]
+        for session in report["capture_sessions"]
+    )
