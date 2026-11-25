@@ -2111,17 +2111,23 @@ async def diag_db_handler(message: Message):
             report["counts"] = counts
             report["signals_active"] = con.execute(
                 "SELECT COUNT(*) FROM signals WHERE status IN ('ACTIVE','WAITING_LEVEL')").fetchone()[0]
+        # Escape every dynamic value before sending HTML to Telegram.
+        # SQLite identifiers are normally trusted, but a custom table name can
+        # still contain characters that break Telegram's HTML parser.
         text = (
-            f"🧪 <b>diag_db</b>\n\n"
-            f"integrity: {report['integrity']}\n"
-            f"fk_violations: {report['fk_violations']}\n"
-            f"active_signals: {report['signals_active']}\n"
-            f"counts: {report['counts']}"
+            "🧪 <b>diag_db</b>\n\n"
+            f"integrity: <code>{html.escape(str(report['integrity']))}</code>\n"
+            f"fk_violations: <code>{html.escape(str(report['fk_violations']))}</code>\n"
+            f"active_signals: <code>{html.escape(str(report['signals_active']))}</code>\n"
+            f"counts: <code>{html.escape(str(report['counts']))}</code>"
         )
         await message.answer(text, parse_mode="HTML")
-    except Exception as e:
+    except Exception:
         log.exception("diag_db error")
-        await message.answer(f"❌ Ошибка: {e}")
+        # Do not echo raw exception text into HTML or expose DB internals.
+        await message.answer(
+            "❌ Не удалось выполнить диагностику базы. Подробности записаны в лог."
+        )
 
 # ВАЖНО: этот хендлер должен быть ПОСЛЕДНИМ среди F.text
 
