@@ -114,3 +114,30 @@ def test_daily_minimum_must_be_positive(tmp_path):
         evaluate_multiday_coverage(
             str(path), min_closed_minutes_per_utc_day=0
         )
+
+
+def test_session_gap_diagnostics_are_reported(tmp_path):
+    path = tmp_path / "coverage.sqlite3"
+    rows = _minutes("BTC-USDT", 20_000, 200)
+    rows += _minutes("BTC-USDT", 20_001, 200)
+    rows += _minutes("BTC-USDT", 20_002, 200)
+    _database(path, rows)
+    with sqlite3.connect(path) as db:
+        db.execute("""
+            CREATE TABLE collector_sessions (
+                capture_id TEXT PRIMARY KEY,
+                started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER,
+                symbols_json TEXT NOT NULL
+            )
+        """)
+        db.execute(
+            "INSERT INTO collector_sessions VALUES (?, ?, ?, ?)",
+            ("session-a", 20_000 * 86_400_000, 20_000 * 86_400_000 + 200 * 60_000, '["BTC-USDT"]'),
+        )
+    report = evaluate_multiday_coverage(str(path), min_closed_minutes=1, min_utc_days=1)
+    assert report["capture_session_count"] == 1
+    session = report["capture_sessions"][0]
+    assert session["capture_id"] == "session-a"
+    assert session["symbols"]["BTC-USDT"]["closed_minutes"] == 200
+    assert session["symbols"]["BTC-USDT"]["max_internal_gap_minutes"] == 0
