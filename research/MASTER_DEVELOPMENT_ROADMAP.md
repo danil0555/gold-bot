@@ -749,3 +749,10 @@
 - Commits: validator `1152e61bd721c4e62b9cff71bfacf1b621496b62`; tests `d76d3048bdc8f77e95575ffa57a5ba8fdf3188a1`; workflow integration `eaacbe06c376e8cc71d899533341deda3e464c5c`.
 - Exact-head CI for `eaacbe06c376e8cc71d899533341deda3e464c5c` is queued/in progress (runs `45697798654` and `45697788416`). No validation pass is claimed yet. Earlier smoke run `45688285622` validates the prior collector/storage implementation, not this new validator.
 - Research branch only; no production branch, live DB, credentials, deployment, strategy/risk settings or exchange order behavior changed. PR #17 remains Draft/open/unmerged.
+
+
+## 2026-11-25 — v2 DB validator deterministic CI passed (PR #17)
+- Exact latest head `eaacbe06c376e8cc71d899533341deda3e464c5c`, pull-request workflow run `45697798654`, completed successfully.
+- Log confirms Python compilation, runtime safe-default import, and **123 deterministic tests passed in 2.67s**, including the three new capture DB validator tests.
+- The separate push workflow run `45697788416` is exercising the new validator against another 3-minute live public BingX capture; at this update its collector step is still running. No live-smoke validator pass is claimed until that run completes.
+- PR #17 remains Draft/open/unmerged. No production changes, live DB access, deployment or exchange orders.
