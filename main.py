@@ -35,6 +35,7 @@ from dotenv import load_dotenv
 from scripts.reliability import (
     RETRYABLE_HTTP_STATUS, contiguous_candle_tail, retry_after_seconds,
 )
+from scripts.position_sizing import calculate_linear_usdtm_position_size, parse_bingx_contract_specs, apply_bingx_contract_constraints
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart, Command
@@ -100,7 +101,7 @@ MAX_EXTENSION_ATR = 2.20
 TP1_R = 1.8
 TP2_R = 3.0
 
-RISK_PERCENT = 2.0
+RISK_PERCENT = 10.0
 FUTURES_LEVERAGE = 5
 
 MAX_SIGNALS_PER_CYCLE = 3
@@ -165,6 +166,9 @@ ws_status = {
 }
 latest_prices: dict[tuple[str, str], float] = {}
 latest_quotes: dict[tuple[str, str], dict[str, Any]] = {}
+contract_specs_cache: dict[str, dict[str, Any]] = {}
+contract_specs_updated_at = 0.0
+CONTRACT_SPECS_MAX_AGE_SEC = 6 * 60 * 60
 _unavailable_symbols: set[tuple[str, str]] = set()
 _insufficient_history: dict[tuple[str, str], float] = {}
 background_tasks: list[asyncio.Task] = []
@@ -347,9 +351,18 @@ def backup_and_verify_db() -> Path | None:
 def init_db() -> None:
     if DB_PATH.exists():
         try:
-            backup_and_verify_db()
-        except Exception:
-            log.exception("Ошибка бэкапа — продолжаем инициализацию")
+            backup_path = backup_and_verify_db()
+        except Exception as exc:
+            log.exception("Ошибка резервного копирования — миграция БД отменена")
+            raise RuntimeError(
+                "Не удалось создать и проверить резервную копию БД; "
+                "инициализация и миграция остановлены."
+            ) from exc
+        if backup_path is None:
+            raise RuntimeError(
+                "Резервная копия БД не создана или не прошла проверку; "
+                "инициализация и миграция остановлены."
+            )
 
     with db() as con:
         con.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -358,9 +371,15 @@ def init_db() -> None:
             created_at TEXT,
             is_active INTEGER DEFAULT 1
         )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS user_risk_profiles (
+            user_id INTEGER PRIMARY KEY,
+            balance_usdt REAL NOT NULL CHECK(balance_usdt > 0),
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+        )""")
         con.execute("""CREATE TABLE IF NOT EXISTS user_settings (
             user_id INTEGER PRIMARY KEY,
-            risk_percent REAL DEFAULT 2.0,
+            risk_percent REAL DEFAULT 10.0,
             leverage INTEGER DEFAULT 5,
             notifications INTEGER DEFAULT 1,
             strategy_version TEXT DEFAULT 'B',
@@ -1508,6 +1527,30 @@ def register_user(user):
             (user.id, RISK_PERCENT, FUTURES_LEVERAGE, STRATEGY_B))
 
 
+def get_user_balance(user_id: int) -> float | None:
+    with db() as con:
+        row = con.execute(
+            "SELECT balance_usdt FROM user_risk_profiles WHERE user_id=?",
+            (int(user_id),),
+        ).fetchone()
+    if not row:
+        return None
+    balance = safe_float(row["balance_usdt"], 0.0)
+    return balance if balance > 0 else None
+
+
+def set_user_balance(user_id: int, balance_usdt: float) -> None:
+    if not math.isfinite(balance_usdt) or balance_usdt <= 0:
+        raise ValueError("Баланс должен быть положительным числом.")
+    with db() as con:
+        con.execute("""INSERT INTO user_risk_profiles (user_id, balance_usdt, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                balance_usdt=excluded.balance_usdt,
+                updated_at=excluded.updated_at""",
+            (int(user_id), float(balance_usdt), utc_text()))
+
+
 
 
 
@@ -1534,7 +1577,70 @@ def register_user(user):
 # ============================================================
 
 
-def signal_text(signal):
+def position_size_text(signal, balance_usdt: float | None) -> str:
+    if balance_usdt is None:
+        return (
+            "<b>РАСЧЁТ ПОЗИЦИИ:</b> не настроен. "
+            "Укажи выделенный для торговли баланс командой <code>/setbalance 1000</code> (USDT).\n"
+        )
+    try:
+        sizing = calculate_linear_usdtm_position_size(
+            balance_usdt=balance_usdt,
+            entry_price=safe_float(signal.get("entry")),
+            stop_price=safe_float(signal.get("sl")),
+            side=str(signal.get("side") or ""),
+            risk_percent=RISK_PERCENT,
+            leverage=FUTURES_LEVERAGE,
+        )
+    except (TypeError, ValueError):
+        return "<b>РАСЧЁТ ПОЗИЦИИ:</b> невозможно рассчитать — проверь цену входа и SL.\n"
+
+    symbol = str(signal.get("symbol") or "").upper()
+    spec = contract_specs_cache.get(symbol)
+    fresh = bool(spec) and contract_specs_updated_at > 0 and time.time() - contract_specs_updated_at <= CONTRACT_SPECS_MAX_AGE_SEC
+    contract_note = ""
+    if fresh:
+        checked = apply_bingx_contract_constraints(sizing, spec, str(signal.get("side") or ""), FUTURES_LEVERAGE)
+        if checked.get("validated"):
+            for key in ("quantity", "risk_usdt", "notional_usdt", "margin_usdt"):
+                source = {"quantity": "quantity", "risk_usdt": "risk_usdt", "notional_usdt": "notional_usdt", "margin_usdt": "margin_usdt"}[key]
+                sizing[key] = float(checked[source])
+            sizing["fits_balance"] = sizing["margin_usdt"] <= balance_usdt
+            contract_note = f"Биржевые ограничения BingX: <b>проверены</b> (точность {checked['quantity_precision']} знаков).\n"
+        else:
+            contract_note = "⛔ <b>Объём не подтверждён биржей:</b> " + html.escape(" / ".join(checked.get("reasons", []))) + ". Не используй расчёт как готовый ордер.\n"
+    else:
+        contract_note = "⛔ <b>Объём не подтверждён биржей:</b> нет свежих данных контракта. Не используй расчёт как готовый ордер.\n"
+    quantity = f"{sizing['quantity']:.10f}".rstrip("0").rstrip(".")
+    block = (
+        "<b>РАСЧЁТ ПОЗИЦИИ (ориентир):</b>\n"
+        f"Баланс: <code>{balance_usdt:,.2f} USDT</code>\n"
+        f"Риск до SL ({RISK_PERCENT:.1f}%): <code>{sizing['risk_usdt']:,.2f} USDT</code>\n"
+        f"Объём: <code>{quantity} {html.escape(str(signal.get('symbol', '')).split('-')[0])}</code>\n"
+        f"Номинал позиции: <code>{sizing['notional_usdt']:,.2f} USDT</code>\n"
+        f"Маржа при {FUTURES_LEVERAGE}x: <code>{sizing['margin_usdt']:,.2f} USDT</code>\n"
+    )
+    block += contract_note
+    if not sizing["fits_balance"]:
+        block += (
+            "⛔ <b>Не хватает баланса под расчётную маржу.</b> "
+            "Не используй этот объём.\n"
+        )
+    elif sizing["margin_usdt"] >= balance_usdt * 0.90:
+        block += (
+            "⚠️ <b>Маржа почти равна всему сохранённому балансу.</b> "
+            "Оставь резерв; комиссии и funding не включены.\n"
+        )
+    block += (
+        "<i>Расчёт от указанной цены входа и SL; не учтены комиссии, funding и проскальзывание. "
+        "Проверка использует последние публичные ограничения контракта BingX (обновление раз в 6 часов). "
+        "фактическая цена исполнения может изменить риск. "
+        "10% применяется отдельно к каждому сигналу: одновременные сделки суммируют риск.</i>\n"
+    )
+    return block
+
+
+def signal_text(signal, balance_usdt: float | None = None):
     tp1 = safe_float(signal.get("tp1"), 0)
     tp2 = safe_float(signal.get("tp2"), signal.get("tp", 0))
     live_price = safe_float(signal.get("live_price"), signal["entry"])
@@ -1544,7 +1650,6 @@ def signal_text(signal):
     if not isinstance(reasons, (list, tuple)):
         reasons = [part.strip() for part in str(reasons).split(";") if part.strip()]
     reasons_text = "\n".join(f"• {html.escape(str(item))}" for item in reasons if item) or "—"
-    side = "🟢 LONG" if is_long_side(signal["side"]) else "🔴 SHORT"
     mode = "Вход от зоны" if signal.get("entry_mode") == "level" else "Рыночный вход"
     validity = format_moscow_from_utc(signal.get("expires_at")) if signal.get("expires_at") else "—"
     zone_block = ""
@@ -1555,10 +1660,12 @@ def signal_text(signal):
             f"<b>ЗОНА ВХОДА:</b> <code>{format_price(zone_low)} — {format_price(zone_high)}</code>\n"
             f"<b>Подтверждение:</b> {html.escape(str(signal.get('confirmation_rule') or 'Дождаться подтверждения на 5м.'))}\n"
         )
+    direction = "LONG" if is_long_side(signal["side"]) else "SHORT"
+    indicator = "🟢" if direction == "LONG" else "🔴"
+    symbol = html.escape(str(signal["symbol"]))
     return (
-        "🚨 <b>FUTURES SCALP — СИГНАЛ</b>\n"
+        f"{indicator} <b>{direction} — {symbol}</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"<b>{html.escape(str(signal['symbol']))}</b>  |  <b>{side}</b>\n"
         f"<b>Стратегия:</b> {html.escape(str(signal.get('strategy_version', STRATEGY_B)))}\n"
         f"<b>Качество сетапа:</b> <code>{quality:.0f}/100</code>\n"
         f"<b>Рынок:</b> USDT-M Futures  |  <b>ТФ:</b> 1m / 5m / 15m / 1h\n"
@@ -1569,6 +1676,7 @@ def signal_text(signal):
         f"<b>TP1:</b> <code>{format_price(tp1)}</code>  ({TP1_R}R)\n"
         f"<b>TP2:</b> <code>{format_price(tp2)}</code>  ({TP2_R}R)\n"
         "━━━━━━━━━━━━━━━━━━\n"
+        f"{position_size_text(signal, balance_usdt)}"
         f"<b>RR:</b> {safe_float(signal.get('rr')):.2f}  |  <b>Net RR:</b> {safe_float(signal.get('net_rr')):.2f}\n"
         f"<b>Спред:</b> {spread:.3f}%  |  <b>Текущая цена:</b> <code>{format_price(live_price)}</code>\n"
         f"<b>Вход:</b> {mode}\n"
@@ -1932,12 +2040,17 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
 
 async def broadcast_signal(signal):
     with db() as con:
-        users = con.execute("SELECT user_id FROM users WHERE is_active=1").fetchall()
+        users = con.execute("""SELECT u.user_id, p.balance_usdt
+            FROM users AS u
+            LEFT JOIN user_risk_profiles AS p ON p.user_id=u.user_id
+            WHERE u.is_active=1""").fetchall()
     delivered = 0
     failed = 0
     for row in users:
         try:
-            await bot.send_message(row["user_id"], signal_text(signal), parse_mode="HTML")
+            await bot.send_message(
+                row["user_id"], signal_text(signal, row["balance_usdt"]), parse_mode="HTML"
+            )
             delivered += 1
         except Exception:
             failed += 1
@@ -1961,8 +2074,52 @@ async def start_command(message: Message):
         "импульс 5m и 1m, структура рынка, объём и фильтры издержек.\n\n"
         "После отправки сигнала бот не сопровождает сделку, не двигает TP/SL "
         "и не отправляет уведомления о достижении уровней. Реальные ордера отключены.\n\n"
-        "Если подходящего сетапа нет — бот ничего не отправляет.",
+        "Если подходящего сетапа нет — бот ничего не отправляет.\n\n"
+        "Для расчёта объёма позиции задай торговый баланс: <code>/setbalance 1000</code> (USDT).",
         reply_markup=main_keyboard(), parse_mode="HTML")
+
+
+@router.message(Command("setbalance"))
+async def set_balance_command(message: Message):
+    register_user(message.from_user)
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2:
+        await message.answer(
+            "Укажи выделенный для торговли баланс в USDT. Пример: <code>/setbalance 1000</code>",
+            parse_mode="HTML",
+        )
+        return
+    raw_value = parts[1].strip().replace(",", ".")
+    balance = safe_float(raw_value, 0.0)
+    if balance <= 0 or balance > 1_000_000_000:
+        await message.answer("Баланс должен быть числом больше 0 и не более 1 000 000 000 USDT.")
+        return
+    set_user_balance(message.from_user.id, balance)
+    await message.answer(
+        f"✅ Торговый баланс сохранён: <b>{balance:,.2f} USDT</b>.\n"
+        f"Риск на каждый сигнал: <b>{RISK_PERCENT:.1f}%</b> "
+        f"({balance * RISK_PERCENT / 100:,.2f} USDT).\n"
+        "Для изменения отправь новую команду /setbalance.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("balance"))
+async def balance_command(message: Message):
+    register_user(message.from_user)
+    balance = get_user_balance(message.from_user.id)
+    if balance is None:
+        await message.answer(
+            "Баланс ещё не задан. Пример: <code>/setbalance 1000</code> (USDT).",
+            parse_mode="HTML",
+        )
+        return
+    await message.answer(
+        f"Сохранённый торговый баланс: <b>{balance:,.2f} USDT</b>\n"
+        f"Риск на один сигнал ({RISK_PERCENT:.1f}%): "
+        f"<b>{balance * RISK_PERCENT / 100:,.2f} USDT</b>.",
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("cancel"))
@@ -1981,7 +2138,9 @@ async def scan_market_callback(message: Message):
             return
         await status.edit_text(f"✅ Найдено сильных сетапов: {len(signals)}.")
         for signal in signals:
-            await message.answer(signal_text(signal), parse_mode="HTML")
+            await message.answer(
+                signal_text(signal, get_user_balance(message.from_user.id)), parse_mode="HTML"
+            )
             log.info("SIGNAL_DELIVERY mode=manual symbol=%s side=%s user_id=%s",
                      signal.get("symbol"), signal.get("side"), message.from_user.id)
     except Exception:
@@ -2008,8 +2167,10 @@ async def settings_handler(message: Message):
         "⚙️ <b>Параметры стратегии</b>\n\n"
         "Рынок: <b>USDT-M Futures</b>\n"
         f"Стратегия B: <b>активна</b> | C/D/E: <b>{'включены' if ENABLE_ADDON_STRATEGIES else 'выключены'}</b>\n"
-        f"Расчётный риск: <b>{RISK_PERCENT:.1f}%</b>\n"
+        f"Расчётный риск: <b>{RISK_PERCENT:.1f}%</b> на каждый сигнал\n"
         f"Плечо для расчётов: <b>{FUTURES_LEVERAGE}x</b>\n"
+        f"Сохранённый торговый баланс: <b>{(get_user_balance(message.from_user.id) or 0):,.2f} USDT</b> "
+        "(0 — не задан)\n"
         f"TP1: <b>{TP1_R}R</b>  |  TP2: <b>{TP2_R}R</b>\n"
         f"Минимальное качество: <b>{MIN_QUALITY_SCORE}/100</b>\n"
         f"Минимальный Net RR: <b>{MIN_NET_RR:.2f}</b>\n"
@@ -2164,10 +2325,41 @@ async def background_scan():
 # 18. MAIN
 # ============================================================
 
+async def refresh_contract_specs() -> bool:
+    global contract_specs_updated_at
+    if http_session is None or http_session.closed:
+        return False
+    try:
+        payload = await api_get(http_session, "/openApi/swap/v2/quote/contracts", {})
+        parsed = parse_bingx_contract_specs(payload)
+        contract_specs_cache.clear()
+        contract_specs_cache.update(parsed)
+        contract_specs_updated_at = time.time()
+        system_status["contract_specs_count"] = len(parsed)
+        system_status["contract_specs_updated_at"] = utc_text()
+        log.info("BingX contract rules refreshed: %s symbols", len(parsed))
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("Не удалось обновить ограничения контрактов BingX")
+        return False
+
+
+async def contract_specs_refresh_loop() -> None:
+    while True:
+        if not contract_specs_updated_at or time.time() - contract_specs_updated_at > CONTRACT_SPECS_MAX_AGE_SEC:
+            await asyncio.sleep(300)
+            await refresh_contract_specs()
+        else:
+            await asyncio.sleep(CONTRACT_SPECS_MAX_AGE_SEC)
+
+
 async def on_startup() -> None:
     global bot, http_session
     http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
     bot = Bot(token=BOT_TOKEN)
+    await refresh_contract_specs()
     system_status["started"] = True
     log.info("Bot v%s запущен; реальные ордера отключены; WS trade read-only, 1m свечи агрегируются из сделок", BOT_VERSION)
 
@@ -2187,6 +2379,7 @@ async def main_async() -> None:
     global bot
     dp.include_router(router)
     await on_startup()
+    background_tasks.append(asyncio.create_task(contract_specs_refresh_loop()))
     background_tasks.append(asyncio.create_task(bingx_kline_websocket_loop()))
     background_tasks.append(asyncio.create_task(background_scan()))
     try:
