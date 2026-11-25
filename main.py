@@ -1595,6 +1595,21 @@ def position_size_text(signal, balance_usdt: float | None) -> str:
     except (TypeError, ValueError):
         return "<b>РАСЧЁТ ПОЗИЦИИ:</b> невозможно рассчитать — проверь цену входа и SL.\n"
 
+    symbol = str(signal.get("symbol") or "").upper()
+    spec = contract_specs_cache.get(symbol)
+    fresh = bool(spec) and contract_specs_updated_at > 0 and time.time() - contract_specs_updated_at <= CONTRACT_SPECS_MAX_AGE_SEC
+    contract_note = ""
+    if fresh:
+        checked = apply_bingx_contract_constraints(sizing, spec, str(signal.get("side") or ""), FUTURES_LEVERAGE)
+        if checked.get("validated"):
+            for key in ("quantity", "risk_usdt", "notional_usdt", "margin_usdt"):
+                source = {"quantity": "quantity", "risk_usdt": "risk_usdt", "notional_usdt": "notional_usdt", "margin_usdt": "margin_usdt"}[key]
+                sizing[key] = float(checked[source])
+            contract_note = f"Биржевые ограничения BingX: <b>проверены</b> (точность {checked['quantity_precision']} знаков).\\n"
+        else:
+            contract_note = "⛔ <b>Объём не подтверждён биржей:</b> " + html.escape(" / ".join(checked.get("reasons", []))) + ". Не используй расчёт как готовый ордер.\\n"
+    else:
+        contract_note = "⛔ <b>Объём не подтверждён биржей:</b> нет свежих данных контракта. Не используй расчёт как готовый ордер.\\n"
     quantity = f"{sizing['quantity']:.10f}".rstrip("0").rstrip(".")
     block = (
         "<b>РАСЧЁТ ПОЗИЦИИ (ориентир):</b>\n"
@@ -1604,6 +1619,7 @@ def position_size_text(signal, balance_usdt: float | None) -> str:
         f"Номинал позиции: <code>{sizing['notional_usdt']:,.2f} USDT</code>\n"
         f"Маржа при {FUTURES_LEVERAGE}x: <code>{sizing['margin_usdt']:,.2f} USDT</code>\n"
     )
+    block += contract_note
     if not sizing["fits_balance"]:
         block += (
             "⛔ <b>Не хватает баланса под расчётную маржу.</b> "
