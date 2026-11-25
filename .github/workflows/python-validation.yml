@@ -6,9 +6,9 @@ concurrency:
 
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model, research/market-feature-ablation, research/market-walkforward-regimes, research/directional-microstructure-scoring, research/market-discovery-engine-v1, research/multiday-coverage-gate-v2, research/capture-observation-provenance-v1]
+    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model, research/market-feature-ablation, research/market-walkforward-regimes, research/directional-microstructure-scoring, research/market-discovery-engine-v1, research/multiday-coverage-gate-v2, research/capture-observation-provenance-v1, research/capture-scoped-storage-v2]
   pull_request:
-    branches: [main, research/multiday-coverage-gate-v2]
+    branches: [main, research/multiday-coverage-gate-v2, research/capture-observation-provenance-v1]
   workflow_dispatch:
 
 jobs:
