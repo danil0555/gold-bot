@@ -16,12 +16,13 @@ import pandas as pd
 
 MINUTE_MS = 60_000
 DAY_MS = 86_400_000
+MAX_OI_CHANGE_INTERVAL_MS = 10 * 60_000
 
 BASE_FEATURES = (
     "ret_1m", "ret_5m", "ret_15m", "rv_30m", "rv_60m",
     "volume_surprise_z", "trades_surprise_z", "taker_imbalance",
     "book_imbalance5", "book_imbalance20", "microprice_offset_bps",
-    "spread_bps", "open_interest_change_pct", "funding_rate",
+    "spread_bps", "open_interest_change_pct", "open_interest_change_interval_ms", "funding_rate",
 )
 
 
@@ -96,8 +97,31 @@ def load_market_panel(db_path: str) -> pd.DataFrame:
                 left = left.copy()
                 left["open_interest_base"] = np.nan
                 left["funding_rate"] = np.nan
+                left["open_interest_change_pct"] = np.nan
+                left["open_interest_change_interval_ms"] = np.nan
                 pieces.append(left)
                 continue
+
+            # Calculate OI change on actual consecutive derivative snapshots,
+            # not on minute candles carrying a repeated/stale as-of value.
+            deriv = deriv.drop_duplicates(subset=["minute_ts"], keep="last").copy()
+            deriv["open_interest_base"] = pd.to_numeric(
+                deriv["open_interest_base"], errors="coerce"
+            )
+            previous_ts = deriv["minute_ts"].shift(1)
+            previous_oi = deriv["open_interest_base"].shift(1)
+            interval_ms = deriv["minute_ts"] - previous_ts
+            valid_oi_pair = (
+                deriv["open_interest_base"].gt(0)
+                & previous_oi.gt(0)
+                & interval_ms.gt(0)
+                & interval_ms.le(MAX_OI_CHANGE_INTERVAL_MS)
+            )
+            deriv["open_interest_change_pct"] = (
+                deriv["open_interest_base"] / previous_oi - 1.0
+            ).where(valid_oi_pair)
+            deriv["open_interest_change_interval_ms"] = interval_ms.where(valid_oi_pair)
+
             merged = pd.merge_asof(
                 left, deriv.sort_values("minute_ts"), on="minute_ts", direction="backward",
                 tolerance=120_000,
@@ -109,10 +133,8 @@ def load_market_panel(db_path: str) -> pd.DataFrame:
     else:
         panel["open_interest_base"] = np.nan
         panel["funding_rate"] = np.nan
-
-    panel["open_interest_change_pct"] = panel.groupby("symbol", sort=False)[
-        "open_interest_base"
-    ].pct_change()
+        panel["open_interest_change_pct"] = np.nan
+        panel["open_interest_change_interval_ms"] = np.nan
     return panel.replace([np.inf, -np.inf], np.nan)
 
 
@@ -129,7 +151,25 @@ def discover_episodes(
     min_move_pct: float = 0.004,
     volatility_multiple: float = 2.5,
     cooldown_minutes: int = 5,
+    start_time_bounds: tuple[int, int] | None = None,
 ) -> tuple[list[dict], dict]:
+    """Discover episodes, optionally restricting event starts to an inclusive UTC-ms window.
+
+    Rows after the end bound may remain in the panel solely to complete forward
+    labels. Their features can never become event-start features.
+    """
+    if start_time_bounds is not None:
+        start_min, start_max = map(int, start_time_bounds)
+        if start_min > start_max:
+            raise ValueError("start_time_bounds must be ordered")
+    # Public callers and older synthetic panels may not contain every optional
+    # feature. Keep the discovery report schema stable without treating absent
+    # inputs as observed zeroes.
+    panel = panel.copy()
+    for feature in BASE_FEATURES:
+        if feature not in panel.columns:
+            panel[feature] = np.nan
+
     episodes: list[dict] = []
     summaries: dict = {}
     for horizon in horizons:
@@ -150,6 +190,10 @@ def discover_episodes(
                 contiguous & forward_return.notna() & threshold.notna()
                 & (threshold > 0) & group["close"].gt(0)
             )
+            if start_time_bounds is not None:
+                # The future tail supplies labels only; starts remain inside
+                # the requested evaluation window.
+                eligible &= group["minute_ts"].between(start_min, start_max)
             candidates = np.flatnonzero(
                 eligible.to_numpy()
                 & (forward_return.abs().to_numpy() >= threshold.to_numpy())

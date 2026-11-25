@@ -64,8 +64,74 @@ def test_frozen_pattern_is_evaluated_without_refitting_thresholds():
         "trades_surprise_z": {"low": -1.0, "high": 1.0},
     })
     pattern = result["patterns"][0]
+    assert result["holdout_volatility_cut_source"] == "holdout_fallback_compatibility"
     assert pattern["training_event_support"] == 6
     assert pattern["holdout_event_hits"] == 1
     assert pattern["holdout_event_total"] == 1
     assert pattern["conditions"][0]["threshold"] == 1.0
     assert "holdout_descriptive_lift" in pattern
+    assert pattern["holdout_matched_strata_count"] >= 1
+    assert 0 <= pattern["holdout_event_match_coverage_pct"] <= 100
+    assert 0 <= pattern["holdout_control_match_coverage_pct"] <= 100
+
+
+def test_holdout_event_without_volatility_features_uses_exact_timestamp_or_unknown():
+    holdout = pd.DataFrame({
+        "symbol": ["BTC-USDT"] * 12,
+        "minute_ts": np.arange(12, dtype=np.int64) * 60_000,
+        "close": np.full(12, 100.0),
+        "rv_60m": np.full(12, 0.0001),
+        "rv_30m": np.full(12, 0.0001),
+        "volume_surprise_z": np.linspace(-2, 2, 12),
+        "trades_surprise_z": np.linspace(-2, 2, 12),
+    })
+    episode = {
+        "symbol": "BTC-USDT", "horizon_minutes": 5, "start_ts": 6 * 60_000,
+        "direction": "UP",
+        "pre_move_features": {"volume_surprise_z": 1.5, "trades_surprise_z": 1.5},
+    }
+    frozen = [{
+        "symbol": "BTC-USDT", "horizon_minutes": 5, "direction": "UP",
+        "conditions": [
+            {"feature": "volume_surprise_z", "state": "high", "threshold": 1.0},
+            {"feature": "trades_surprise_z", "state": "high", "threshold": 1.0},
+        ],
+        "event_support": 6,
+    }]
+    result = evaluate_frozen_patterns(holdout, [episode], frozen, {})
+    assert result["patterns"][0]["holdout_event_total"] == 1
+    assert result["patterns"][0]["holdout_matched_strata_count"] >= 1
+
+
+
+def test_holdout_reports_when_training_volatility_cuts_are_frozen():
+    holdout = pd.DataFrame({
+        "symbol": ["BTC-USDT"] * 12,
+        "minute_ts": np.arange(12, dtype=np.int64) * 60_000,
+        "close": np.full(12, 100.0),
+        "rv_60m": np.full(12, 0.0002),
+        "rv_30m": np.full(12, 0.0002),
+        "volume_surprise_z": np.linspace(-2, 2, 12),
+        "trades_surprise_z": np.linspace(-2, 2, 12),
+    })
+    episode = {
+        "symbol": "BTC-USDT", "horizon_minutes": 5, "start_ts": 6 * 60_000,
+        "direction": "UP",
+        "pre_move_features": {
+            "rv_60m": 0.0002, "volume_surprise_z": 1.5, "trades_surprise_z": 1.5,
+        },
+    }
+    frozen = [{
+        "symbol": "BTC-USDT", "horizon_minutes": 5, "direction": "UP",
+        "conditions": [
+            {"feature": "volume_surprise_z", "state": "high", "threshold": 1.0},
+            {"feature": "trades_surprise_z", "state": "high", "threshold": 1.0},
+        ],
+        "event_support": 6,
+    }]
+    result = evaluate_frozen_patterns(
+        holdout, [episode], frozen, {},
+        frozen_volatility_cuts={"BTC-USDT": [0.0001, 0.00015]},
+    )
+    assert result["holdout_volatility_cut_source"] == "training_frozen"
+    assert result["patterns"][0]["holdout_matched_strata_count"] == 1

@@ -37,11 +37,33 @@ def _signature(frame: pd.DataFrame, thresholds: dict) -> pd.DataFrame:
     return result.fillna(False)
 
 
-def _build_control_frame(panel: pd.DataFrame, episodes: list[dict]) -> pd.DataFrame:
+def _volatility_cuts_from_panel(panel: pd.DataFrame) -> dict:
+    """Fit per-symbol volatility terciles; callers must pass training-only panels."""
+    cuts = {}
+    if panel.empty or "symbol" not in panel.columns:
+        return cuts
+    for symbol, group in panel.groupby("symbol", sort=False):
+        rv = pd.to_numeric(group.get("rv_60m", pd.Series(dtype=float)), errors="coerce")
+        rv = rv[np.isfinite(rv)]
+        if len(rv) >= 10:
+            low, high = np.quantile(rv, [1 / 3, 2 / 3])
+            cuts[str(symbol)] = [float(low), float(high)]
+        else:
+            cuts[str(symbol)] = [None, None]
+    return cuts
+
+
+def _build_control_frame(
+    panel: pd.DataFrame,
+    episodes: list[dict],
+    volatility_cuts: dict | None = None,
+) -> pd.DataFrame:
     """Build controls with no large move in either direction and no event-window overlap."""
     if panel.empty or not episodes:
         return pd.DataFrame()
 
+    if volatility_cuts is None:
+        volatility_cuts = _volatility_cuts_from_panel(panel)
     event_windows = []
     for episode in episodes:
         event_windows.append((
@@ -79,7 +101,24 @@ def _build_control_frame(panel: pd.DataFrame, episodes: list[dict]) -> pd.DataFr
                 if overlaps_event:
                     continue
                 row = g.loc[idx].to_dict()
-                row.update({"symbol": str(symbol), "minute_ts": stamp, "horizon": horizon})
+                raw_cuts = volatility_cuts.get(str(symbol), (None, None))
+                low_cut, high_cut = (
+                    tuple(float(v) if v is not None else np.nan for v in raw_cuts)
+                    if raw_cuts is not None else (np.nan, np.nan)
+                )
+                rv_value = pd.to_numeric(pd.Series([row.get("rv_60m", np.nan)]), errors="coerce").iloc[0]
+                if not np.isfinite(rv_value):
+                    rv_value = pd.to_numeric(pd.Series([row.get("rv_30m", np.nan)]), errors="coerce").iloc[0]
+                vol_bucket = (
+                    int(rv_value > low_cut) + int(rv_value > high_cut)
+                    if np.isfinite(rv_value) and np.isfinite(low_cut) and np.isfinite(high_cut)
+                    else -1
+                )
+                row.update({
+                    "symbol": str(symbol), "minute_ts": stamp, "horizon": horizon,
+                    "utc_hour": int((stamp // 3_600_000) % 24),
+                    "volatility_bucket": vol_bucket,
+                })
                 # The same neutral timestamp is a comparator for both directions;
                 # it is never classified as a directional event.
                 controls.append({**row, "direction": "UP"})
@@ -94,6 +133,7 @@ def mine_patterns(
     max_patterns: int = 30,
 ) -> dict:
     """Compare frequent two-feature extreme combinations in events vs controls."""
+    volatility_cuts = _volatility_cuts_from_panel(panel)
     available = [name for name in FEATURES if name in panel.columns]
     thresholds = {}
     for feature in available:
@@ -110,6 +150,17 @@ def mine_patterns(
             "status": "insufficient_feature_coverage",
             "patterns": [],
             "thresholds": thresholds,
+            "volatility_cuts": volatility_cuts,
+            "trial_registry": {
+                "feature_count": len(features),
+                "feature_pair_count": len(features) * (len(features) - 1) // 2,
+                "state_combinations_per_pair": 4,
+                "matched_symbol_horizon_direction_groups_evaluated": 0,
+                "candidate_hypotheses_evaluated": 0,
+                "reported_patterns": 0,
+                "max_patterns_output": max_patterns,
+                "note": "Counts describe the search performed; they are not a multiple-testing correction.",
+            },
             "warning": "Need at least two features with sufficient non-constant observations.",
         }
 
@@ -121,10 +172,60 @@ def mine_patterns(
         event_rows.append(row)
     events = pd.DataFrame(event_rows)
     if events.empty:
-        return {"status": "no_events", "patterns": [], "thresholds": thresholds}
+        return {"status": "no_events", "patterns": [], "thresholds": thresholds,
+                "feature_thresholds": thresholds, "volatility_cuts": volatility_cuts,
+                "trial_registry": {
+                    "feature_count": len(features),
+                    "feature_pair_count": len(features) * (len(features) - 1) // 2,
+                    "state_combinations_per_pair": 4,
+                    "matched_symbol_horizon_direction_groups_evaluated": 0,
+                    "candidate_hypotheses_evaluated": 0,
+                    "reported_patterns": 0,
+                    "max_patterns_output": max_patterns,
+                    "note": "Counts describe the search performed; they are not a multiple-testing correction.",
+                }}
 
-    control_frame = _build_control_frame(panel, episodes)
+    # Keep optional volatility fields explicit: missing data stays NaN/unknown.
+    for optional_feature in ("rv_60m", "rv_30m"):
+        if optional_feature not in events:
+            events[optional_feature] = np.nan
+
+    # Attach the same UTC-hour and per-symbol volatility strata to events.
+    events["utc_hour"] = (pd.to_numeric(events["minute_ts"], errors="coerce") // 3_600_000 % 24).astype(int)
+    events["volatility_bucket"] = -1
+    for symbol, group in panel.groupby("symbol", sort=False):
+        rv = pd.to_numeric(group.get("rv_60m", pd.Series(dtype=float)), errors="coerce")
+        rv = rv[np.isfinite(rv)]
+        if len(rv) < 10:
+            continue
+        raw_cuts = volatility_cuts.get(str(symbol), (None, None))
+        if raw_cuts[0] is None or raw_cuts[1] is None:
+            continue
+        low_cut, high_cut = map(float, raw_cuts)
+        event_mask = events["symbol"].astype(str).eq(str(symbol))
+        event_rv = pd.to_numeric(events.loc[event_mask, "rv_60m"], errors="coerce")
+        missing_rv = event_rv.isna()
+        if missing_rv.any():
+            lookup_cols = ["minute_ts"] + [
+                col for col in ("rv_60m", "rv_30m") if col in panel.columns
+            ]
+            if len(lookup_cols) > 1:
+                lookup = panel.loc[
+                    panel["symbol"].astype(str).eq(str(symbol)), lookup_cols
+                ].drop_duplicates("minute_ts").set_index("minute_ts")
+                stamps = events.loc[event_mask, "minute_ts"]
+                fallback = stamps.map(lookup["rv_60m"]) if "rv_60m" in lookup else pd.Series(np.nan, index=stamps.index)
+                if "rv_30m" in lookup:
+                    fallback = fallback.fillna(stamps.map(lookup["rv_30m"]))
+                event_rv = event_rv.fillna(fallback)
+        valid = event_rv.notna()
+        buckets = (event_rv.gt(low_cut).astype(int) + event_rv.gt(high_cut).astype(int))
+        events.loc[event_mask & valid, "volatility_bucket"] = buckets.loc[valid].astype(int)
+
+    control_frame = _build_control_frame(panel, episodes, volatility_cuts=volatility_cuts)
     results = []
+    hypotheses_tested = 0
+    groups_evaluated = 0
     # Never pool symbols or horizons: each event is compared only with controls
     # from the same instrument and forward horizon.
     strata = events[["symbol", "horizon"]].drop_duplicates().itertuples(index=False)
@@ -142,11 +243,30 @@ def mine_patterns(
             ].copy()
             if ev.empty or co.empty:
                 continue
+            event_count_before_matching = int(len(ev))
+            control_count_before_matching = int(len(co))
+            # Restrict both groups to strata represented by events and controls:
+            # same instrument/horizon/direction, UTC hour and volatility tercile.
+            stratum = ["utc_hour", "volatility_bucket"]
+            common_strata = set(map(tuple, ev[stratum].drop_duplicates().to_numpy())) & set(
+                map(tuple, co[stratum].drop_duplicates().to_numpy())
+            )
+            if not common_strata:
+                continue
+            ev = ev.loc[ev[stratum].apply(tuple, axis=1).isin(common_strata)].copy()
+            co = co.loc[co[stratum].apply(tuple, axis=1).isin(common_strata)].copy()
+            if ev.empty or co.empty:
+                continue
+            groups_evaluated += 1
+            # Standardize the control hit rate to the event stratum mix so a
+            # different distribution of hours/volatility cannot dominate it.
+            stratum_weights = ev.groupby(stratum).size()
             ev_sig = _signature(ev, thresholds)
             co_sig = _signature(co, thresholds)
             for first, second in combinations(features, 2):
                 for first_state in ("high", "low"):
                     for second_state in ("high", "low"):
+                        hypotheses_tested += 1
                         a, b = f"{first}:{first_state}", f"{second}:{second_state}"
                         event_hits = ev_sig[a] & ev_sig[b]
                         control_hits = co_sig[a] & co_sig[b]
@@ -155,7 +275,23 @@ def mine_patterns(
                         if n_event < min_support:
                             continue
                         event_rate = n_event / len(ev)
-                        control_rate = n_control / len(co)
+                        weighted_control_rate = 0.0
+                        weight_total = 0
+                        for stratum_key, weight in stratum_weights.items():
+                            key = stratum_key if isinstance(stratum_key, tuple) else (stratum_key,)
+                            ev_mask = pd.Series(True, index=ev.index)
+                            co_mask = pd.Series(True, index=co.index)
+                            for col, value in zip(stratum, key):
+                                ev_mask &= ev[col].eq(value)
+                                co_mask &= co[col].eq(value)
+                            stratum_controls = co.loc[co_mask]
+                            if stratum_controls.empty:
+                                continue
+                            stratum_hits = (co_sig.loc[stratum_controls.index, a]
+                                             & co_sig.loc[stratum_controls.index, b]).sum()
+                            weighted_control_rate += (int(stratum_hits) / len(stratum_controls)) * int(weight)
+                            weight_total += int(weight)
+                        control_rate = weighted_control_rate / weight_total if weight_total else 0.0
                         lift = event_rate / control_rate if control_rate > 0 else None
                         results.append({
                             "symbol": str(symbol),
@@ -171,6 +307,9 @@ def mine_patterns(
                             "event_total": int(len(ev)),
                             "control_support": n_control,
                             "control_total": int(len(co)),
+                            "matched_strata_count": int(len(common_strata)),
+                            "event_match_coverage_pct": round(len(ev) / event_count_before_matching * 100, 2),
+                            "control_match_coverage_pct": round(len(co) / control_count_before_matching * 100, 2),
                             "event_rate_pct": round(event_rate * 100, 2),
                             "control_rate_pct": round(control_rate * 100, 2),
                             "descriptive_lift": round(lift, 3) if lift is not None else None,
@@ -187,10 +326,24 @@ def mine_patterns(
         "control_method": (
             "same-symbol and same-horizon neutral timestamps sampled every horizon minutes; "
             "all controls exclude threshold-sized forward moves in either direction and any "
-            "forward interval overlapping a detected event window"
+            "forward interval overlapping a detected event window; pattern event rates are "
+            "compared only within shared UTC-hour and per-symbol volatility-tercile strata, "
+            "with control rates standardized to the event stratum mix; coverage percentages "
+            "show the share retained after common-strata filtering"
         ),
         "minimum_event_support": min_support,
+        "trial_registry": {
+            "feature_count": len(features),
+            "feature_pair_count": len(features) * (len(features) - 1) // 2,
+            "state_combinations_per_pair": 4,
+            "matched_symbol_horizon_direction_groups_evaluated": groups_evaluated,
+            "candidate_hypotheses_evaluated": hypotheses_tested,
+            "reported_patterns": min(len(results), max_patterns),
+            "max_patterns_output": max_patterns,
+            "note": "Counts describe the search performed; they are not a multiple-testing correction.",
+        },
         "feature_thresholds": thresholds,
+        "volatility_cuts": volatility_cuts,
         "event_counts_by_direction": {
             direction: int((events.direction == direction).sum())
             for direction in ("UP", "DOWN")
@@ -203,8 +356,9 @@ def mine_patterns(
         "warning": (
             "Patterns are discovered and ranked on the same sample; thresholds and combinations "
             "are data-mined. Lift is descriptive, not causal or predictive proof. Controls are "
-            "coarse neutral comparators, not fully matched by volatility regime or time. No "
-            "multiple-testing correction, independent holdout, execution costs, or strategy approval."
+            "matched only on shared UTC-hour and per-symbol volatility-tercile strata, not exact "
+            "volatility, liquidity or market-wide state. No multiple-testing correction, independent "
+            "holdout, execution costs, or strategy approval."
         ),
     }
 

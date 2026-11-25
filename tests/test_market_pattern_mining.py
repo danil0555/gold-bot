@@ -48,6 +48,19 @@ def test_mines_repeated_feature_combinations_against_non_event_controls():
     assert all(p["direction"] == "UP" for p in report["patterns"])
     assert all(p["symbol"] == "BTC-USDT" for p in report["patterns"])
     assert all(p["horizon_minutes"] == 5 for p in report["patterns"])
+    assert "UTC-hour" in report["control_method"]
+    assert all(p["matched_strata_count"] >= 1 for p in report["patterns"])
+    assert all(0 <= p["event_match_coverage_pct"] <= 100 for p in report["patterns"])
+    assert all(0 <= p["control_match_coverage_pct"] <= 100 for p in report["patterns"])
+    registry = report["trial_registry"]
+    assert registry["feature_count"] == 9
+    assert registry["feature_pair_count"] == 36
+    assert registry["candidate_hypotheses_evaluated"] == (
+        registry["matched_symbol_horizon_direction_groups_evaluated"]
+        * registry["feature_pair_count"]
+        * registry["state_combinations_per_pair"]
+    )
+    assert registry["candidate_hypotheses_evaluated"] > 0
 
 
 def test_pattern_mining_handles_no_episodes():
@@ -58,6 +71,7 @@ def test_pattern_mining_handles_no_episodes():
     report = mine_patterns(panel, [])
     assert report["status"] == "no_events"
     assert report["patterns"] == []
+    assert report["trial_registry"]["candidate_hypotheses_evaluated"] == 0
 
 
 def test_controls_exclude_large_moves_in_both_directions_and_event_windows():
@@ -96,3 +110,45 @@ def test_controls_exclude_large_moves_in_both_directions_and_event_windows():
         forward_return = panel.loc[idx + 5, "close"] / panel.loc[idx, "close"] - 1
         assert abs(forward_return) < 0.004
 
+
+
+def test_pattern_mining_handles_missing_event_volatility_without_crashing():
+    rows = 180
+    panel = pd.DataFrame({
+        "symbol": ["BTC-USDT"] * rows,
+        "minute_ts": np.arange(rows, dtype=np.int64) * 60_000,
+        "close": np.full(rows, 100.0),
+        "rv_60m": np.linspace(0.0001, 0.0003, rows),
+        "volume_surprise_z": np.linspace(-2, 2, rows),
+        "trades_surprise_z": np.linspace(-1.5, 1.5, rows),
+    })
+    episodes = [{
+        "symbol": "BTC-USDT", "minute_ts": 150 * 60_000,
+        "start_ts": 150 * 60_000, "horizon_minutes": 5, "direction": "UP",
+        "pre_move_features": {"volume_surprise_z": 1.5, "trades_surprise_z": 1.2},
+    }]
+    report = mine_patterns(panel, episodes, min_support=1)
+    assert report["status"] in {"exploratory_patterns_found", "no_patterns_met_support"}
+
+
+
+def test_control_frame_uses_supplied_training_volatility_cuts():
+    from scripts.market_pattern_mining import _build_control_frame
+
+    rows = 90
+    panel = pd.DataFrame({
+        "symbol": ["BTC-USDT"] * rows,
+        "minute_ts": np.arange(rows, dtype=np.int64) * 60_000,
+        "close": np.full(rows, 100.0),
+        "rv_60m": np.linspace(0.0001, 0.0003, rows),
+        "rv_30m": np.linspace(0.0001, 0.0003, rows),
+    })
+    episode = [{
+        "symbol": "BTC-USDT", "start_ts": 80 * 60_000,
+        "horizon_minutes": 5, "direction": "UP", "pre_move_features": {},
+    }]
+    controls = _build_control_frame(
+        panel, episode, volatility_cuts={"BTC-USDT": [0.00001, 0.00005]}
+    )
+    assert not controls.empty
+    assert set(controls["volatility_bucket"]) == {2}

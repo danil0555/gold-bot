@@ -2,6 +2,7 @@ import sqlite3
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from scripts.market_move_discovery import (
     build_report, discover_episodes, load_market_panel,
@@ -29,6 +30,7 @@ def synthetic_panel(rows=240, jump_at=180, jump=0.012):
         "microprice_offset_bps": np.zeros(rows),
         "spread_bps": np.ones(rows),
         "open_interest_change_pct": np.zeros(rows),
+        "open_interest_change_interval_ms": np.full(rows, 300_000.0),
         "funding_rate": np.zeros(rows),
     })
 
@@ -53,6 +55,27 @@ def test_event_threshold_uses_trailing_volatility_and_minimum_move():
         panel, horizons=(5,), min_move_pct=0.02, volatility_multiple=2.5
     )
     assert episodes == []
+
+def test_bounded_event_starts_can_use_future_label_tail_without_extending_window():
+    panel = synthetic_panel(rows=240, jump_at=180, jump=0.012)
+    start = int(panel.minute_ts.iloc[175])
+    end = start
+
+    truncated = panel.iloc[170:176].copy()
+    truncated_events, _ = discover_episodes(
+        truncated, horizons=(5,), min_move_pct=0.004,
+        start_time_bounds=(start, end),
+    )
+    assert truncated_events == []
+
+    with_tail = panel.iloc[170:206].copy()
+    tail_events, _ = discover_episodes(
+        with_tail, horizons=(5,), min_move_pct=0.004,
+        start_time_bounds=(start, end),
+    )
+    assert len(tail_events) == 1
+    assert tail_events[0]["start_ts"] == start
+    assert tail_events[0]["end_ts"] == int(panel.minute_ts.iloc[180])
 
 
 def test_future_price_changes_do_not_change_pre_event_features():
@@ -124,3 +147,83 @@ def test_loader_ignores_stale_derivatives_snapshots(tmp_path):
     assert len(panel) == 1
     assert np.isnan(panel.loc[0, "open_interest_base"])
     assert np.isnan(panel.loc[0, "funding_rate"])
+
+
+
+def test_oi_change_uses_real_snapshot_interval_not_minute_row_pct_change(tmp_path):
+    path = tmp_path / "oi_snapshot_intervals.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript("""
+            CREATE TABLE minute_candles (
+                symbol TEXT, minute_ts INTEGER, close REAL, volume REAL, is_closed INTEGER
+            );
+            CREATE TABLE minute_features (
+                symbol TEXT, minute_ts INTEGER, trades_count INTEGER,
+                buy_quote_usdt REAL, sell_quote_usdt REAL, taker_imbalance REAL,
+                avg_spread_bps REAL, avg_book_imbalance5 REAL,
+                avg_book_imbalance20 REAL, avg_microprice_offset_bps REAL
+            );
+            CREATE TABLE derivatives_snapshots (
+                symbol TEXT, ts_ms INTEGER, open_interest_base REAL, funding_rate REAL
+            );
+            INSERT INTO minute_candles VALUES ('BTC-USDT', 300000, 100, 10, 1);
+            INSERT INTO minute_candles VALUES ('BTC-USDT', 600000, 100, 10, 1);
+            INSERT INTO minute_candles VALUES ('BTC-USDT', 900000, 100, 10, 1);
+            INSERT INTO minute_candles VALUES ('BTC-USDT', 960000, 100, 10, 1);
+            INSERT INTO minute_candles VALUES ('BTC-USDT', 1560000, 100, 10, 1);
+            INSERT INTO minute_features VALUES ('BTC-USDT', 300000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
+            INSERT INTO minute_features VALUES ('BTC-USDT', 600000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
+            INSERT INTO minute_features VALUES ('BTC-USDT', 900000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
+            INSERT INTO minute_features VALUES ('BTC-USDT', 960000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
+            INSERT INTO minute_features VALUES ('BTC-USDT', 1560000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
+            INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 0, 100, 0.0001);
+            INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 300000, 110, 0.0002);
+            INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 900000, 121, 0.0003);
+            INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 1560000, 133.1, 0.0004);
+        """)
+    panel = load_market_panel(str(path))
+    at_5m = panel.loc[panel.minute_ts == 300000].iloc[0]
+    at_10m = panel.loc[panel.minute_ts == 600000].iloc[0]
+    at_15m = panel.loc[panel.minute_ts == 900000].iloc[0]
+    at_26m = panel.loc[panel.minute_ts == 1560000].iloc[0]
+
+    assert at_5m["open_interest_change_pct"] == pytest.approx(0.10)
+    assert at_5m["open_interest_change_interval_ms"] == 300000
+    # No fresh derivative snapshot is available at this intermediate candle.
+    assert np.isnan(at_10m["open_interest_change_pct"])
+    # A 10-minute snapshot interval is accepted at the configured boundary.
+    assert at_15m["open_interest_change_pct"] == pytest.approx(0.10)
+    assert at_15m["open_interest_change_interval_ms"] == 600000
+    # An 11-minute interval is rejected even though the current snapshot is fresh.
+    assert np.isnan(at_26m["open_interest_change_pct"])
+    assert np.isnan(at_26m["open_interest_change_interval_ms"])
+
+
+def test_oi_change_rejects_non_positive_snapshots(tmp_path):
+    path = tmp_path / "oi_non_positive.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript("""
+            CREATE TABLE minute_candles (
+                symbol TEXT, minute_ts INTEGER, close REAL, volume REAL, is_closed INTEGER
+            );
+            CREATE TABLE minute_features (
+                symbol TEXT, minute_ts INTEGER, trades_count INTEGER,
+                buy_quote_usdt REAL, sell_quote_usdt REAL, taker_imbalance REAL,
+                avg_spread_bps REAL, avg_book_imbalance5 REAL,
+                avg_book_imbalance20 REAL, avg_microprice_offset_bps REAL
+            );
+            CREATE TABLE derivatives_snapshots (
+                symbol TEXT, ts_ms INTEGER, open_interest_base REAL, funding_rate REAL
+            );
+            INSERT INTO minute_candles VALUES ('BTC-USDT', 300000, 100, 10, 1);
+            INSERT INTO minute_candles VALUES ('BTC-USDT', 360000, 100, 10, 1);
+            INSERT INTO minute_features VALUES ('BTC-USDT', 300000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
+            INSERT INTO minute_features VALUES ('BTC-USDT', 360000, 10, 60, 40, 0.2, 1, 0.1, 0.2, 0.1);
+            INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 0, 100, 0.0001);
+            INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 300000, 0, 0.0002);
+            INSERT INTO derivatives_snapshots VALUES ('BTC-USDT', 360000, 110, 0.0003);
+        """)
+    panel = load_market_panel(str(path))
+    row = panel.loc[panel.minute_ts == 360000].iloc[0]
+    assert np.isnan(row["open_interest_change_pct"])
+    assert np.isnan(row["open_interest_change_interval_ms"])
