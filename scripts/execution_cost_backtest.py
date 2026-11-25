@@ -63,7 +63,6 @@ def run_close_to_close_backtest(
     price_lookup = {
         (str(row.symbol), int(row.minute_ts)): float(row.close)
         for row in prices.itertuples(index=False)
-        if float(row.close) > 0
     }
 
     events: dict[str, dict[int, float]] = {}
@@ -71,15 +70,36 @@ def run_close_to_close_backtest(
         if not {"symbol", "ts_ms", "funding_rate"}.issubset(funding_events.columns):
             raise ValueError("funding_events require symbol, ts_ms, funding_rate")
         for row in funding_events.itertuples(index=False):
-            rate = float(row.funding_rate)
+            try:
+                ts_value = float(row.ts_ms)
+                rate = float(row.funding_rate)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("funding events need numeric timestamps and rates") from exc
+            if not np.isfinite(ts_value) or ts_value % 1 != 0:
+                raise ValueError("funding event timestamps must be finite integer milliseconds")
             if not np.isfinite(rate):
-                continue
-            events.setdefault(str(row.symbol), {})[int(row.ts_ms)] = rate
-    schedule = None if expected_funding_timestamps_ms is None else sorted(
-        {int(ts) for ts in expected_funding_timestamps_ms}
-    )
-    if schedule is not None and not schedule:
-        raise ValueError("expected_funding_timestamps_ms must not be empty")
+                raise ValueError("funding rates must be finite")
+            symbol_events = events.setdefault(str(row.symbol), {})
+            ts = int(ts_value)
+            if ts in symbol_events:
+                raise ValueError("duplicate symbol/funding settlement timestamps")
+            symbol_events[ts] = rate
+    schedule = None
+    if expected_funding_timestamps_ms is not None:
+        schedule_values = []
+        for value in expected_funding_timestamps_ms:
+            try:
+                ts_value = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("expected funding timestamps must be numeric") from exc
+            if not np.isfinite(ts_value) or ts_value % 1 != 0:
+                raise ValueError("expected funding timestamps must be finite integer milliseconds")
+            schedule_values.append(int(ts_value))
+        if not schedule_values:
+            raise ValueError("expected_funding_timestamps_ms must not be empty")
+        if len(set(schedule_values)) != len(schedule_values):
+            raise ValueError("expected_funding_timestamps_ms must be unique")
+        schedule = sorted(schedule_values)
 
     frame = signals[["symbol", "signal_ts", "direction"]].copy()
     frame["signal_ts"] = pd.to_numeric(frame.signal_ts, errors="coerce")
