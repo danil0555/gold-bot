@@ -320,3 +320,40 @@ def test_modern_session_with_no_candle_links_is_not_misclassified_as_legacy(tmp_
     session = report["capture_sessions"][0]
     assert session["symbols"]["BTC-USDT"]["closed_minutes"] == 0
     assert session["attribution_source"] == "capture_observations"
+
+
+def test_v2_session_coverage_reads_capture_scoped_candle_rows(tmp_path):
+    path = tmp_path / "scoped-candles.sqlite3"
+    rows = _minutes("BTC-USDT", 20_000, 200)
+    _database(path, rows)
+    start = 20_000 * 86_400_000
+    with sqlite3.connect(path) as db:
+        db.executescript("""
+            CREATE TABLE collector_sessions (
+                capture_id TEXT PRIMARY KEY, started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER, symbols_json TEXT NOT NULL
+            );
+            CREATE TABLE capture_storage_versions (
+                capture_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL
+            );
+            CREATE TABLE capture_minute_candles (
+                capture_id TEXT NOT NULL, symbol TEXT NOT NULL, minute_ts INTEGER NOT NULL,
+                close_ts INTEGER NOT NULL, open REAL NOT NULL, high REAL NOT NULL,
+                low REAL NOT NULL, close REAL NOT NULL, volume REAL NOT NULL,
+                is_closed INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(capture_id,symbol,minute_ts)
+            );
+        """)
+        db.execute(
+            "INSERT INTO collector_sessions VALUES ('capture-v2', ?, ?, '[\"BTC-USDT\"]')",
+            (start, start + 200 * 60_000),
+        )
+        db.execute("INSERT INTO capture_storage_versions VALUES ('capture-v2', 2)")
+        db.executemany(
+            "INSERT INTO capture_minute_candles VALUES ('capture-v2','BTC-USDT',?,?,100,101,99,100,1,1)",
+            [(row[1], row[1] + 59_999) for row in rows[:75]],
+        )
+    report = evaluate_multiday_coverage(str(path), min_closed_minutes=1, min_utc_days=1)
+    session = report["capture_sessions"][0]
+    assert session["symbols"]["BTC-USDT"]["closed_minutes"] == 75
+    assert session["attribution_source"] == "capture_scoped_rows_v2"
