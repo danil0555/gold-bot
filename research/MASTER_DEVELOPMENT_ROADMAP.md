@@ -1,3 +1,12 @@
+## 2026-11-25 — corrected tests submitted for CI
+- Test-only fixes are now on the PR #12 branch: Strategy B replay fixture extended to 416 one-minute rows, yielding exactly 212 eligible decisions after the 205-row history requirement; execution-cost tests now expect direction-adjusted positive SHORT return and correctly distinguish missing entry candle (`minute_ts == signal_ts`) from missing exit candle.
+- Commits: `93234b5dad8f042de7602d12766e0fe0d1cfc846` (replay fixture), `a63894fa70d95b1decee56c2a00c77aacb547665` (execution-cost assertions), `a5833603d48b390d8815b0e95a620361f3d89964` (roadmap).
+- New validation run `45602144553` was queued on the exact new head `a5833603d48b390d8815b0e95a620361f3d89964`; at 11:12 UTC its dependency-install step was in progress. No test result yet.
+- Prior failed run `45598368312` remains recorded as 5 failed / 153 passed. The corrections have not yet been proven until run `45602144553` completes.
+- Correction to capture timing: run `45573371850` started 08:06 UTC; at 11:12 UTC it had run about 3h06 of the configured 4h capture. Its collector step was still within the expected capture duration, not demonstrably hung. Artifacts are uploaded only in later steps.
+- PR #12 remains Draft/open/unmerged and GitHub currently reports it non-mergeable/dirty with its base branch 5 commits ahead. Do not rebase/retarget/merge without a separate audit.
+- Production `main`, DB, hosting, credentials, deployment, and exchange orders remain untouched.
+
 ## 2026-11-25 — CI failure audit and regression-test corrections
 - Inspected failed GitHub Actions run `45598368312` on PR #12 head `e435f6d3be1c7a659ec72ff3ba906f90e98fd0f5`: compileall and runtime safe-default import passed; deterministic suite reported 5 failures and 153 passes.
 - Three failures were stale execution-cost assertions: a profitable SHORT must have positive direction-adjusted gross return, and removing the candle keyed by `signal_ts` removes the entry candle (removing `signal_ts + 1m` removes the exit candle).
@@ -5,7 +14,7 @@
 - Updated tests only; no strategy, production code, execution model, or thresholds changed. Test commits: replay fixture `93234b5dad8f042de7602d12766e0fe0d1cfc846`; execution-cost expectations `a63894fa70d95b1decee56c2a00c77aacb547665`.
 - New CI must validate the resulting branch head. The previous failure remains recorded and is not to be treated as a pass.
 - PR #12 remains Draft/open/unmerged. Its base branch has advanced relative to the PR head and GitHub reports a non-mergeable/dirty state; no rebase, retarget, merge, or force-push was attempted.
-- BingX capture run `45573371850` is still in progress on the older capture branch/SHA, stuck in the public-data capture step, with zero artifacts at the latest inspection. No data-derived conclusions are available.
+- At the latest inspection (11:12 UTC), BingX capture run `45573371850` had been active for about 3h06 of its configured 4h capture duration. The public-data collector step was still running as expected; no artifacts are expected until later workflow steps. No data-derived conclusions are available.
 - Production `main`, production database, hosting, credentials, deployment, and exchange orders remain untouched.
 - Next: verify CI on the new head; if green, separately resolve the stacked-PR base divergence with an explicit, reviewable plan before any merge consideration.
 
