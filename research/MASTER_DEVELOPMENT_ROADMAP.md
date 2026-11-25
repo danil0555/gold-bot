@@ -430,3 +430,12 @@
 - Commits: evaluator `e527e605c9d69b57f85b9149bdc2bd8896ac2687`; tests and corrected expectations `32b21bdaa77a59ed12ec3157d61831528437ff61`; CI/roadmap update follows.
 - Validation is pending on the latest branch head. No performance result has been generated because no verified historical execution dataset has been supplied to this evaluator.
 - Production `main`, `trading_bot_v9.db`, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
+
+
+## 2026-11-25 — fair candidate-versus-Strategy-B comparison foundation
+- Added research-only `scripts/strategy_candidate_comparison.py`, a common comparison wrapper around the conservative execution-cost backtest. Strategy B is the required baseline; named candidate signal streams are evaluated on the same candle panel, horizon, fee/slippage assumptions and exact funding inputs.
+- Added low/base/stress default cost scenarios and explicit candidate-minus-baseline deltas for trade count, net expectancy, net total return and maximum drawdown. Each result also includes per-symbol and UTC-entry-date breakdowns to expose concentration and temporal instability.
+- Parameter variants can be passed as separately named candidate streams, allowing later robustness sweeps without changing the evaluator. The report clearly warns that differing trade counts/exposures are not normalized, and that this is not a capital/margin model, formal inference, multiple-testing correction or independent holdout.
+- Added deterministic tests for common cost application, baseline deltas, duplicate signals/scenarios, and no-valid-trade handling; registered them in Python validation CI.
+- This commit adds the comparison framework only. It does not generate strategy signals, claim a performance winner, or approve any candidate. A verified historical dataset and leakage-safe signal adapters are still required before a meaningful comparison can be run.
+- Production `main`, `trading_bot_v9.db`, credentials, deployment and exchange orders remain untouched. PR #12 remains draft and unmerged.
