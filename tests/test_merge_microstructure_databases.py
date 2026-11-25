@@ -54,6 +54,15 @@ def make_capture(path, candle_rows, event):
         "INSERT INTO collector_sessions(capture_id, started_at_ms, ended_at_ms, symbols_json) VALUES (?, ?, ?, ?)",
         (f"capture-{event}", event, event + 1000, '["BTC-USDT"]'),
     )
+    db.executemany(
+        "INSERT INTO capture_observations VALUES (?, ?, ?, ?)",
+        [
+            (f"capture-{event}", row[0], row[1], "candle")
+            for row in candle_rows
+        ] + [
+            (f"capture-{event}", "BTC-USDT", 1000 + event, "derivatives")
+        ],
+    )
     db.commit()
     db.close()
 
@@ -119,3 +128,16 @@ def test_merge_accepts_legacy_capture_without_session_table(tmp_path):
     report = merge_databases([legacy], output)
     assert report["rows_after"]["minute_candles"] == 1
     assert report["rows_after"]["collector_sessions"] == 0
+
+
+def test_merge_preserves_capture_observation_links(tmp_path):
+    first, second, output = (tmp_path / name for name in ("one.db", "two.db", "merged.db"))
+    make_capture(first, [candle(60_000)], 1)
+    make_capture(second, [candle(60_000)], 2)
+    report = merge_databases([first, second], output)
+    assert report["rows_after"]["capture_observations"] == 4
+    with sqlite3.connect(output) as db:
+        sessions = db.execute(
+            "SELECT COUNT(DISTINCT capture_id) FROM capture_observations"
+        ).fetchone()[0]
+        assert sessions == 2
