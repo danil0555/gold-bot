@@ -103,3 +103,14 @@ python -m pytest -q tests/test_microstructure_discovery.py
 - Mixed old/new merged databases use an explicit `session` provenance marker: modern sessions with no candle links correctly report zero exact observations, while legacy sessions without a marker use a clearly labeled time-window estimate. This avoids treating every old session as empty merely because the merged database contains the newer mapping table.
 
 - The merge output upgrades the earlier mapping-table CHECK constraint to allow the explicit session marker, preserving existing observation links. This matters when an older PR #14 capture is the first input and a newer capture is merged after it.
+
+
+## Capture-scoped storage v2 — 2026-11-25
+
+- A code audit found that v1 provenance links alone do not preserve per-capture payloads: canonical `minute_features` remains keyed by `(symbol, minute_ts)`, so overlapping collectors can overwrite each other's minute aggregate while both provenance links remain.
+- Added separate v2 tables keyed by capture ID for minute aggregates, closed candles, and derivatives snapshots; canonical cross-capture tables remain unchanged. A schema-version marker distinguishes v2 sessions from v1 and legacy sessions.
+- The collector's trades and depth updates are aggregated in memory into minute features; v2 preserves each session's aggregate, not every raw trade/depth tick.
+- Merger and coverage-gate support are included. The gate prefers exact v2 candle rows, then v1 observation links, then explicitly labeled legacy time-window estimates.
+- Added tests for overlapping collector feature values, merge preservation, and v2 coverage attribution. CI must pass on the exact branch head before this storage design is treated as validated.
+- Research only. No production main, production DB, credentials, deployment, strategy, risk, or exchange order behavior changed.
+- Statistical warning: multiple captures observing the same market minute remain one market-time outcome, not independent samples.
