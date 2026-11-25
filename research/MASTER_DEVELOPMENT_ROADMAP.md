@@ -672,3 +672,10 @@
 - No default portfolio cap is selected. The helper is not integrated into signal delivery because current bot code does not maintain a reliable registry of user-confirmed positions, actual entries, remaining quantities, partial exits and current stops. It is groundwork only and does not block or alter signals.
 - Added `tests/test_portfolio_risk.py` and included it in the PR #16 CI command. Exact-head CI run `45682161967` for commit `7b89900a38ebf096e57b841a31589b0848a564a2` is running; compilation has passed and dependency installation was still in progress at the last check. No test pass is claimed yet.
 - PR #16 remains Draft/open/unmerged. GitHub currently reports mergeable=true. Production `main`, live database, deployment, credentials and exchange orders remain untouched.
+
+
+## 2026-11-25 — Portfolio risk helper CI passed (PR #16)
+- Exact-head GitHub Actions run `45682161967` passed on commit `7b89900a38ebf096e57b841a31589b0848a564a2`.
+- Log confirms compilation and runtime safe-default import passed; deterministic add-on/reliability/API suite: **21 passed**; signal, balance, position-sizing and new portfolio-risk suite: **42 passed**. The optional read-only 7-day backtest was skipped.
+- This validates the pure helper only. It is not connected to the bot's signal delivery or a persistent open-position registry; simultaneous signals can still stack risk until confirmed-position tracking and an explicit portfolio cap policy are implemented.
+- PR #16 remains Draft/open/unmerged. Production `main`, live DB, credentials, deployment and exchange orders remain untouched.
