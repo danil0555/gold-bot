@@ -89,11 +89,13 @@ def test_minute_candle_rejects_invalid_ohlcv():
 def test_kline_message_matches_bingx_swap_websocket_documented_shape():
     agg = MarketMinuteAggregator(":memory:")
     try:
+        now_ms = int(__import__("time").time() * 1000)
+        current_minute = now_ms // 60_000 * 60_000
         payload = {
-            "e": "kline", "E": int(__import__("time").time() * 1000), "s": "BTC-USDT",
+            "e": "kline", "E": now_ms, "s": "BTC-USDT",
             "K": {
-                "t": (int(__import__("time").time() * 1000) // 60_000 - 1) * 60_000,
-                "T": (int(__import__("time").time() * 1000) // 60_000) * 60_000 - 1,
+                "t": current_minute - 120_000,
+                "T": current_minute - 60_001,
                 "o": "100", "h": "103", "l": "99", "c": "102", "v": "12.5",
             },
         }
@@ -110,7 +112,7 @@ def test_kline_without_open_timestamp_uses_minute_bucket_of_close_timestamp():
     agg = MarketMinuteAggregator(":memory:")
     try:
         now_ms = int(__import__("time").time() * 1000)
-        close_ts = (now_ms // 60_000 - 1) * 60_000 - 1
+        close_ts = (now_ms // 60_000 - 2) * 60_000 - 1
         payload = {
             "T": close_ts,
             "o": "100", "h": "103", "l": "99", "c": "102", "v": "12.5",
@@ -208,9 +210,9 @@ def test_market_observations_are_linked_to_capture_session():
             "p": "100", "q": "1", "m": False,
         })
         agg.flush_before(now_ms)
-        close_ts = current_minute - 1
+        close_ts = current_minute - 60_001
         assert agg.save_candle("BTC-USDT", {
-            "t": current_minute - 60_000, "T": close_ts,
+            "t": current_minute - 120_000, "T": close_ts,
             "o": "100", "h": "102", "l": "99", "c": "101", "v": "1",
         })
         agg.save_derivatives("BTC-USDT", now_ms, open_interest=123.0)
