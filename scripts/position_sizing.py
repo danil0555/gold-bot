@@ -129,6 +129,7 @@ def apply_bingx_contract_constraints(sizing, spec, side, leverage):
     if lev_ok is not True: reasons.append("leverage_unknown_or_too_high")
     return {
         "validated": not reasons, "reasons": reasons, "quantity": quantity,
+        "quantity_precision": int(precision),
         "notional_usdt": notional, "risk_usdt": quantity * distance,
         "margin_usdt": notional / lev, "min_quantity_ok": min_qty_ok,
         "min_notional_ok": min_value_ok, "leverage_ok": lev_ok,
