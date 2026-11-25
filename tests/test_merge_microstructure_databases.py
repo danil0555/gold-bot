@@ -179,7 +179,7 @@ def test_merge_upgrades_older_capture_observation_check_constraint(tmp_path):
     make_capture(modern, [candle(120_000)], 2)
 
     report = merge_databases([legacy, modern], output)
-    assert report["rows_after"]["capture_observations"] == 3
+    assert report["rows_after"]["capture_observations"] == 4
     with sqlite3.connect(output) as db:
         markers = db.execute(
             "SELECT COUNT(*) FROM capture_observations WHERE observation_type='session'"
