@@ -121,8 +121,8 @@ def test_bingx_does_not_validate_closed_or_unknown_contract():
     closed = apply_bingx_contract_constraints(
         sizing,
         {
-            "quantity_precision": 2, "min_quantity": 0.01, "min_notional": 2,
-            "active": False, "api_open": False, "max_long_leverage": 20,
+            "quantity_precision": 2, "min_quantity": Decimal("0.01"), "min_notional": Decimal("2"),
+            "active": False, "api_open": False, "max_long_leverage": Decimal("20"),
         },
         "LONG", 5,
     )
