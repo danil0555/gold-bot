@@ -66,3 +66,10 @@ Run locally:
 python -m scripts.microstructure_discovery --db /path/to/market_microstructure.sqlite3 --cost-bps 12
 python -m pytest -q tests/test_microstructure_discovery.py
 ```
+
+
+## 2026-11-25 — daily coverage gate hardening
+- The original multi-day gate could accept 600 closed minutes spread very unevenly across three UTC dates (for example, 590 + 5 + 5). A total-count threshold and a date-count threshold alone do not guarantee meaningful observations on each date.
+- Added a configurable minimum of 120 closed minutes per symbol per UTC date (default), included per-day counts and undercovered-date diagnostics in the report, and made any undercovered observed date block `holdout_ready`.
+- This remains a history-sufficiency check, not a continuous-coverage or data-quality certification. Capture-session breaks and within-session gaps still require separate diagnostics because the current table does not encode session identity.
+- Added regression tests for sparse dates and invalid daily thresholds. Research-only; no production files, database, credentials, deployment or exchange orders changed.
