@@ -90,6 +90,59 @@ def test_replay_requires_all_strategy_timeframes():
 
 def test_default_replay_loads_production_builder_without_starting_bot():
     result = replay_strategy_b({"BTC-USDT": _all_frames()})
-    assert result["production_strategy_version"] == "10.2.2"
-    assert len(result["production_main_sha256"]) == 64
+    assert result["checked_out_bot_version"] == "10.2.2"
+    assert len(result["checked_out_main_sha256"]) == 64
+    assert len(result["strategy_builder_sha256"]) == 64
     assert result["status"] in {"evaluated", "no_signals"}
+
+
+
+def test_replay_rejects_unknown_side_instead_of_silently_marking_short():
+    def builder(market, symbol, frames, quote=None):
+        return {
+            "setup_key": "bad-side", "side": "HOLD",
+            "entry": 100.0, "sl": 99.0, "tp1": 101.8, "tp2": 103.0,
+            "quality_score": 90.0,
+        }
+
+    with pytest.raises(ValueError, match="unsupported side"):
+        replay_strategy_b({"BTC-USDT": _all_frames()}, signal_builder=builder)
+
+
+def test_replay_rejects_inconsistent_signal_levels():
+    def builder(market, symbol, frames, quote=None):
+        return {
+            "setup_key": "bad-levels", "side": "BUY",
+            "entry": 100.0, "sl": 101.0, "tp1": 102.0, "tp2": 103.0,
+            "quality_score": 90.0,
+        }
+
+    with pytest.raises(ValueError, match="ordering"):
+        replay_strategy_b({"BTC-USDT": _all_frames()}, signal_builder=builder)
+
+
+def test_replay_rejects_non_finite_signal_values():
+    def builder(market, symbol, frames, quote=None):
+        return {
+            "setup_key": "bad-number", "side": "SELL",
+            "entry": 100.0, "sl": 101.0, "tp1": 99.0, "tp2": float("nan"),
+            "quality_score": 90.0,
+        }
+
+    with pytest.raises(ValueError, match="non-finite"):
+        replay_strategy_b({"BTC-USDT": _all_frames()}, signal_builder=builder)
+
+
+def test_replay_accepts_valid_short_signal():
+    def builder(market, symbol, frames, quote=None):
+        return {
+            "setup_key": "short-setup", "side": "SELL",
+            "entry": 100.0, "sl": 101.0, "tp1": 98.2, "tp2": 97.0,
+            "quality_score": 91.0,
+        }
+
+    result = replay_strategy_b(
+        {"BTC-USDT": _all_frames()}, signal_builder=builder
+    )
+    assert result["signal_count"] == 1
+    assert result["signals"][0]["direction"] == "SHORT"
