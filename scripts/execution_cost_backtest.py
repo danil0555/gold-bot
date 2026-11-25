@@ -172,8 +172,8 @@ def run_close_to_close_backtest(
         "funding_events_charged": int(ledger.funding_events.sum()),
         "rejected_signals": rejected,
         "methodology": [
-            "Signal is assumed known after its candle close; entry is next exact minute close.",
-            "Exit is the exact configured horizon after entry; missing candles are rejected, never bridged.",
+            "Signal is assumed known at signal_ts, the signal candle close; entry uses the close of the candle opening at signal_ts.",
+            "Exit uses the close of the candle opening at signal_ts plus horizon_minutes; missing exact candles are rejected, never bridged.",
             "At most one position per symbol; a new entry must occur strictly after the prior exit.",
             "Fees and slippage are fixed per-side assumptions, charged on entry and exit.",
             "Funding uses only exact supplied settlement timestamps; missing scheduled events invalidate the trade.",
