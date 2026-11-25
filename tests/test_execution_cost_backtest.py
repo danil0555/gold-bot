@@ -37,11 +37,11 @@ def test_long_and_short_direction_and_round_trip_costs():
     # Second signal at 2m enters on candle 2 close (103), exits candle 3 close (102).
     assert report["trades"][1]["entry_price"] == pytest.approx(103)
     assert report["trades"][1]["exit_price"] == pytest.approx(102)
-    assert report["trades"][1]["gross_return_pct"] == pytest.approx((102 - 103) / 103 * 100)
+    assert report["trades"][1]["gross_return_pct"] == pytest.approx((103 - 102) / 103 * 100)
 
 
 def test_missing_exact_entry_or_exit_is_rejected_not_bridged():
-    candles = _candles().loc[lambda x: x.minute_ts != 60_000]
+    candles = _candles().loc[lambda x: x.minute_ts != 0]
     report = run_close_to_close_backtest(
         _signals([("BTC", 0, "LONG")]), candles,
         horizon_minutes=1, fee_bps_per_side=5, slippage_bps_per_side=2
