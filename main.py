@@ -35,7 +35,7 @@ from dotenv import load_dotenv
 from scripts.reliability import (
     RETRYABLE_HTTP_STATUS, contiguous_candle_tail, retry_after_seconds,
 )
-from scripts.position_sizing import calculate_linear_usdtm_position_size
+from scripts.position_sizing import calculate_linear_usdtm_position_size, parse_bingx_contract_specs, apply_bingx_contract_constraints
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart, Command
@@ -166,6 +166,9 @@ ws_status = {
 }
 latest_prices: dict[tuple[str, str], float] = {}
 latest_quotes: dict[tuple[str, str], dict[str, Any]] = {}
+contract_specs_cache: dict[str, dict[str, Any]] = {}
+contract_specs_updated_at = 0.0
+CONTRACT_SPECS_MAX_AGE_SEC = 6 * 60 * 60
 _unavailable_symbols: set[tuple[str, str]] = set()
 _insufficient_history: dict[tuple[str, str], float] = {}
 background_tasks: list[asyncio.Task] = []
@@ -2299,10 +2302,38 @@ async def background_scan():
 # 18. MAIN
 # ============================================================
 
+async def refresh_contract_specs() -> bool:
+    global contract_specs_updated_at
+    if http_session is None or http_session.closed:
+        return False
+    try:
+        payload = await api_get(http_session, "/openApi/swap/v2/quote/contracts", {})
+        parsed = parse_bingx_contract_specs(payload)
+        contract_specs_cache.clear()
+        contract_specs_cache.update(parsed)
+        contract_specs_updated_at = time.time()
+        system_status["contract_specs_count"] = len(parsed)
+        system_status["contract_specs_updated_at"] = utc_text()
+        log.info("BingX contract rules refreshed: %s symbols", len(parsed))
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("Не удалось обновить ограничения контрактов BingX")
+        return False
+
+
+async def contract_specs_refresh_loop() -> None:
+    while True:
+        await asyncio.sleep(CONTRACT_SPECS_MAX_AGE_SEC)
+        await refresh_contract_specs()
+
+
 async def on_startup() -> None:
     global bot, http_session
     http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
     bot = Bot(token=BOT_TOKEN)
+    await refresh_contract_specs()
     system_status["started"] = True
     log.info("Bot v%s запущен; реальные ордера отключены; WS trade read-only, 1m свечи агрегируются из сделок", BOT_VERSION)
 
@@ -2322,6 +2353,7 @@ async def main_async() -> None:
     global bot
     dp.include_router(router)
     await on_startup()
+    background_tasks.append(asyncio.create_task(contract_specs_refresh_loop()))
     background_tasks.append(asyncio.create_task(bingx_kline_websocket_loop()))
     background_tasks.append(asyncio.create_task(background_scan()))
     try:
