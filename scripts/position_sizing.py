@@ -103,22 +103,54 @@ def parse_bingx_contract_specs(payload):
 
 def apply_bingx_contract_constraints(sizing, spec, side, leverage):
     """Round down to quantityPrecision and verify minimums and API status."""
-    from decimal import Decimal, ROUND_DOWN
+    from decimal import Decimal, InvalidOperation, ROUND_DOWN
+
+    direction = str(side).strip().upper()
+    if direction not in {"LONG", "BUY", "SHORT", "SELL"}:
+        return {"validated": False, "reasons": ["invalid_side"]}
+    try:
+        lev = Decimal(str(leverage))
+        if not lev.is_finite() or lev <= 0:
+            raise ValueError
+    except (InvalidOperation, TypeError, ValueError):
+        return {"validated": False, "reasons": ["invalid_leverage"]}
+
     precision = spec.get("quantity_precision")
-    if precision is None:
-        return {"validated": False, "reasons": ["unknown_quantity_precision"]}
-    quantity = Decimal(str(sizing["quantity"])).quantize(
-        Decimal(1).scaleb(-int(precision)), rounding=ROUND_DOWN
-    )
-    entry = Decimal(str(sizing["entry_price"]))
-    distance = Decimal(str(sizing["stop_distance"]))
-    lev = Decimal(str(leverage))
+    if isinstance(precision, bool) or not isinstance(precision, int) or not 0 <= precision <= 18:
+        return {"validated": False, "reasons": ["unknown_or_invalid_quantity_precision"]}
+    try:
+        quantity_input = Decimal(str(sizing["quantity"]))
+        entry = Decimal(str(sizing["entry_price"]))
+        distance = Decimal(str(sizing["stop_distance"]))
+        if (not quantity_input.is_finite() or quantity_input <= 0
+                or not entry.is_finite() or entry <= 0
+                or not distance.is_finite() or distance <= 0):
+            raise ValueError
+        quantity = quantity_input.quantize(
+            Decimal(1).scaleb(-precision), rounding=ROUND_DOWN
+        )
+        min_qty = spec.get("min_quantity")
+        min_value = spec.get("min_notional")
+        if min_qty is not None:
+            min_qty = Decimal(str(min_qty))
+            if not min_qty.is_finite() or min_qty <= 0:
+                min_qty = None
+        if min_value is not None:
+            min_value = Decimal(str(min_value))
+            if not min_value.is_finite() or min_value <= 0:
+                min_value = None
+        max_key = "max_long_leverage" if direction in {"LONG", "BUY"} else "max_short_leverage"
+        max_lev = spec.get(max_key)
+        if max_lev is not None:
+            max_lev = Decimal(str(max_lev))
+            if not max_lev.is_finite() or max_lev <= 0:
+                max_lev = None
+    except (KeyError, InvalidOperation, TypeError, ValueError):
+        return {"validated": False, "reasons": ["invalid_sizing_or_contract_metadata"]}
+
     notional = quantity * entry
-    min_qty, min_value = spec.get("min_quantity"), spec.get("min_notional")
     min_qty_ok = None if min_qty is None else quantity >= min_qty
     min_value_ok = None if min_value is None else notional >= min_value
-    key = "max_long_leverage" if str(side).upper() in {"LONG", "BUY"} else "max_short_leverage"
-    max_lev = spec.get(key)
     lev_ok = None if max_lev is None else lev <= max_lev
     reasons = []
     if quantity <= 0: reasons.append("quantity_rounds_to_zero")
@@ -129,7 +161,7 @@ def apply_bingx_contract_constraints(sizing, spec, side, leverage):
     if lev_ok is not True: reasons.append("leverage_unknown_or_too_high")
     return {
         "validated": not reasons, "reasons": reasons, "quantity": quantity,
-        "quantity_precision": int(precision),
+        "quantity_precision": precision,
         "notional_usdt": notional, "risk_usdt": quantity * distance,
         "margin_usdt": notional / lev, "min_quantity_ok": min_qty_ok,
         "min_notional_ok": min_value_ok, "leverage_ok": lev_ok,
