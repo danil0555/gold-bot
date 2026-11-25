@@ -49,7 +49,15 @@ def run_close_to_close_backtest(
     prices = candles[["symbol", "minute_ts", "close"]].copy()
     prices["minute_ts"] = pd.to_numeric(prices.minute_ts, errors="coerce")
     prices["close"] = pd.to_numeric(prices.close, errors="coerce")
-    prices = prices.dropna().sort_values(["symbol", "minute_ts"])
+    if prices[["minute_ts", "close"]].isna().any().any():
+        raise ValueError("candles contain null or non-numeric minute_ts/close values")
+    if not np.isfinite(prices[["minute_ts", "close"]].to_numpy(dtype=float)).all():
+        raise ValueError("candles contain non-finite minute_ts/close values")
+    if (prices.minute_ts % 60_000 != 0).any():
+        raise ValueError("candle minute_ts must be aligned to exact minute opens")
+    if (prices.minute_ts % 1 != 0).any():
+        raise ValueError("candle minute_ts must be integer milliseconds")
+    prices = prices.sort_values(["symbol", "minute_ts"])
     if prices.duplicated(["symbol", "minute_ts"]).any():
         raise ValueError("duplicate symbol/minute candle keys")
     price_lookup = {
@@ -76,8 +84,12 @@ def run_close_to_close_backtest(
     frame = signals[["symbol", "signal_ts", "direction"]].copy()
     frame["signal_ts"] = pd.to_numeric(frame.signal_ts, errors="coerce")
     frame["direction"] = frame.direction.astype(str).str.upper()
-    if frame.signal_ts.isna().any() or not frame.direction.isin(["LONG", "SHORT"]).all():
-        raise ValueError("signals need numeric timestamps and LONG/SHORT directions")
+    if frame.signal_ts.isna().any() or not np.isfinite(frame.signal_ts.to_numpy(dtype=float)).all():
+        raise ValueError("signals need finite numeric timestamps")
+    if (frame.signal_ts % 60_000 != 0).any() or (frame.signal_ts % 1 != 0).any():
+        raise ValueError("signal_ts must be integer milliseconds aligned to a minute close")
+    if not frame.direction.isin(["LONG", "SHORT"]).all():
+        raise ValueError("signals need LONG/SHORT directions")
     frame = frame.sort_values(["symbol", "signal_ts"])
     last_exit: dict[str, int] = {}
     trades, rejected = [], {"missing_entry": 0, "missing_exit": 0,
