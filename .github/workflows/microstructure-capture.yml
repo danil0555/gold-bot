@@ -162,20 +162,13 @@ jobs:
             --report /tmp/microstructure_merge_report.json
       - name: Check merged sample coverage and run frozen holdout
         run: |
-          ready=$(python - <<'PY' | tail -n 1
-          import sqlite3, sys
-          db = sqlite3.connect("/tmp/market_microstructure_merged.sqlite3")
-          count, days = db.execute("""
-            SELECT COUNT(DISTINCT minute_ts),
-                   COUNT(DISTINCT date(minute_ts / 1000, 'unixepoch'))
-            FROM minute_candles WHERE is_closed = 1
-          """).fetchone()
-          db.close()
-          result = count >= 600 and days >= 3
-          print(f"Coverage: {count} unique minutes across {days} UTC dates; holdout_ready={result}", file=sys.stderr)
-          print("true" if result else "false")
-          PY
-          )
+          python -m scripts.multiday_coverage_gate \
+            --db /tmp/market_microstructure_merged.sqlite3 \
+            --output /tmp/multiday_coverage_gate.json \
+            --min-closed-minutes 600 \
+            --min-utc-days 3 \
+            --expected-symbols "${{ inputs.symbols }}"
+          ready=$(python -c 'import json; print("true" if json.load(open("/tmp/multiday_coverage_gate.json"))["holdout_ready"] else "false")')
           if [ "$ready" = "true" ]; then
             python -m scripts.market_move_discovery --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_move_discovery_multiday.json
             python -m scripts.market_pattern_mining --db /tmp/market_microstructure_merged.sqlite3 --output /tmp/market_patterns_multiday.json --min-support 5
@@ -183,6 +176,14 @@ jobs:
           else
             echo "More daily captures are required before holdout analysis."
           fi
+      - name: Upload multi-day coverage gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multiday-holdout-coverage-gate
+          path: /tmp/multiday_coverage_gate.json
+          retention-days: 14
+          if-no-files-found: warn
       - name: Upload merged multi-day research database
         if: always()
         uses: actions/upload-artifact@v4
