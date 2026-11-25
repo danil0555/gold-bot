@@ -698,3 +698,12 @@
 - Latest PR #17 head is c389376dcc416459f7337f1d455c1a3c4d106f97. GitHub Actions has queued checks for this exact SHA; no pass is claimed yet. Earlier runs 45687174224 and 45687182355 failed (117/2 and 118/1 respectively) on the older head and must not be described as validation.
 - Statistical guardrail: two captures observing the same market minute remain one market-time outcome, not independent samples. V2 capture isolation does not create additional independent days or prove predictive edge.
 - Research only. No production main, production DB, credentials, deployment, strategy, risk, or exchange order behavior changed. Keep PR Draft and do not merge without explicit approval.
+
+
+## 2026-11-25 — capture-scoped storage v2 exact-head CI passed (PR #17)
+- GitHub Actions run 45687562480 completed successfully on exact PR #17 head c389376dcc416459f7337f1d455c1a3c4d106f97. Log confirms Python compilation, runtime safe-default import, and deterministic strategy/research suite: 119 passed in 2.82s. Public scan and optional historical research/backtest steps were skipped as intended for a research-base PR.
+- The passing head includes dynamic historical candle fixtures, v2 capture-scoped rows, merger compatibility for legacy captures, and keyed deduplication for capture session/provenance metadata.
+- A duplicate workflow run 45687552952 was still in progress at the time of this entry; run 45687562480 alone is sufficient exact-head passing evidence.
+- PR #17 remains Draft/open/unmerged; GitHub reports mergeable=true. No rebase or merge performed.
+- Validation covers deterministic code paths only. It does not yet validate a live BingX capture, a merged real-data DB, or predictive profitability. Next: conduct a small read-only capture using the v2 collector, inspect row counts and per-capture isolation in the resulting DB, then run the multi-day coverage gate before any long collection.
+- Production main, production DB, credentials, deployment, strategy/risk settings, and exchange orders remain untouched.
