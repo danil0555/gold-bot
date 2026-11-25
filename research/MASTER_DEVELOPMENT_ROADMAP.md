@@ -713,3 +713,10 @@
 - Added a regression test with a legacy capture as the first merge input and a v2 capture as the second. This specifically validates that the merger creates additive v2 destination tables from a legacy first input and then copies the second capture's version marker and per-capture minute aggregate without dropping it.
 - Test commit: 5fbc57d99c420411916dba27b76ce3d2d805e8da. Exact-head CI is queued/in progress; prior 119-pass result applies to the preceding head only, not this new test commit.
 - PR #17 remains Draft/open/unmerged. No production changes or data collection have been started by this test-only addition.
+
+
+## 2026-11-25 — mixed-version merge fixture corrected (PR #17)
+- The added legacy-first merge test exposed a fixture mismatch: its synthetic legacy schema used a reduced minute_features table, while a real older collector DB has the full canonical table schema. The merger correctly rejected the incompatible input; this was a test-fixture problem, not evidence that real collector versions differ.
+- Reworked the test to create a v1-shaped DB using MarketMinuteAggregator's real schema, then drop only the four v2 tables/marker before merging it ahead of a v2 capture. This preserves realistic core-table column parity while exercising legacy-first ordering.
+- Fix commit: 7311436283ec53e92e2d7745cc5d49f420d2f9bc. New exact-head CI is required; the earlier 119-pass run validated the prior head only. The intermediate added test correctly failed (119 passed, 1 failed) because of the fixture schema mismatch.
+- No production code, DB, credentials, deployment, or exchange order behavior changed.
