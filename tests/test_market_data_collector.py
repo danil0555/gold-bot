@@ -309,3 +309,47 @@ def test_sigterm_handler_requests_cooperative_shutdown():
         assert stop_event.is_set() is True
 
     asyncio.run(scenario())
+
+
+def test_run_collector_finalizes_session_after_cooperative_shutdown(tmp_path, monkeypatch):
+    import asyncio
+
+    from scripts import market_data_collector as collector
+
+    path = tmp_path / "graceful-shutdown.sqlite3"
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def idle_task(*args):
+        await asyncio.Event().wait()
+
+    def request_shutdown(loop, stop_event):
+        loop.call_soon(stop_event.set)
+        return False
+
+    monkeypatch.setattr(collector.aiohttp, "ClientSession", lambda **kwargs: FakeSession())
+    monkeypatch.setattr(collector, "websocket_loop", idle_task)
+    monkeypatch.setattr(collector, "derivatives_poll", idle_task)
+    monkeypatch.setattr(collector, "_register_sigterm_handler", request_shutdown)
+
+    asyncio.run(collector.run_collector(
+        ["BTC-USDT"], str(path), duration_hours=1, derivatives_interval=30
+    ))
+
+    with sqlite3.connect(path) as db:
+        ended_at_ms = db.execute(
+            "SELECT ended_at_ms FROM collector_sessions"
+        ).fetchone()[0]
+        events = db.execute(
+            "SELECT event_type FROM collector_events ORDER BY id"
+        ).fetchall()
+
+    assert ended_at_ms is not None
+    assert [row[0] for row in events] == [
+        "capture_session_started", "capture_session_stopped"
+    ]
