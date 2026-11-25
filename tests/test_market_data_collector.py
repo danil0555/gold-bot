@@ -219,6 +219,8 @@ def test_market_observations_are_linked_to_capture_session():
             "WHERE capture_id=? GROUP BY observation_type ORDER BY observation_type",
             (capture_id,),
         ).fetchall()
-        assert rows == [("candle", 1), ("derivatives", 1), ("features", 1)]
+        assert rows == [
+            ("candle", 1), ("derivatives", 1), ("features", 1), ("session", 1)
+        ]
     finally:
         agg.close()
