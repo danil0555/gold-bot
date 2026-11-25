@@ -1,3 +1,11 @@
+## 2026-11-25 — per-symbol Strategy B rejection breakdown
+- Extended the historical replay diagnostics to group rejection reasons, stages, and trend-check combinations by symbol as well as globally.
+- This prevents aggregate statistics from hiding that a filter may be restrictive on one instrument but not another. It remains descriptive diagnostics only; no filter thresholds, signal criteria, or Strategy B decisions changed.
+- Added a deterministic two-symbol regression test verifying independent reason/stage/trend-state counts.
+- Commits: source `cbd7040e226d58ef618e35ed880aaeb546bda880`; test `88a979265b6f70a1e4b4de379501c2dd1f488628`. CI is not yet confirmed for the updated head.
+- Production `main`, database, hosting, credentials, deployment, and exchange orders remain untouched.
+- Next: confirm the full validation workflow on the latest branch SHA; then evaluate per-symbol rejection distributions on multi-day capture data before proposing isolated shadow experiments.
+
 ## 2026-11-25 — expose Strategy B trend-check rejection combinations
 - Extended the replay diagnostics to preserve the production builder's existing `trend_checks` string when trend alignment fails. The report now counts exact BUY/SELL sub-check combinations in addition to rejection reason and stage.
 - This distinguishes common alignment patterns (for example, 1H trend agrees but 5m momentum does not) without changing any trading condition or interpreting the combinations as causal probabilities.
