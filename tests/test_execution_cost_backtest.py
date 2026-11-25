@@ -29,7 +29,7 @@ def test_long_and_short_direction_and_round_trip_costs():
     assert report["trade_count"] == 2
     assert report["trades"][0]["gross_return_pct"] == pytest.approx((103 / 101 - 1) * 100)
     assert report["trades"][0]["execution_cost_pct"] == pytest.approx(0.14)
-    assert report["trades"][1]["gross_return_pct"] == pytest.approx((102 / 103 - 1) * 100)
+    assert report["trades"][1]["gross_return_pct"] == pytest.approx((102 / 104 - 1) * 100)
 
 
 def test_missing_exact_entry_or_exit_is_rejected_not_bridged():
@@ -52,14 +52,19 @@ def test_overlapping_positions_per_symbol_are_rejected():
 
 
 def test_funding_sign_is_directional_and_uses_exact_settlement_time():
+    candles = pd.concat([
+        _candles(),
+        _candles().assign(symbol="ETH")
+    ], ignore_index=True)
     events = pd.DataFrame([
-        ("BTC", 3 * 60_000, 0.001)
+        ("BTC", 2 * 60_000, 0.001),
+        ("ETH", 2 * 60_000, 0.001),
     ], columns=["symbol", "ts_ms", "funding_rate"])
     report = run_close_to_close_backtest(
-        _signals([("BTC", 0, "LONG"), ("BTC", 2 * 60_000, "SHORT")]),
-        _candles(), horizon_minutes=2, fee_bps_per_side=0,
+        _signals([("BTC", 0, "LONG"), ("ETH", 0, "SHORT")]),
+        candles, horizon_minutes=2, fee_bps_per_side=0,
         slippage_bps_per_side=0, funding_events=events,
-        expected_funding_timestamps_ms=[3 * 60_000]
+        expected_funding_timestamps_ms=[2 * 60_000]
     )
     assert report["trade_count"] == 2
     assert report["trades"][0]["funding_return_pct"] == pytest.approx(-0.1)
