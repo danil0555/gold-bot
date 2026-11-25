@@ -128,3 +128,51 @@ def test_bingx_does_not_validate_closed_or_unknown_contract():
     assert closed["validated"] is False
     assert "contract_not_active" in closed["reasons"]
     assert "api_open_not_confirmed" in closed["reasons"]
+
+
+@pytest.mark.parametrize(
+    "balance,entry,stop,precision",
+    [
+        (100, 100, 99.0, 3),
+        (250, 250, 247.5, 2),
+        (1000, 100, 98.0, 3),
+        (2500, 50, 49.9, 4),
+        (10000, 200, 198.0, 2),
+        (10000, 200, 190.0, 1),
+    ],
+)
+def test_exchange_rounding_never_exceeds_per_trade_risk_budget(balance, entry, stop, precision):
+    from scripts.position_sizing import apply_bingx_contract_constraints
+
+    sizing = calculate_linear_usdtm_position_size(
+        balance, entry, stop, "LONG", risk_percent=10, leverage=5
+    )
+    checked = apply_bingx_contract_constraints(
+        sizing,
+        {
+            "quantity_precision": precision,
+            "min_quantity": Decimal("0.0001"),
+            "min_notional": Decimal("1"),
+            "active": True,
+            "api_open": True,
+            "max_long_leverage": Decimal("100"),
+        },
+        "LONG", 5,
+    )
+
+    assert checked["validated"] is True
+    assert checked["risk_usdt"] <= Decimal(str(balance * 0.10))
+    assert checked["quantity"] <= Decimal(str(sizing["quantity"]))
+
+
+def test_multiple_individually_valid_signals_can_stack_risk():
+    """Document that per-signal 10% sizing is not a portfolio risk cap."""
+    balance = 1000
+    signals = [
+        calculate_linear_usdtm_position_size(balance, 100, 98, "LONG"),
+        calculate_linear_usdtm_position_size(balance, 200, 196, "LONG"),
+        calculate_linear_usdtm_position_size(balance, 50, 49, "LONG"),
+    ]
+    assert all(item["risk_usdt"] == pytest.approx(100) for item in signals)
+    assert sum(item["risk_usdt"] for item in signals) == pytest.approx(300)
+    assert sum(item["risk_usdt"] for item in signals) == pytest.approx(30 * balance / 100)
