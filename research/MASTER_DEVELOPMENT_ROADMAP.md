@@ -587,3 +587,12 @@
 - Prepared a minimal presentation/security hardening change on isolated branch `fix/diag-db-html-safety`, Draft PR #15: https://github.com/danil0555/gold-bot/pull/15. HTML-escape every dynamic value and return a generic failure message while retaining full details in server logs. CI has not yet reported a run for this exact head.
 - No SQL, DB access mode, schema, query, allowlist, strategy, risk, signal generation, credentials, deployment or order behavior is changed by this patch.
 - Keep the change isolated for review; do not merge or deploy until the complete CI result and code review are satisfactory.
+
+
+## 2026-11-25 — signal header and displayed risk configuration (separate review PR)
+- Prepared isolated branch `fix/signal-risk-header-10pct`, Draft PR #16: https://github.com/danil0555/gold-bot/pull/16, based on production `main`.
+- Changed the configured/displayed `RISK_PERCENT` from 2% to 10% and the default for newly created `user_settings` tables to 10%. Existing SQLite rows are deliberately not rewritten or migrated.
+- Replaced the generic signal title with a direction-first header containing the matching indicator and symbol, e.g. `🟢 LONG — BTC-USDT` or `🔴 SHORT — BTC-USDT`.
+- Important limitation found during source audit: production `main.py` currently does not calculate position quantity/notional from `RISK_PERCENT`. The value is a configuration/display default only; this PR does not implement automatic position sizing. Do not describe 10% as an enforced per-trade loss limit until a separately reviewed sizing calculation and its tests exist.
+- Leverage remains 5x; TP1/TP2 remain 1.8R/3R. Real exchange orders remain disabled. No DB, credentials, deployment or live bot process was touched.
+- PR #16 is Draft/open/unmerged and requires CI on its exact head before review. PR #15's diagnostics HTML-safety CI run `45630974943` completed successfully (syntax, runtime import/safe defaults, and deterministic add-on tests); the optional 7-day historical backtest step was skipped.
