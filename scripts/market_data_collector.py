@@ -365,18 +365,22 @@ class MarketMinuteAggregator:
         self.db.commit()
 
     def close(self):
-        self.flush_all()
-        ended_at_ms = int(time.time() * 1000)
-        self.db.execute(
-            "UPDATE collector_sessions SET ended_at_ms=? WHERE capture_id=?",
-            (ended_at_ms, self.capture_id),
-        )
-        self.db.execute(
-            "INSERT INTO collector_events(ts_ms,event_type,detail) VALUES(?,?,?)",
-            (ended_at_ms, "capture_session_stopped", self.capture_id),
-        )
-        self.db.commit()
-        self.db.close()
+        try:
+            self.flush_all()
+            ended_at_ms = int(time.time() * 1000)
+            self.db.execute(
+                "UPDATE collector_sessions SET ended_at_ms=? WHERE capture_id=?",
+                (ended_at_ms, self.capture_id),
+            )
+            self.db.execute(
+                "INSERT INTO collector_events(ts_ms,event_type,detail) VALUES(?,?,?)",
+                (ended_at_ms, "capture_session_stopped", self.capture_id),
+            )
+            self.db.commit()
+        finally:
+            # Even if the final flush fails, release the SQLite handle. The
+            # session remains open in metadata so coverage checks fail closed.
+            self.db.close()
 
 
 async def _rest_json(session, path, params=None):
