@@ -657,3 +657,10 @@
 - Enabled pull-request validation for the research base `research/multiday-coverage-gate-v2` and restricted unrelated spot/perpetual live smoke and 180-day backtest steps to PRs targeting production `main` only.
 - The first validation run `45681463142` was superseded/cancelled during the workflow update before deterministic tests completed. Replacement run `45681566207` is in progress on the updated PR #14 head; no CI pass is claimed yet.
 - PR #14 remains Draft/open/unmerged. Production `main`, production DB, credentials, deployment and exchange orders remain untouched.
+
+
+## 2026-11-25 — PR #14 collector provenance validation passed
+- Replacement workflow run `45681566207` completed successfully on exact PR #14 head `296bb219ed472fca56a4fc4bcaca82a2ee37f115`.
+- Log confirms Python compilation and runtime safe-default import passed; the full deterministic research/strategy suite completed with **115 passed in 2.00s**. The public spot/perpetual smoke and 180-day backtest steps were skipped as intended for a PR targeting the research base.
+- The tested head includes the collector `close()` finally-cleanup change and regression test for a simulated final-flush exception. A failed flush leaves `ended_at_ms` NULL and closes the SQLite handle.
+- PR #14 remains Draft/open/unmerged and GitHub reports mergeable=true. No production changes, live DB access, deployment or exchange orders.
