@@ -28,6 +28,11 @@ CREATE TABLE collector_sessions (
  capture_id TEXT PRIMARY KEY, started_at_ms INTEGER NOT NULL,
  ended_at_ms INTEGER, symbols_json TEXT NOT NULL
 );
+CREATE TABLE capture_observations (
+ capture_id TEXT NOT NULL, symbol TEXT NOT NULL, observed_at_ms INTEGER NOT NULL,
+ observation_type TEXT NOT NULL,
+ PRIMARY KEY(capture_id, symbol, observed_at_ms, observation_type)
+);
 """
 
 
