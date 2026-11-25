@@ -17,10 +17,11 @@ def evaluate_multiday_coverage(
     *,
     min_closed_minutes: int = 600,
     min_utc_days: int = 3,
+    min_closed_minutes_per_utc_day: int = 120,
     expected_symbols: list[str] | None = None,
 ) -> dict:
-    if min_closed_minutes < 1 or min_utc_days < 1:
-        raise ValueError("minimum minutes and UTC days must be positive")
+    if min_closed_minutes < 1 or min_utc_days < 1 or min_closed_minutes_per_utc_day < 1:
+        raise ValueError("minimum minutes, daily minutes and UTC days must be positive")
 
     with sqlite3.connect(f"file:{Path(db_path).resolve()}?mode=ro", uri=True) as db:
         exists = db.execute(
@@ -37,6 +38,14 @@ def evaluate_multiday_coverage(
             GROUP BY symbol
             ORDER BY symbol
         """).fetchall()
+        daily_rows = db.execute("""
+            SELECT symbol, date(minute_ts / 1000, 'unixepoch'),
+                   COUNT(DISTINCT minute_ts), MIN(minute_ts), MAX(minute_ts)
+            FROM minute_candles
+            WHERE is_closed = 1
+            GROUP BY symbol, date(minute_ts / 1000, 'unixepoch')
+            ORDER BY symbol, date(minute_ts / 1000, 'unixepoch')
+        """).fetchall()
 
     observed = {
         str(symbol): {
@@ -49,6 +58,15 @@ def evaluate_multiday_coverage(
         }
         for symbol, count, days, first_ts, last_ts in rows
     }
+    daily_coverage: dict[str, dict[str, dict]] = {}
+    for symbol, utc_day, count, first_ts, last_ts in daily_rows:
+        daily_coverage.setdefault(str(symbol), {})[str(utc_day)] = {
+            "closed_minutes": int(count),
+            "first_minute_ts": int(first_ts) if first_ts is not None else None,
+            "last_minute_ts": int(last_ts) if last_ts is not None else None,
+            "ready": int(count) >= min_closed_minutes_per_utc_day,
+        }
+
     required = sorted(set(expected_symbols or []) | set(observed))
     per_symbol = {}
     for symbol in required:
@@ -60,9 +78,14 @@ def evaluate_multiday_coverage(
             "minutes_ready": False,
             "days_ready": False,
         })
+        days = daily_coverage.get(symbol, {})
+        daily_minutes_ready = bool(days) and all(day["ready"] for day in days.values())
         per_symbol[symbol] = {
             **metrics,
-            "ready": bool(metrics["minutes_ready"] and metrics["days_ready"]),
+            "daily_minutes_ready": daily_minutes_ready,
+            "daily_coverage": days,
+            "undercovered_utc_days": [day for day, values in days.items() if not values["ready"]],
+            "ready": bool(metrics["minutes_ready"] and metrics["days_ready"] and daily_minutes_ready),
         }
 
     missing_symbols = sorted(set(expected_symbols or []) - set(observed))
@@ -74,14 +97,16 @@ def evaluate_multiday_coverage(
         "thresholds": {
             "min_closed_minutes_per_symbol": int(min_closed_minutes),
             "min_utc_days_per_symbol": int(min_utc_days),
+            "min_closed_minutes_per_utc_day": int(min_closed_minutes_per_utc_day),
         },
         "required_symbols": required,
         "missing_expected_symbols": missing_symbols,
         "not_ready_symbols": not_ready,
         "per_symbol": per_symbol,
         "interpretation": (
-            "History sufficiency only. This gate does not establish data quality, "
-            "statistical significance, predictive value, or strategy profitability."
+            "Daily history sufficiency only. This gate does not establish continuous coverage "
+            "or data quality, statistical significance, predictive value, or strategy profitability. "
+            "Inspect capture-session boundaries and within-session gaps separately."
         ),
     }
 
@@ -92,6 +117,7 @@ def main() -> None:
     parser.add_argument("--output", default="research-output/multiday_coverage_gate.json")
     parser.add_argument("--min-closed-minutes", type=int, default=600)
     parser.add_argument("--min-utc-days", type=int, default=3)
+    parser.add_argument("--min-closed-minutes-per-utc-day", type=int, default=120)
     parser.add_argument("--expected-symbols", default="")
     args = parser.parse_args()
     expected = [item.strip() for item in args.expected_symbols.split(",") if item.strip()]
@@ -99,6 +125,7 @@ def main() -> None:
         args.db,
         min_closed_minutes=args.min_closed_minutes,
         min_utc_days=args.min_utc_days,
+        min_closed_minutes_per_utc_day=args.min_closed_minutes_per_utc_day,
         expected_symbols=expected,
     )
     output = Path(args.output)
