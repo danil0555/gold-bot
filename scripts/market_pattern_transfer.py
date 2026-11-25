@@ -445,8 +445,9 @@ def build_rolling_cross_symbol_transfer_report(
     start_index = initial_end
     fold_number = 0
 
-    while start_index < n:
-        end_index = min(n, start_index + holdout_size)
+    # Ignore a trailing fragment shorter than one complete holdout window.
+    while start_index + holdout_size <= n:
+        end_index = start_index + holdout_size
         holdout_start_ts = int(timestamps[start_index])
         holdout_end_ts = int(timestamps[end_index - 1])
         train_end_ts = holdout_start_ts - purge_minutes * 60_000
