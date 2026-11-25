@@ -150,7 +150,7 @@ class MarketMinuteAggregator:
             symbol TEXT NOT NULL,
             observed_at_ms INTEGER NOT NULL,
             observation_type TEXT NOT NULL CHECK (
-                observation_type IN ('candle', 'features', 'derivatives')
+                observation_type IN ('session', 'candle', 'features', 'derivatives')
             ),
             PRIMARY KEY(capture_id, symbol, observed_at_ms, observation_type)
         );
@@ -164,6 +164,12 @@ class MarketMinuteAggregator:
         self.db.execute(
             "INSERT INTO collector_events(ts_ms,event_type,detail) VALUES(?,?,?)",
             (self.session_started_at_ms, "capture_session_started", self.capture_id),
+        )
+        # Distinguish modern empty sessions from legacy sessions with no links.
+        self.db.execute(
+            "INSERT INTO capture_observations "
+            "(capture_id,symbol,observed_at_ms,observation_type) VALUES (?,?,?,?)",
+            (self.capture_id, "", self.session_started_at_ms, "session"),
         )
         self.db.commit()
         self.pending = {}
