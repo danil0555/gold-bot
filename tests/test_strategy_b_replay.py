@@ -248,3 +248,28 @@ def test_default_builder_rejection_diagnostics_are_aggregated(monkeypatch):
     assert result["diagnostics"]["builder_rejection_stages"] == {
         "strategy_filter": calls,
     }
+
+
+def test_default_builder_trend_check_states_are_aggregated(monkeypatch):
+    calls = 0
+    state_a = "BUY[1H_bull=OK,4H_not_bear=OK] SELL[1H_bear=NO]"
+    state_b = "BUY[1H_bull=NO,4H_not_bear=OK] SELL[1H_bear=OK]"
+
+    def builder(market, symbol, frames, quote=None, diagnostics=None):
+        nonlocal calls
+        calls += 1
+        diagnostics["reason"] = "no_trend_alignment"
+        diagnostics["stage"] = "strategy_filter"
+        diagnostics["trend_checks"] = state_a if calls % 2 else state_b
+        return None
+
+    monkeypatch.setattr(
+        "scripts.strategy_b_replay._load_production_builder",
+        lambda: (builder, "10.2.2", "a" * 64, "b" * 64, 30),
+    )
+    result = replay_strategy_b({"BTC-USDT": _all_frames()})
+
+    assert result["diagnostics"]["builder_trend_check_states"] == {
+        state_a: (calls + 1) // 2,
+        state_b: calls // 2,
+    }
