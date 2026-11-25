@@ -1,4 +1,5 @@
 import math
+from decimal import Decimal
 
 import pytest
 
