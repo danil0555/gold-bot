@@ -740,3 +740,12 @@
 - Workflow run `45688285622` also confirms the collector step, database artifact upload and event-study artifact upload succeeded. The pre-event discovery and pattern-mining steps were skipped by workflow conditions; no result is claimed for them.
 - PR #17 remains Draft/open/unmerged, base `research/capture-observation-provenance-v1`, head SHA above. No production `main`, production DB, credentials, deployment, strategy/risk settings or exchange order behavior changed. The downloaded smoke DB is a disposable CI artifact and was not merged into production or research history.
 - Next: add an automated, fail-closed DB integrity/provenance validation step to future v2 smoke runs, then proceed to longer isolated captures and per-symbol multi-day coverage. Do not interpret this 3-minute smoke as statistical coverage or profitability validation.
+
+
+## 2026-11-25 — automated v2 capture DB validation added (PR #17)
+- Added `scripts/validate_capture_db.py`, a read-only, fail-closed validator for disposable v2 capture databases. It checks SQLite integrity and foreign keys, required v2 tables, schema version, session closure and stop event, exact per-row provenance parity for features/candles/derivatives, closed-candle status, and that each configured symbol has at least one row of each captured data type.
+- Added three deterministic tests covering a valid capture, missing feature provenance and an unclean session.
+- Added the validator test to the deterministic suite and a branch-scoped workflow step immediately after the v2 smoke collector. The step is intentionally a hard gate: the collector is currently continue-on-error for artifact diagnostics, but invalid/missing DB state must fail the workflow rather than be silently treated as a successful smoke.
+- Commits: validator `1152e61bd721c4e62b9cff71bfacf1b621496b62`; tests `d76d3048bdc8f77e95575ffa57a5ba8fdf3188a1`; workflow integration `eaacbe06c376e8cc71d899533341deda3e464c5c`.
+- Exact-head CI for `eaacbe06c376e8cc71d899533341deda3e464c5c` is queued/in progress (runs `45697798654` and `45697788416`). No validation pass is claimed yet. Earlier smoke run `45688285622` validates the prior collector/storage implementation, not this new validator.
+- Research branch only; no production branch, live DB, credentials, deployment, strategy/risk settings or exchange order behavior changed. PR #17 remains Draft/open/unmerged.
