@@ -14,7 +14,11 @@ from pathlib import Path
 
 TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events", "collector_sessions", "capture_observations", "capture_storage_versions", "capture_minute_features", "capture_minute_candles", "capture_derivatives_snapshots")
 REQUIRED_TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "collector_events")
-KEYED_TABLES = ("minute_candles", "minute_features", "derivatives_snapshots", "capture_storage_versions", "capture_minute_features", "capture_minute_candles", "capture_derivatives_snapshots")
+KEYED_TABLES = (
+    "minute_candles", "minute_features", "derivatives_snapshots",
+    "collector_sessions", "capture_observations", "capture_storage_versions",
+    "capture_minute_features", "capture_minute_candles", "capture_derivatives_snapshots",
+)
 
 
 def _columns(connection: sqlite3.Connection, table: str, schema: str = "main") -> list[str]:
