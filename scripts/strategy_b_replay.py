@@ -27,6 +27,8 @@ TIMEFRAME_MS = {
     "4h": 14_400_000,
 }
 REQUIRED_COLUMNS = {"open_time", "open", "high", "low", "close", "volume"}
+# Fallback for injected test builders; the checked-out production constant is loaded below.
+SIGNAL_COOLDOWN_MINUTES = 30
 
 
 def _load_production_builder():
@@ -43,6 +45,7 @@ def _load_production_builder():
             version = str(production.BOT_VERSION)
             source_path = Path(production.__file__).resolve()
             source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            cooldown_minutes = int(production.SIGNAL_COOLDOWN_MINUTES)
         finally:
             for key, value in old.items():
                 if value is None:
@@ -51,7 +54,7 @@ def _load_production_builder():
                     os.environ[key] = value
     builder_source = inspect.getsource(builder).encode("utf-8")
     builder_sha256 = hashlib.sha256(builder_source).hexdigest()
-    return builder, version, source_sha256, builder_sha256
+    return builder, version, source_sha256, builder_sha256, cooldown_minutes
 
 
 def _prepare_frame(
@@ -105,16 +108,23 @@ def replay_strategy_b(
     if min_history_rows < 205:
         raise ValueError("min_history_rows cannot be below production MIN_CANDLE_ROWS")
     if signal_builder is None:
-        builder, checked_out_version, checked_out_main_sha256, builder_sha256 = _load_production_builder()
+        (builder, checked_out_version, checked_out_main_sha256,
+         builder_sha256, cooldown_minutes) = _load_production_builder()
     else:
         builder = signal_builder
         checked_out_version = None
         checked_out_main_sha256 = None
         builder_sha256 = None
+        cooldown_minutes = SIGNAL_COOLDOWN_MINUTES
+
+    if not isinstance(cooldown_minutes, int) or cooldown_minutes < 1:
+        raise ValueError("production signal cooldown must be a positive integer")
 
     output = []
     diagnostics = {"decisions": 0, "insufficient_history": 0,
-                  "no_signal": 0, "duplicate_setup": 0}
+                  "no_signal": 0, "duplicate_setup": 0,
+                  "cooldown_rejected": 0}
+    last_accepted_by_cooldown: dict[tuple[str, str, str, str], int] = {}
     for symbol, frames in candles_by_symbol.items():
         symbol = str(symbol)
         missing_tf = set(TIMEFRAME_MS) - set(frames)
@@ -186,13 +196,27 @@ def replay_strategy_b(
             if setup_key in seen_setups:
                 diagnostics["duplicate_setup"] += 1
                 continue
+            market = str(signal.get("market", "swap")).strip().lower()
+            strategy_version = str(signal.get("strategy_version", "B")).strip()
+            if not market or not strategy_version:
+                raise ValueError(f"{symbol}: signal market and strategy_version must be non-empty")
+            cooldown_key = (market, symbol, side, strategy_version)
+            previous_signal_ts = last_accepted_by_cooldown.get(cooldown_key)
+            cooldown_ms = cooldown_minutes * 60_000
+            # Production save_signal rejects an existing same-market/symbol/side/version
+            # signal whose created_at is within the last cooldown window, including
+            # the exact boundary. Replay decision timestamps stand in for created_at.
+            if previous_signal_ts is not None and decision_ts - previous_signal_ts <= cooldown_ms:
+                diagnostics["cooldown_rejected"] += 1
+                continue
             seen_setups.add(setup_key)
+            last_accepted_by_cooldown[cooldown_key] = int(decision_ts)
             output.append({
                 "symbol": symbol,
                 "signal_ts": int(decision_ts),
                 "direction": "LONG" if side == "BUY" else "SHORT",
                 "setup_key": setup_key,
-                "strategy_version": str(signal.get("strategy_version", "B")),
+                "strategy_version": strategy_version,
                 "entry_reference": entry,
                 "sl": sl,
                 "tp1": tp1,
@@ -207,6 +231,7 @@ def replay_strategy_b(
         "checked_out_bot_version": checked_out_version,
         "checked_out_main_sha256": checked_out_main_sha256,
         "strategy_builder_sha256": builder_sha256,
+        "signal_cooldown_minutes": cooldown_minutes,
         "signal_count": len(output),
         "diagnostics": diagnostics,
         "signals": output,
@@ -214,7 +239,8 @@ def replay_strategy_b(
             "Calls the unchanged build_signal_b function from main.py.",
             "Input timestamps are candle OPEN times in milliseconds.",
             "Only candles whose full interval ends at or before the 1m decision close are visible.",
-            "Each Strategy B setup_key is emitted once.",
+            "Each accepted Strategy B setup_key is emitted once; cooldown-rejected setups are not marked as saved.",
+            "Production SIGNAL_COOLDOWN_MINUTES is applied per market/symbol/side/strategy_version; the exact boundary is rejected just as in save_signal.",
             "Signal timestamp is the decision candle close; the execution-cost evaluator enters at the next exact 1m close.",
         ],
         "limitations": [
