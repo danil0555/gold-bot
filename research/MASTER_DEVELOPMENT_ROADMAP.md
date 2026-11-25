@@ -580,3 +580,10 @@
 - Consequently, `holdout_ready=true` currently means history-count sufficiency only; it must not be interpreted as continuous/full coverage. The gate's own interpretation string already disclaims data quality and predictive validity. The earlier 4-hour capture still fails the multi-day research requirement; no threshold has been weakened.
 - Next engineering step: strengthen coverage reporting with per-UTC-day minimums and explicit gap/coverage diagnostics, while preserving intentional capture-session breaks as separate segments. Add tests for sparse-day history and large within-session gaps before using the gate to authorize a new holdout run. Keep this work on a research branch and do not alter production `main.py`.
 - Production `main`, `trading_bot_v9.db`, credentials, deployment and exchange orders remain untouched.
+
+
+## 2026-11-25 — production diagnostics HTML safety (separate review PR)
+- Audited the existing allowlisted `/diag_db` handler in production `main.py`. Dynamic SQLite diagnostic values were interpolated directly into Telegram HTML, and raw exception text was echoed to the user. A table name containing HTML-significant characters could make Telegram reject the diagnostic message; exception text could also leak implementation/database details or break parsing.
+- Prepared a minimal presentation/security hardening change on isolated branch `fix/diag-db-html-safety` (PR to be opened separately): HTML-escape every dynamic value and return a generic failure message while retaining full details in server logs.
+- No SQL, DB access mode, schema, query, allowlist, strategy, risk, signal generation, credentials, deployment or order behavior is changed by this patch.
+- Keep the change isolated for review; do not merge or deploy until the complete CI result and code review are satisfactory.
