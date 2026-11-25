@@ -348,9 +348,18 @@ def backup_and_verify_db() -> Path | None:
 def init_db() -> None:
     if DB_PATH.exists():
         try:
-            backup_and_verify_db()
-        except Exception:
-            log.exception("Ошибка бэкапа — продолжаем инициализацию")
+            backup_path = backup_and_verify_db()
+        except Exception as exc:
+            log.exception("Ошибка резервного копирования — миграция БД отменена")
+            raise RuntimeError(
+                "Не удалось создать и проверить резервную копию БД; "
+                "инициализация и миграция остановлены."
+            ) from exc
+        if backup_path is None:
+            raise RuntimeError(
+                "Резервная копия БД не создана или не прошла проверку; "
+                "инициализация и миграция остановлены."
+            )
 
     with db() as con:
         con.execute("""CREATE TABLE IF NOT EXISTS users (
