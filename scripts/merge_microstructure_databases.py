@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Merge read-only BingX microstructure SQLite captures into one research database.
 
-Only the four documented collector tables are copied. Production bot databases
+The four core collector tables and optional session metadata are copied. Production bot databases
 are never opened or modified. Duplicate (symbol, timestamp) observations are
 kept once; collector diagnostics are appended.
 """
