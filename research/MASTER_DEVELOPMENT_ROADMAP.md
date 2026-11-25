@@ -1,3 +1,14 @@
+## 2026-11-25 — Strategy B replay now mirrors production signal cooldown
+- Audited production `save_signal`: duplicate `setup_key` is checked first, then a 30-minute cooldown is enforced by market, symbol, side, and strategy version. The cooldown boundary is inclusive (a new signal at exactly 30 minutes is still rejected).
+- The historical replay previously deduplicated only identical setup keys and could therefore overstate signal frequency versus production.
+- Updated `scripts/strategy_b_replay.py` to read `SIGNAL_COOLDOWN_MINUTES` from the checked-out bot module (30 minutes in the current production source), apply it per market/symbol/side/version, and report `cooldown_rejected` plus the applied cooldown. Cooldown-rejected setup keys are not marked as saved, matching the production insert path.
+- Added tests for exact-boundary rejection, re-eligibility after 30 minutes, and independent LONG/SHORT cooldowns.
+- Commits: replay implementation `aa0a86534baf6021b26744dc771b4b818db00649`; regression tests `18933e649ea35a914bc27ed9f047e8d4bca8cbad`.
+- Validation: CI for these new commits is pending; do not treat the new tests as passed until the run for the updated PR #12 head completes.
+- Branch relationship: PR #12 head was 5 commits behind its base branch `research/market-discovery-engine-v1`. The missing per-symbol multi-day coverage-gate files are present on the base branch, not yet on this PR #12 head. Do not mistake that branch divergence for a missing test in the replay CI; reconcile the two research branches before interpreting a combined result.
+- The separate base-branch validation run `45574114071` completed successfully with 101 deterministic tests passed, including the multi-day coverage branch changes; it is not validation of PR #12's later commits.
+- Four-hour capture `45573371850` was still in progress at the latest inspection and had no artifacts. Production `main`, `trading_bot_v9.db`, credentials, deployment, and exchange orders remain untouched; PR #12 remains Draft/open/unmerged.
+
 ## 2026-11-25 — execution timestamp hardening commit record
 - Timestamp alignment fix in `scripts/execution_cost_backtest.py`: `298f7b59c143a6fe64d4b79bd554828ca3ae9b7e`; methodology wording: `941ec7918b05fc8843362de424e3630b7c96a73c`; strict timestamp validation: `4fd816d371af4929dbd4529a034965b7bf0433f8`.
 - Regression tests in `tests/test_execution_cost_backtest.py`: `b62a6de3ebdd56de1d25b2a0df91e510c6d4fe8d` and `e59bb0b23b653fe347d8f5274ad57f793d06551b`.
