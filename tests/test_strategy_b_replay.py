@@ -146,3 +146,22 @@ def test_replay_accepts_valid_short_signal():
     )
     assert result["signal_count"] == 1
     assert result["signals"][0]["direction"] == "SHORT"
+
+
+
+def test_replay_rejects_gaps_in_historical_candles():
+    frames = _all_frames()
+    frames["15m"] = frames["15m"].drop(index=100).reset_index(drop=True)
+    with pytest.raises(ValueError, match="non-contiguous"):
+        replay_strategy_b(
+            {"BTC-USDT": frames}, signal_builder=lambda *a, **k: None
+        )
+
+
+def test_replay_rejects_timeframe_misaligned_candle_open():
+    frames = _all_frames()
+    frames["5m"].loc[0, "open_time"] += 60_000
+    with pytest.raises(ValueError, match="timeframe-aligned"):
+        replay_strategy_b(
+            {"BTC-USDT": frames}, signal_builder=lambda *a, **k: None
+        )
