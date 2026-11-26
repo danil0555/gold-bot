@@ -5,6 +5,7 @@ on:
     branches:
       - research/capture-v2-4h-run
       - research/capture-v2-shutdown-hardening
+      - research/capture-v2-multiday-merge-v1
 
 permissions:
   contents: read
