@@ -46,7 +46,7 @@ COPY_ORDER = (
 def _table_names(db: sqlite3.Connection, schema: str = "main") -> set[str]:
     return {
         str(row[0]) for row in db.execute(
-            f'SELECT name FROM "{schema}".sqlite_master WHERE type='table''
+            f"SELECT name FROM \"{schema}\".sqlite_master WHERE type='table'"
         )
     }
 
