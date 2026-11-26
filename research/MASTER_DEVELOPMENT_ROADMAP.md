@@ -777,3 +777,10 @@
 - Artifacts: SQLite DB `15108452993` and event-study JSON `15108961584`, both with 14-day retention (available through 2026-12-10). Workflow and both artifact uploads succeeded.
 - Next: accumulate additional independently sampled UTC 24h clusters across more than one market regime; retain the strict coverage/provenance validator and require execution-cost simulation and holdout evaluation before considering any strategy change. Four-hour sessions do not count as four independent daily clusters.
 - Production `main` remains `a863b12de1f4017daad38744717ac7bc0a1d7fc4`; production DB, credentials, Strategy B, 10% per-signal risk configuration, deployment, and exchange order behavior remain untouched.
+
+
+### Coverage detail for run 45770189126
+
+- Independent SQLite inspection found exactly 240 closed 1m candles per symbol, with no internal minute gaps, covering 06:43–10:42 UTC. Feature aggregates cover 239 consecutive minutes per symbol, 06:44–10:42 UTC; only the initial 06:43 candle has no feature aggregate, consistent with the first-minute collector warm-up. No internal feature-minute gaps were found.
+- Each symbol has 480 derivatives snapshots spanning 06:43:59.732–10:43:30.122 UTC. Collector event table contains one session-start and one session-stop event, two first-kline events, one WebSocket-connected event, and six subscription acknowledgements.
+- These coverage checks strengthen the data-integrity assessment for this four-hour window but do not change the statistical limitation: only one 24h cluster and insufficient independent regimes.
