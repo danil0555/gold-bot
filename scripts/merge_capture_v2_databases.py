@@ -43,12 +43,29 @@ COPY_ORDER = (
 )
 
 
-def _table_names(db: sqlite3.Connection) -> set[str]:
+def _table_names(db: sqlite3.Connection, schema: str = "main") -> set[str]:
     return {
         str(row[0]) for row in db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
+            f'SELECT name FROM "{schema}".sqlite_master WHERE type="table"'
         )
     }
+
+
+def _legacy_conflicts(
+    db: sqlite3.Connection, table: str, alias: str
+) -> int:
+    key = "ts_ms" if table == "derivatives_snapshots" else "minute_ts"
+    columns = [item[0] for item in _columns(db, table)]
+    comparisons = " OR ".join(
+        f'main."{table}"."{column}" IS NOT "{alias}"."{table}"."{column}"'
+        for column in columns if column not in {"symbol", key}
+    )
+    return int(db.execute(
+        f'SELECT COUNT(*) FROM main."{table}" AS existing '
+        f'JOIN "{alias}"."{table}" AS incoming '
+        f'ON existing.symbol=incoming.symbol AND existing."{key}"=incoming."{key}" '
+        f'WHERE {comparisons}'
+    ).fetchone()[0])
 
 
 def _columns(db: sqlite3.Connection, table: str, schema: str = "main") -> list[tuple]:
@@ -105,7 +122,7 @@ def merge_capture_databases(
             alias = f"capture_{index}"
             destination.execute(f'ATTACH DATABASE ? AS "{alias}"', (str(source),))
             try:
-                source_tables = _table_names(destination)
+                source_tables = _table_names(destination, alias)
                 missing = REQUIRED_TABLES - source_tables
                 if missing:
                     raise ValueError(f"{source} is missing required tables: {sorted(missing)}")
@@ -133,6 +150,12 @@ def merge_capture_databases(
                     )
 
                 for table in LEGACY_KEYED_TABLES:
+                    conflicts = _legacy_conflicts(destination, table, alias)
+                    if conflicts:
+                        raise ValueError(
+                            f"{source} has {conflicts} conflicting duplicate key(s) "
+                            f"in {table}; refusing ambiguous merge"
+                        )
                     incoming = _count(destination, table, alias)
                     columns = [item[0] for item in _columns(destination, table)]
                     names = ", ".join(f'"{name}"' for name in columns)
@@ -140,20 +163,6 @@ def merge_capture_databases(
                         f'INSERT OR IGNORE INTO main."{table}" ({names}) '
                         f'SELECT {names} FROM "{alias}"."{table}"'
                     )
-                    inserted = _count(destination, table) - before[table] - sum(
-                        _count(destination, t) - before[t]
-                        for t in LEGACY_KEYED_TABLES if t != table
-                    )
-                    # Compute ignored rows from this input by comparing the
-                    # table count immediately before and after this insert.
-                    # The exact per-input delta is recorded below instead.
-                    del inserted
-                    after_table = _count(destination, table)
-                    prior_table = _count(destination, table) - max(
-                        0, after_table - (_count(destination, table) - incoming)
-                    )
-                    del prior_table
-                    # SQLite changes() is the reliable inserted-row count.
                     inserted_rows = int(destination.execute("SELECT changes()").fetchone()[0])
                     duplicates_ignored[table] += incoming - inserted_rows
 
