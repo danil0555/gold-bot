@@ -766,3 +766,14 @@
 - Log confirms Python compilation, runtime safe-default import, and **123 deterministic tests passed in 2.67s**, including the three new capture DB validator tests.
 - The separate push workflow run `45697788416` is exercising the new validator against another 3-minute live public BingX capture; at this update its collector step is still running. No live-smoke validator pass is claimed until that run completes.
 - PR #17 remains Draft/open/unmerged. No production changes, live DB access, deployment or exchange orders.
+
+
+## 2026-11-26 — second shutdown-hardened four-hour capture validated
+
+- Research workflow run [45770189126](https://github.com/danil0555/gold-bot/actions/runs/45770189126) completed successfully on `research/capture-v2-4h-run`, exact head `f3d14f061c42b1bae0c39d4691c4412b8232b9ee`. Collector ran from 2026-11-26 06:43:59 UTC to 10:43:59 UTC (four hours). No production branch or deployment was involved.
+- The capture-scoped v2 validator returned `status=ok`, `integrity_check=ok`, `foreign_key_errors=0`; one schema-v2 session was closed with non-NULL `ended_at_ms`. Counts: 478 minute-feature rows (239 per symbol), 480 closed candles (240 per symbol), and 960 derivatives snapshots (480 per symbol) for BTC-USDT and ETH-USDT. Independent inspection of the downloaded SQLite artifact confirmed `PRAGMA integrity_check = ok` and an empty `PRAGMA foreign_key_check`.
+- Event-study report used past-only rolling event definitions, 5-minute per-symbol event thinning, fixed 12 bps round-trip cost, and 24h time-block clustering. It contains 478 feature rows and four hypotheses over 1m/5m/15m horizons. All 12 reported mean net returns are negative. Example ranges: sell-absorption LONG -11.392 to -13.486 bps; buy-absorption SHORT -11.990 to -13.903 bps; bid-support LONG -4.140 to -14.089 bps; OI-expansion sell-pressure SHORT -11.805 to -17.037 bps.
+- Every horizon has only one independent 24h cluster, below the configured minimum of four; all are explicitly marked `insufficient_independent_clusters`. This is exploratory negative/underpowered evidence, not proof of no edge and not a validated trading strategy. Do not trade these event labels or alter production Strategy B from this result.
+- Artifacts: SQLite DB `15108452993` and event-study JSON `15108961584`, both with 14-day retention (available through 2026-12-10). Workflow and both artifact uploads succeeded.
+- Next: accumulate additional independently sampled UTC 24h clusters across more than one market regime; retain the strict coverage/provenance validator and require execution-cost simulation and holdout evaluation before considering any strategy change. Four-hour sessions do not count as four independent daily clusters.
+- Production `main` remains `a863b12de1f4017daad38744717ac7bc0a1d7fc4`; production DB, credentials, Strategy B, 10% per-signal risk configuration, deployment, and exchange order behavior remain untouched.
