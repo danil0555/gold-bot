@@ -831,3 +831,20 @@
 - Uploaded the actual merged DB and JSON report as GitHub Actions artifact `15146260588` (workflow run `45877664581`, 14-day retention). This supersedes the earlier local-harness-only integration qualification.
 - The merged dataset still consists of two disjoint capture windows with a 5h07m gap. It is not continuous multi-day coverage, does not create independent statistical clusters, and does not establish a predictive edge. Existing negative/underpowered event-study findings remain exploratory; no event label is approved for trading.
 - PR #20 remains Draft/open/unmerged. The integration workflow only has read access to repository contents/actions and uploads a research artifact; no production branch, database, credentials, Strategy B, 10% risk setting, deployment or live orders were touched. No merged database has been promoted into the canonical research history.
+
+
+## 2026-11-26 — production-code reliability review (Draft PR #21; not merged)
+
+- Inspected production `main.py` without modifying `main` or opening the production SQLite database. Identified two concrete integrity risks: signal/status mutations could be committed separately from their audit events; database backup/migration logged failed source integrity checks but could continue.
+- Created Draft PR #21 on `fix/atomic-signal-db-integrity`, based on production main `a863b12de1f4017daad38744717ac7bc0a1d7fc4`. Signal insert + `created` event and stale expiry + `expired` event now share the caller's SQLite transaction. Backup/migration now fail closed on non-OK `PRAGMA integrity_check` or any `PRAGMA foreign_key_check` result, and the backup itself is checked for both.
+- Added fault-injection tests for rollback on failed audit inserts and source DB integrity/FK failures. First CI attempt `45878972399` exposed a test-harness issue (`BOT_TOKEN` missing during test import), not a runtime failure. Added a harmless dummy token for tests and an FK-violation regression test.
+- Latest exact-head CI for `615cd90a29526610b8008b843df00ca92fa86c26` passed: run `45879737385`, compilation and safe-default runtime import succeeded; addon/reliability/API tests 21 passed; sizing/signal tests 59 passed; DB atomicity/integrity tests 4 passed. Real-order flag remained OFF and add-on strategies remained OFF. Optional historical backtest was skipped by branch condition.
+- PR #21 remains Draft/open/unmerged. This is a review patch only: no production `main`, database, live bot, credentials, Strategy B, 10% risk, 5x leverage, TP/SL settings, deployment or exchange orders were changed.
+
+### Planned follow-up queue (keep aligned with the research plan)
+
+1. **Review PR #21 as a production reliability patch** — inspect transaction boundaries and backup failure paths once more; keep it unmerged pending explicit approval. Do not deploy or run DB migration as part of research.
+2. **Continue v2 capture accumulation** — use the validated v2 collector/validator and capture merger; collect additional independent UTC-day clusters and market regimes. Keep the minimum gate at 600 closed minutes per symbol across at least 3 UTC dates; do not treat two four-hour windows as continuous coverage.
+3. **Run cross-period discovery and Strategy B comparison** — same timestamps/universe and conservative fees/slippage/funding assumptions; report net expectancy, drawdown, profit factor, per-symbol/per-day breadth and parameter sensitivity. Require holdout periods and at least four independent time clusters before inference; no event hypothesis becomes a signal by itself.
+4. **Only after evidence gates pass** — investigate calibrated probabilities and prediction-error diagnostics in shadow mode. No replacement of Strategy B, no loosening of signal filters and no automatic orders without separate validation and approval.
+5. **Production diagnostics cleanup** — separately review stale API `last_error` clearing / last-success timestamps. Keep this as a small isolated patch; no changes to signal generation or risk sizing.
