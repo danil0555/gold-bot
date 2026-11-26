@@ -123,6 +123,11 @@ def test_merge_preserves_sessions_provenance_and_deduplicates_legacy_rows(tmp_pa
     make_capture(first, capture_id="capture-a", minute_ts=60_000)
     # Same legacy timestamps and values, but a separate capture with unique v2 provenance.
     make_capture(second, capture_id="capture-b", minute_ts=60_000)
+    # Real collector artifacts use WAL. Reproduce that mode so the test catches
+    # rows stranded in a staging -wal sidecar when the database is renamed.
+    for source in (first, second):
+        with sqlite3.connect(source) as source_db:
+            assert source_db.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
 
     report = merge_capture_databases([first, second], output)
 
