@@ -310,11 +310,21 @@ def backup_and_verify_db() -> Path | None:
         return None
     try:
         with db() as con:
-            check = con.execute("PRAGMA integrity_check").fetchone()
-            if not check or str(check[0]).lower() != "ok":
-                log.warning("integrity_check до бэкапа не ok: %s", check)
+            integrity_rows = con.execute("PRAGMA integrity_check").fetchall()
+            integrity_messages = [str(row[0]).lower() for row in integrity_rows]
+            if integrity_messages != ["ok"]:
+                raise RuntimeError(
+                    "Исходная БД не прошла integrity_check: "
+                    + "; ".join(integrity_messages[:10])
+                )
+            foreign_key_errors = con.execute("PRAGMA foreign_key_check").fetchall()
+            if foreign_key_errors:
+                raise RuntimeError(
+                    f"Исходная БД содержит нарушения внешних ключей: "
+                    f"{len(foreign_key_errors)}"
+                )
     except Exception:
-        log.exception("Не удалось проверить БД перед бэкапом")
+        log.exception("Проверка целостности исходной БД не пройдена — бэкап/миграция запрещены")
         return None
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -330,9 +340,18 @@ def backup_and_verify_db() -> Path | None:
 
     verify_con = sqlite3.connect(str(backup_file), timeout=30)
     try:
-        check = verify_con.execute("PRAGMA integrity_check").fetchone()
-        if not check or str(check[0]).lower() != "ok":
-            raise RuntimeError(f"Резервная копия не прошла integrity_check: {check}")
+        integrity_rows = verify_con.execute("PRAGMA integrity_check").fetchall()
+        integrity_messages = [str(row[0]).lower() for row in integrity_rows]
+        if integrity_messages != ["ok"]:
+            raise RuntimeError(
+                f"Резервная копия не прошла integrity_check: {integrity_messages[:10]}"
+            )
+        foreign_key_errors = verify_con.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_key_errors:
+            raise RuntimeError(
+                f"Резервная копия содержит нарушения внешних ключей: "
+                f"{len(foreign_key_errors)}"
+            )
     finally:
         verify_con.close()
 
@@ -1418,15 +1437,22 @@ def enrich_signal_with_live_data(sig: dict[str, Any], snapshot: dict[str, Any] |
         enriched.setdefault("status", "ACTIVE")
     return enriched
 
+def _insert_signal_event(con: sqlite3.Connection, signal_id: int, event_type: str,
+                        old_status: str | None = None, new_status: str | None = None,
+                        price: float | None = None, reason: str = "") -> None:
+    """Insert an event using the caller's transaction."""
+    con.execute("""INSERT INTO signal_events
+        (signal_id, event_type, old_status, new_status, price, reason, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (signal_id, event_type, old_status, new_status,
+         safe_float(price, 0.0) if price is not None else None, reason, utc_text()))
+
+
 def log_signal_event(signal_id: int, event_type: str,
                      old_status: str | None = None, new_status: str | None = None,
                      price: float | None = None, reason: str = "") -> None:
     with db() as con:
-        con.execute("""INSERT INTO signal_events
-            (signal_id, event_type, old_status, new_status, price, reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (signal_id, event_type, old_status, new_status,
-             safe_float(price, 0.0) if price is not None else None, reason, utc_text()))
+        _insert_signal_event(con, signal_id, event_type, old_status, new_status, price, reason)
 
 def save_signal(sig: dict[str, Any]) -> int | None:
     if sig.get("status") == "CANCELLED":
@@ -1479,10 +1505,13 @@ def save_signal(sig: dict[str, Any]) -> int | None:
         cur = con.execute(f"INSERT INTO signals ({names_sql}) VALUES ({placeholders})",
                           tuple(values[c] for c in available))
         signal_id = int(cur.lastrowid)
+        # Keep the signal row and its audit event in one transaction.
+        _insert_signal_event(
+            con, signal_id, "created", None, values.get("status", "ACTIVE"),
+            safe_float(sig.get("live_price", sig["entry"])),
+            f"Стратегия {values.get('strategy_version', 'A')}",
+        )
 
-    log_signal_event(signal_id, "created", None, values.get("status", "ACTIVE"),
-                     safe_float(sig.get("live_price", sig["entry"])),
-                     f"Стратегия {values.get('strategy_version', 'A')}")
     return signal_id
 
 def expire_stale_signals() -> list[dict[str, Any]]:
@@ -1499,10 +1528,11 @@ def expire_stale_signals() -> list[dict[str, Any]]:
                 con.execute("""UPDATE signals SET status='EXPIRED',
                     cancel_reason='Истёк TTL', updated_at=? WHERE id=?""",
                     (utc_text(now_dt), r["id"]))
+                _insert_signal_event(
+                    con, int(r["id"]), "expired", str(r["status"]), "EXPIRED",
+                    reason="Истёк срок действия",
+                )
                 expired_items.append(dict(r))
-    for item in expired_items:
-        log_signal_event(item["id"], "expired", item["status"], "EXPIRED",
-                         reason="Истёк срок действия")
     return expired_items
 
 
