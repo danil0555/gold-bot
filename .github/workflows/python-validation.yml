@@ -134,7 +134,7 @@ jobs:
           if-no-files-found: warn
 
   real-capture-merge-integration:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/research/capture-v2-multiday-merge-v1'
+    if: github.ref == 'refs/heads/research/capture-v2-multiday-merge-v1' && (github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'Run real-artifact merge integration')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
