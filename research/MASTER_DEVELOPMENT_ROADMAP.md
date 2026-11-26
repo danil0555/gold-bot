@@ -793,3 +793,10 @@
 - Added deterministic tests for preserved provenance, duplicate handling, conflicting duplicate rejection, incomplete-session rejection, capture-ID collision and overwrite safety. Added this test to Python CI on the isolated research branch and enabled PR validation against the v2 research base.
 - First CI run `45874286691` caught a Python quoting syntax error during compileall; fixed in commit `b15c065b81757ab369999ec82240abb5351a78f3`. Exact PR-head CI for `ce96a15894e4df617a8bf2af1232c22abbc042b1` is queued/in progress and must pass before this merger is treated as validated.
 - No live or production data was merged. The two existing v2 artifacts remain separate and unchanged. Production `main` remains `a863b12de1f4017daad38744717ac7bc0a1d7fc4`; no production DB, strategy, risk, credentials, deployment or order behavior changed.
+
+
+### Follow-up CI findings for draft PR #20
+
+- Exact code/test commit `1ebf39e02a1d3894f406c13c66e82f3b080a66ba` compiled and imported the runtime safely; its deterministic suite reported **129 passed, 1 failed**. The failing case was a cleanup bug: after detecting conflicting duplicate legacy rows, the attached SQLite source remained locked while the merger attempted to detach it.
+- Fixed the failure path by explicitly rolling back the transaction before detaching the attached source database. The merger also now writes to a `.partial` staging database and atomically renames it to the requested output only after integrity and foreign-key checks pass; failed merges remove the staging file.
+- Added regression assertions that conflicting input leaves neither a final output nor a partial staging file. Latest PR #20 head is `95f0ff9141007bf77b9e142bafc1c5d0fc3186d6`; exact-head CI runs `45874581926` and `45874577505` are pending. Do not mark PR #20 validated until at least one exact-head run completes successfully.
