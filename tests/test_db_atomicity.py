@@ -1,7 +1,11 @@
 """Regression tests for atomic signal/audit writes and fail-closed DB checks."""
 
+import os
 import sqlite3
 from contextlib import contextmanager
+
+# main.py validates BOT_TOKEN at import time; CI uses a nonfunctional test token.
+os.environ.setdefault("BOT_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
 import main
 
 
@@ -108,6 +112,40 @@ def test_backup_refuses_source_database_with_failed_integrity_check(tmp_path, mo
         def execute(self, statement):
             assert statement == "PRAGMA integrity_check"
             return _Result()
+
+    @contextmanager
+    def fake_db():
+        yield _Connection()
+
+    monkeypatch.setattr(main, "db", fake_db)
+
+    assert main.backup_and_verify_db() is None
+    assert list(backup_dir.glob("*.db")) == []
+
+
+
+def test_backup_refuses_source_database_with_foreign_key_violations(tmp_path, monkeypatch):
+    db_path = tmp_path / "fk-invalid.sqlite3"
+    db_path.write_bytes(b"placeholder: file exists so backup validation runs")
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "BACKUP_DIR", backup_dir)
+
+    class _Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    class _Connection:
+        def execute(self, statement):
+            if statement == "PRAGMA integrity_check":
+                return _Result([("ok",)])
+            if statement == "PRAGMA foreign_key_check":
+                return _Result([("signals", 7, "users", 0)])
+            raise AssertionError(f"Unexpected SQL: {statement}")
 
     @contextmanager
     def fake_db():
