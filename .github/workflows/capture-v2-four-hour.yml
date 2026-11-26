@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - research/capture-v2-4h-run
+      - research/capture-v2-shutdown-hardening
 
 permissions:
   contents: read

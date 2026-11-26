@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import os
+import signal
 import sqlite3
 import time
 import uuid
@@ -584,25 +585,54 @@ async def websocket_loop(session, aggregator, symbols):
             backoff = min(backoff*2, 60)
 
 
+def _register_sigterm_handler(loop, stop_event):
+    """Turn SIGTERM into cooperative shutdown so SQLite metadata is finalized."""
+    try:
+        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+    except (NotImplementedError, RuntimeError, ValueError):
+        return False
+    return True
+
+
 async def run_collector(symbols, db_path, duration_hours, derivatives_interval):
     aggregator = MarketMinuteAggregator(db_path, symbols=symbols)
     timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None)
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+    sigterm_registered = _register_sigterm_handler(loop, stop_event)
+    if not sigterm_registered:
+        LOG.warning("SIGTERM handler unavailable; graceful signal shutdown is not guaranteed")
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             tasks = [
                 asyncio.create_task(websocket_loop(session, aggregator, symbols)),
                 asyncio.create_task(derivatives_poll(session, aggregator, symbols, derivatives_interval)),
             ]
+            stop_task = asyncio.create_task(stop_event.wait())
+            wait_timeout = duration_hours * 3600 if duration_hours > 0 else None
             try:
-                if duration_hours > 0:
-                    await asyncio.sleep(duration_hours*3600)
-                else:
-                    await asyncio.gather(*tasks)
+                done, _ = await asyncio.wait(
+                    [stop_task, *tasks],
+                    timeout=wait_timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                # Surface unexpected collector-task failures rather than silently
+                # waiting until the duration expires.
+                if stop_task not in done:
+                    for task in tasks:
+                        if task in done:
+                            task.result()
             finally:
+                stop_task.cancel()
                 for task in tasks:
                     task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(stop_task, *tasks, return_exceptions=True)
     finally:
+        if sigterm_registered:
+            try:
+                loop.remove_signal_handler(signal.SIGTERM)
+            except (RuntimeError, ValueError):
+                pass
         aggregator.close()
 
 
