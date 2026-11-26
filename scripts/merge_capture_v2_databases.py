@@ -181,6 +181,9 @@ def merge_capture_databases(
                     )
                     first_capture_ids.update(incoming_ids)
                     destination.commit()
+                except Exception:
+                    destination.rollback()
+                    raise
                 finally:
                     destination.execute(f'DETACH DATABASE "{alias}"')
     
