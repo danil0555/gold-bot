@@ -8,6 +8,7 @@ rows retained on duplicate keys. No production database is accepted by design.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import json
 import sqlite3
 from pathlib import Path
@@ -100,20 +101,20 @@ def merge_capture_databases(
         if not source.is_file() or source.stat().st_size == 0:
             raise FileNotFoundError(f"capture database is missing or empty: {source}")
         validate_capture_database(source)
-        with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(f"file:{source}?mode=ro", uri=True)) as db:
             missing = REQUIRED_TABLES - _table_names(db)
             if missing:
                 raise ValueError(f"{source} is missing required tables: {sorted(missing)}")
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(f"file:{sources[0]}?mode=ro", uri=True) as first:
-            with sqlite3.connect(staging) as destination:
+        with closing(sqlite3.connect(f"file:{sources[0]}?mode=ro", uri=True)) as first:
+            with closing(sqlite3.connect(staging)) as destination:
                 first.backup(destination)
     
         before = {}
         duplicates_ignored = {table: 0 for table in LEGACY_KEYED_TABLES}
-        with sqlite3.connect(staging) as destination:
+        with closing(sqlite3.connect(staging)) as destination:
             destination.execute("PRAGMA foreign_keys=ON")
             before = {table: _count(destination, table) for table in COPY_ORDER}
     
@@ -195,6 +196,9 @@ def merge_capture_databases(
                     f"foreign_key_errors={len(fk_errors)}"
                 )
             after = {table: _count(destination, table) for table in COPY_ORDER}
+            destination.commit()
+        # The SQLite connection must be closed before rename so WAL/journal
+        # sidecars are checkpointed and the final path contains committed rows.
         staging.replace(target)
     except Exception:
         if staging.exists():
