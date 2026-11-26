@@ -1,3 +1,13 @@
+## 2026-11-26 — first successful shutdown-hardened four-hour capture
+
+- PR #19 was merged only into research/capture-v2-4h-run (merge commit f3d14f061c42b1bae0c39d4691c4412b8232b9ee). Production main remains at a863b12de1f4017daad38744717ac7bc0a1d7fc4.
+- The shutdown-hardened workflow run 45705897076 completed successfully on head f055ad580679025123c74b0e2226d989eba4ecfa. Collector ran from 2026-11-25 21:36:49 UTC to 2026-11-26 01:36:49 UTC (~4 hours).
+- v2 validator returned status=ok, integrity_check=ok, foreign_key_errors=0, one closed capture session (schema v2) with ended_at_ms present. Counts: 480 feature rows, 482 candle rows, 960 derivatives rows for BTC-USDT and ETH-USDT.
+- Exploratory event study completed with 480 feature rows, 12 bps fixed round-trip cost and four event hypotheses. Across all four hypotheses and 1m/5m/15m horizons, mean net returns were negative. 24h cluster_count was 2 in every displayed horizon and inference_status was insufficient_independent_clusters. This is not a validated trading edge and must not be used as live signal logic.
+- Event study output explicitly warns that direction labels are hypotheses, not trade instructions; it requires multiple independent time clusters, multiple-regime holdouts and execution simulation before strategy consideration.
+- Artifacts: SQLite DB artifact 15078444916; event-study report artifact 15078484944 (14-day retention). Do not merge this exploratory result into production Strategy B.
+- A second read-only four-hour run (45770189126) was automatically started by the research-branch merge and is currently in progress; it will provide a separate follow-up sample. It uses the isolated research workflow and no production trading DB or private exchange credentials.
+
 ## 2026-11-25 — exact latest PR-head validation and coverage-gate clarification
 - Re-ran validation after the roadmap update. GitHub Actions run `45612012450` completed successfully on exact PR #12 head `47a4fcda6cf6f3a54fdfcd152b90f9b73dc0b549`; the log confirms **158 passed in 9.51s**, runtime import succeeded, and real orders/add-on strategies remained disabled in CI.
 - Capture run `45573371850` used older checked-out SHA `5bf6a78598c2e06f80a1a3d21b6f81b747c06203`. Its merged-data check reported `753 unique minutes across 2 UTC dates; holdout_ready=False`. No frozen holdout or pattern-mining run was performed.
