@@ -2,8 +2,6 @@
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
-
 import main
 
 
