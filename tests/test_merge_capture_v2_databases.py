@@ -146,8 +146,11 @@ def test_merge_rejects_conflicting_legacy_duplicate_key(tmp_path):
     make_capture(first, capture_id="capture-a", minute_ts=60_000, candle_close=100.5)
     make_capture(second, capture_id="capture-b", minute_ts=60_000, candle_close=101.5)
 
+    output = tmp_path / "merged.sqlite3"
     with pytest.raises(ValueError, match="conflicting duplicate"):
-        merge_capture_databases([first, second], tmp_path / "merged.sqlite3")
+        merge_capture_databases([first, second], output)
+    assert not output.exists()
+    assert not (tmp_path / "merged.sqlite3.partial").exists()
 
 
 def test_merge_rejects_incomplete_capture_session(tmp_path):
