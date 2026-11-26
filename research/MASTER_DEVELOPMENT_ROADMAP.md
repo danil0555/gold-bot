@@ -851,3 +851,13 @@
 
 
 - Follow-up hardening after the first green PR #21 CI: added `test_init_db_aborts_before_migration_when_backup_is_unavailable`, which verifies initialization stops before opening/mutating an existing DB placeholder when no verified backup is available. New exact branch head `61bc58eb52d4f46f6fec50e811814b8a9d8374f3`; CI has not yet appeared in the commit workflow/status queries at the time of this note, so the new fifth DB test is pending verification. Prior green run `45879737385` applies to the preceding head `615cd90a29526610b8008b843df00ca92fa86c26` and must not be conflated with this newer head.
+
+
+## 2026-11-26 — PR #21 latest exact-head CI passed; next capture remains active
+
+- Exact current PR #21 head `61bc58eb52d4f46f6fec50e811814b8a9d8374f3` passed GitHub Actions run [45880066203](https://github.com/danil0555/gold-bot/actions/runs/45880066203). Compilation and safe-default runtime import succeeded; CI explicitly verified `REAL_TRADING_ENABLED=False`, `ENABLE_ADDON_STRATEGIES=False`, `RISK_PERCENT=10.0`, and `FUTURES_LEVERAGE=5`.
+- Deterministic tests passed: addon/reliability/API **21 passed**; signal/sizing/portfolio **59 passed**; database atomicity/integrity **5 passed**. The fifth DB test confirms `init_db()` aborts before opening or mutating the existing DB placeholder when a verified backup is unavailable. Optional historical backtest was skipped by branch condition.
+- PR #21 remains Draft/open/unmerged, based on production `main` at `a863b12de1f4017daad38744717ac7bc0a1d7fc4`. Green CI validates the patch; it does not authorize merge, migration or deployment. Production remains untouched.
+- PR #20 remains Draft/open/unmerged. Its PR CI run `45877947451` and push syntax/test run `45877940715` succeeded on head `4898cfac54681913290cdaab6690a78ae84d0cd0`; deterministic tests passed. Research capture workflow run `45877940222` is still in progress at the latest check: its four-hour public-data collector is active and DB validation/event study/artifact uploads are pending. Do not start a duplicate capture while it is active.
+- Next actions: (1) retain PR #21 as review-only; (2) wait for run `45877940222` to finish and inspect validator output/artifacts before analysis; (3) continue accumulating independent UTC-day clusters and regimes, preserving the per-symbol coverage gate (at least 600 closed minutes across at least 3 UTC dates) and the minimum four independent clusters for inference; (4) update this roadmap with measured results. The two existing four-hour captures remain separated by a 5h07m gap and cannot be described as continuous history.
+- No production `main`, production DB, live bot, credentials, Strategy B, 10% risk/5x leverage settings, deployment or exchange orders were changed.
