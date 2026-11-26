@@ -46,7 +46,7 @@ COPY_ORDER = (
 def _table_names(db: sqlite3.Connection, schema: str = "main") -> set[str]:
     return {
         str(row[0]) for row in db.execute(
-            f'SELECT name FROM "{schema}".sqlite_master WHERE type="table"'
+            f'SELECT name FROM "{schema}".sqlite_master WHERE type='table''
         )
     }
 
@@ -57,7 +57,7 @@ def _legacy_conflicts(
     key = "ts_ms" if table == "derivatives_snapshots" else "minute_ts"
     columns = [item[0] for item in _columns(db, table)]
     comparisons = " OR ".join(
-        f'main."{table}"."{column}" IS NOT "{alias}"."{table}"."{column}"'
+        f'existing."{column}" IS NOT incoming."{column}"'
         for column in columns if column not in {"symbol", key}
     )
     return int(db.execute(
