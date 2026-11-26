@@ -177,6 +177,7 @@ system_status: dict[str, Any] = {
     "started": False,
     "last_scan": None,
     "last_error": None,
+    "api_last_success_at": None,
     "api_status": "Не проверено",
     "scan_count": 0,
     "signals_count": 0,
@@ -495,9 +496,13 @@ async def api_get(session: aiohttp.ClientSession, path: str, params: dict[str, A
                                 raise MarketError(error_text)
                         else:
                             system_status["api_status"] = "OK"
+                            system_status["last_error"] = None
+                            system_status["api_last_success_at"] = utc_text()
                             return payload
                     else:
                         system_status["api_status"] = "OK"
+                        system_status["last_error"] = None
+                        system_status["api_last_success_at"] = utc_text()
                         return payload
 
             if last_error is not None:
@@ -2193,6 +2198,7 @@ async def system_status_handler(message: Message):
         "Реальные ордера: <b>отключены</b>\n"
         "Сопровождение сделок: <b>удалено</b>\n"
         f"API BingX: {html.escape(str(system_status.get('api_status', '—')))}\n"
+        f"Последний успешный ответ API (UTC): {system_status.get('api_last_success_at') or '—'}\n"
         f"Сканов: {system_status.get('scan_count', 0)}\n"
         f"Отправлено сигналов: {system_status.get('signals_count', 0)}\n"
         f"Последний скан (UTC): {system_status.get('last_scan') or '—'}\n"
