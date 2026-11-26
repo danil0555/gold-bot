@@ -92,6 +92,9 @@ def merge_capture_databases(
         raise ValueError("output database must not be one of the input databases")
     if target.exists():
         raise FileExistsError(f"output already exists; refusing to overwrite: {target}")
+    staging = target.with_name(target.name + ".partial")
+    if staging.exists():
+        raise FileExistsError(f"staging file already exists; refusing to overwrite: {staging}")
 
     for source in sources:
         if not source.is_file() or source.stat().st_size == 0:
@@ -102,92 +105,98 @@ def merge_capture_databases(
             if missing:
                 raise ValueError(f"{source} is missing required tables: {sorted(missing)}")
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(f"file:{sources[0]}?mode=ro", uri=True) as first:
-        with sqlite3.connect(target) as destination:
-            first.backup(destination)
-
-    before = {}
-    duplicates_ignored = {table: 0 for table in LEGACY_KEYED_TABLES}
-    with sqlite3.connect(target) as destination:
-        destination.execute("PRAGMA foreign_keys=ON")
-        before = {table: _count(destination, table) for table in COPY_ORDER}
-
-        first_capture_ids = {
-            row[0] for row in destination.execute(
-                "SELECT capture_id FROM collector_sessions"
-            )
-        }
-        for index, source in enumerate(sources[1:], start=1):
-            alias = f"capture_{index}"
-            destination.execute(f'ATTACH DATABASE ? AS "{alias}"', (str(source),))
-            try:
-                source_tables = _table_names(destination, alias)
-                missing = REQUIRED_TABLES - source_tables
-                if missing:
-                    raise ValueError(f"{source} is missing required tables: {sorted(missing)}")
-                for table in COPY_ORDER:
-                    if _columns(destination, table) != _columns(destination, table, alias):
-                        raise ValueError(f"schema mismatch in {table} for {source}")
-
-                incoming_ids = {
-                    row[0] for row in destination.execute(
-                        f'SELECT capture_id FROM "{alias}".collector_sessions'
-                    )
-                }
-                collisions = first_capture_ids & incoming_ids
-                if collisions:
-                    raise ValueError(
-                        f"capture_id collision in {source}: {sorted(collisions)}"
-                    )
-
-                for table in V2_TABLES:
-                    columns = [item[0] for item in _columns(destination, table)]
-                    names = ", ".join(f'"{name}"' for name in columns)
-                    destination.execute(
-                        f'INSERT INTO main."{table}" ({names}) '
-                        f'SELECT {names} FROM "{alias}"."{table}"'
-                    )
-
-                for table in LEGACY_KEYED_TABLES:
-                    conflicts = _legacy_conflicts(destination, table, alias)
-                    if conflicts:
-                        raise ValueError(
-                            f"{source} has {conflicts} conflicting duplicate key(s) "
-                            f"in {table}; refusing ambiguous merge"
-                        )
-                    incoming = _count(destination, table, alias)
-                    columns = [item[0] for item in _columns(destination, table)]
-                    names = ", ".join(f'"{name}"' for name in columns)
-                    destination.execute(
-                        f'INSERT OR IGNORE INTO main."{table}" ({names}) '
-                        f'SELECT {names} FROM "{alias}"."{table}"'
-                    )
-                    inserted_rows = int(destination.execute("SELECT changes()").fetchone()[0])
-                    duplicates_ignored[table] += incoming - inserted_rows
-
-                event_columns = [
-                    item[0] for item in _columns(destination, EVENT_TABLE)
-                    if item[0] != "id"
-                ]
-                names = ", ".join(f'"{name}"' for name in event_columns)
-                destination.execute(
-                    f'INSERT INTO main."{EVENT_TABLE}" ({names}) '
-                    f'SELECT {names} FROM "{alias}"."{EVENT_TABLE}"'
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(f"file:{sources[0]}?mode=ro", uri=True) as first:
+            with sqlite3.connect(staging) as destination:
+                first.backup(destination)
+    
+        before = {}
+        duplicates_ignored = {table: 0 for table in LEGACY_KEYED_TABLES}
+        with sqlite3.connect(staging) as destination:
+            destination.execute("PRAGMA foreign_keys=ON")
+            before = {table: _count(destination, table) for table in COPY_ORDER}
+    
+            first_capture_ids = {
+                row[0] for row in destination.execute(
+                    "SELECT capture_id FROM collector_sessions"
                 )
-                first_capture_ids.update(incoming_ids)
-                destination.commit()
-            finally:
-                destination.execute(f'DETACH DATABASE "{alias}"')
-
-        integrity = destination.execute("PRAGMA integrity_check").fetchone()[0]
-        fk_errors = [tuple(row) for row in destination.execute("PRAGMA foreign_key_check")]
-        if integrity != "ok" or fk_errors:
-            raise ValueError(
-                f"merged database failed integrity checks: integrity={integrity}, "
-                f"foreign_key_errors={len(fk_errors)}"
-            )
-        after = {table: _count(destination, table) for table in COPY_ORDER}
+            }
+            for index, source in enumerate(sources[1:], start=1):
+                alias = f"capture_{index}"
+                destination.execute(f'ATTACH DATABASE ? AS "{alias}"', (str(source),))
+                try:
+                    source_tables = _table_names(destination, alias)
+                    missing = REQUIRED_TABLES - source_tables
+                    if missing:
+                        raise ValueError(f"{source} is missing required tables: {sorted(missing)}")
+                    for table in COPY_ORDER:
+                        if _columns(destination, table) != _columns(destination, table, alias):
+                            raise ValueError(f"schema mismatch in {table} for {source}")
+    
+                    incoming_ids = {
+                        row[0] for row in destination.execute(
+                            f'SELECT capture_id FROM "{alias}".collector_sessions'
+                        )
+                    }
+                    collisions = first_capture_ids & incoming_ids
+                    if collisions:
+                        raise ValueError(
+                            f"capture_id collision in {source}: {sorted(collisions)}"
+                        )
+    
+                    for table in V2_TABLES:
+                        columns = [item[0] for item in _columns(destination, table)]
+                        names = ", ".join(f'"{name}"' for name in columns)
+                        destination.execute(
+                            f'INSERT INTO main."{table}" ({names}) '
+                            f'SELECT {names} FROM "{alias}"."{table}"'
+                        )
+    
+                    for table in LEGACY_KEYED_TABLES:
+                        conflicts = _legacy_conflicts(destination, table, alias)
+                        if conflicts:
+                            raise ValueError(
+                                f"{source} has {conflicts} conflicting duplicate key(s) "
+                                f"in {table}; refusing ambiguous merge"
+                            )
+                        incoming = _count(destination, table, alias)
+                        columns = [item[0] for item in _columns(destination, table)]
+                        names = ", ".join(f'"{name}"' for name in columns)
+                        destination.execute(
+                            f'INSERT OR IGNORE INTO main."{table}" ({names}) '
+                            f'SELECT {names} FROM "{alias}"."{table}"'
+                        )
+                        inserted_rows = int(destination.execute("SELECT changes()").fetchone()[0])
+                        duplicates_ignored[table] += incoming - inserted_rows
+    
+                    event_columns = [
+                        item[0] for item in _columns(destination, EVENT_TABLE)
+                        if item[0] != "id"
+                    ]
+                    names = ", ".join(f'"{name}"' for name in event_columns)
+                    destination.execute(
+                        f'INSERT INTO main."{EVENT_TABLE}" ({names}) '
+                        f'SELECT {names} FROM "{alias}"."{EVENT_TABLE}"'
+                    )
+                    first_capture_ids.update(incoming_ids)
+                    destination.commit()
+                finally:
+                    destination.execute(f'DETACH DATABASE "{alias}"')
+    
+            integrity = destination.execute("PRAGMA integrity_check").fetchone()[0]
+            fk_errors = [tuple(row) for row in destination.execute("PRAGMA foreign_key_check")]
+            if integrity != "ok" or fk_errors:
+                raise ValueError(
+                    f"merged database failed integrity checks: integrity={integrity}, "
+                    f"foreign_key_errors={len(fk_errors)}"
+                )
+            after = {table: _count(destination, table) for table in COPY_ORDER}
+        staging.replace(target)
+    except Exception:
+        if staging.exists():
+            staging.unlink()
+        raise
 
     return {
         "report_type": "capture_scoped_v2_multiday_merge_v1",
