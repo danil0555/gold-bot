@@ -155,3 +155,21 @@ def test_backup_refuses_source_database_with_foreign_key_violations(tmp_path, mo
 
     assert main.backup_and_verify_db() is None
     assert list(backup_dir.glob("*.db")) == []
+
+
+
+def test_init_db_aborts_before_migration_when_backup_is_unavailable(tmp_path, monkeypatch):
+    db_path = tmp_path / "existing.sqlite3"
+    db_path.write_bytes(b"existing database placeholder")
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "backup_and_verify_db", lambda: None)
+
+    try:
+        main.init_db()
+    except RuntimeError as exc:
+        assert "инициализация и миграция остановлены" in str(exc)
+    else:
+        raise AssertionError("Expected init_db to fail closed without a verified backup")
+
+    # The placeholder must remain untouched; migration must not open it.
+    assert db_path.read_bytes() == b"existing database placeholder"
