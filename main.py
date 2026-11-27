@@ -1909,7 +1909,6 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
         system_status["last_scan"] = scan_started_utc
         system_status["last_scan_started"] = scan_started_utc
         system_status["last_scan_finished"] = None
-        system_status["last_scan_duration_sec"] = None
         system_status["last_scan_checked"] = 0
         system_status["last_scan_completed"] = 0
         system_status["last_scan_planned"] = len(SYMBOLS)
@@ -1979,6 +1978,10 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
                         symbol_results[symbol] = reason
                         log.info("SCAN #%s %s B_NOT_SAVED: %s", scan_no, symbol, reason)
             except asyncio.CancelledError:
+                _finalize_cancelled_scan(
+                    system_status, scan_started, symbol_results, utc_text()
+                )
+                log.warning("SCAN #%s CANCELLED while analyzing %s", scan_no, symbol)
                 raise
             except MarketError as exc:
                 reason = f"ошибка BingX/API: {exc}"
@@ -2215,6 +2218,28 @@ async def settings_handler(message: Message):
 
 
 
+
+
+def _finalize_cancelled_scan(
+    status: dict[str, Any],
+    scan_started_monotonic: float,
+    symbol_results: dict[str, str],
+    finished_utc: str,
+) -> None:
+    """Clear active-scan state and preserve partial diagnostics after cancellation."""
+    status["last_scan_finished"] = finished_utc
+    status["last_scan_duration_sec"] = round(
+        max(0.0, time.monotonic() - scan_started_monotonic), 2
+    )
+    status["last_scan_current_symbol"] = None
+    status["last_scan_started_monotonic"] = None
+    status["last_scan_symbol_results"] = dict(symbol_results)
+    status["last_scan_symbol_results_live"] = dict(symbol_results)
+    status["last_scan_summary"] = (
+        f"Сканирование отменено; обработано "
+        f"{status.get('last_scan_completed', 0)}/"
+        f"{status.get('last_scan_planned', len(SYMBOLS))} пар"
+    )
 
 
 def format_scan_rejection_summary(rejections: Any, limit: int = 5) -> str:
