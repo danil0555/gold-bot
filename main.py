@@ -2230,14 +2230,17 @@ def format_scan_rejection_summary(rejections: Any, limit: int = 5) -> str:
     ) or "—"
 
 
-def format_scan_symbol_summary(results: Any, limit: int = 5) -> str:
+def format_scan_symbol_summary(results: Any, limit: int = 14) -> str:
     """Return a compact per-symbol outcome list for scan diagnostics."""
     if not isinstance(results, dict) or not results:
         return "—"
-    return "\n".join(
-        f"{html.escape(str(symbol))}: {html.escape(str(reason))}"
-        for symbol, reason in list(results.items())[:max(1, limit)]
-    ) or "—"
+    lines = []
+    for symbol, reason in list(results.items())[:max(1, limit)]:
+        reason_text = str(reason)
+        if len(reason_text) > 120:
+            reason_text = reason_text[:117] + "..."
+        lines.append(f"{html.escape(str(symbol))}: {html.escape(reason_text)}")
+    return "\n".join(lines) or "—"
 
 
 @router.message(F.text == "🖥 Статус системы")
