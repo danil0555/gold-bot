@@ -1,6 +1,6 @@
 # Trading Bot — canonical project context
 
-> Last updated: 2026-11-27 (PR #28 merged) (after PR #27 merge)  
+> Last updated: 2026-11-27 (PR #22 and research PR #20 merged)  
 > Repository: https://github.com/danil0555/gold-bot  
 > Default branch: `main`  
 > Purpose: persistent handoff record across ChatGPT conversations. This file is a project-state snapshot, not a substitute for checking the live repository, open PRs, CI, deployment console, or the latest user instructions.
@@ -53,7 +53,7 @@ At the start of every new Trading Bot conversation:
 
 ## Main branch — verified state
 
-Latest known `main` SHA: `3b85d7d1019bc63e7dad4b543fb0b81c7fbc6e75` (PR #28 squash merge).
+Latest known `main` SHA: `f7f4c97ed099bef3dc20984fd7793e42c12dda04` (PR #22 squash merge; documentation PR #29 is `4ce5d348b2ed81c8ee50dd5ccdff2a6ac4118cae`).
 
 ### Merged documentation PRs
 
@@ -61,6 +61,8 @@ Latest known `main` SHA: `3b85d7d1019bc63e7dad4b543fb0b81c7fbc6e75` (PR #28 squa
   Added this canonical context file and reconciled `planned_tasks/production-scan-diagnostics.md`. Documentation-only; exact-head CI run `46057225162` passed. Squash merge SHA `58550ee9e513c7cc2e5d1c1da425f2392e6573d8`. No runtime or deployment changes.
 - PR #28 — https://github.com/danil0555/gold-bot/pull/28  
   Recorded PR #27 merge and refreshed the capture #8 checkpoint. Documentation-only; exact-head CI run `46057434710` passed. Squash merge SHA `3b85d7d1019bc63e7dad4b543fb0b81c7fbc6e75`. No runtime or deployment changes.
+- PR #29 — https://github.com/danil0555/gold-bot/pull/29  
+  Recorded PR #28 merge and the capture #8 checkpoint. Documentation-only; exact-head CI run `46057681405` passed. Squash merge SHA `4ce5d348b2ed81c8ee50dd5ccdff2a6ac4118cae`. No runtime or deployment changes.
 
 ### Merged production PRs
 
@@ -73,14 +75,15 @@ Latest known `main` SHA: `3b85d7d1019bc63e7dad4b543fb0b81c7fbc6e75` (PR #28 squa
 - PR #26 — https://github.com/danil0555/gold-bot/pull/26  
   Preserves previous completed scan duration while a new scan runs; clears active-scan state and retains partial per-symbol results when symbol analysis is cancelled. Added test and roadmap update. Merge SHA `179a7d23ee3fedbc35ea3e79f0893594d810c1d9`. Exact-head CI run `46013439823` passed. User has NOT authorized FadeHost deployment; do not deploy.
 
-## Open PRs requiring review (do not merge without permission)
+## Open PRs requiring review
+
 
 - PR #20 — https://github.com/danil0555/gold-bot/pull/20  
-  Draft research-only PR. Base: `research/capture-v2-4h-run`; head: `research/capture-v2-multiday-merge-v1`. Implements strict merge of capture-scoped SQLite databases while preserving capture/session provenance, v2 features/candles/derivatives/events and separately maintaining legacy convenience tables. Refuses schema/session/capture-ID conflicts, path aliasing, overwrite, and invalid DBs; stages to `.partial`, checks integrity/FKs, then atomic rename. Five-capture real-artifact integration passed on commit `8d40c3bb6029e99df1fd9e6929751286dffa0681`, push run `46029620213`, artifact `15214450010`. Verified merged DB: 5 sessions, 9,609 provenance observations, 2,398 minute features, 2,406 minute candles, 4,800 derivatives snapshots, 55 collector events; integrity check OK, FK check empty. PR remains Draft/unmerged. Research branch runtime safe-default check uses 2% risk; this is not production and must never be confused with production 10%.
+  Merged only into research base `research/capture-v2-4h-run`, merge SHA `3c9abdb9191640676a20a6db5ea0b4460c6860c6`; never merged into production `main`. Implements strict merge of capture-scoped SQLite databases preserving capture/session provenance, v2 features/candles/derivatives/events and separately maintaining legacy convenience tables. Exact-head PR validation run `46061627933` passed. Push integration run `46061621061` passed all six real artifacts; merged artifact `15229047580` independently inspected: 6 sessions, 11,532 observations, 2,878 features, 2,888 candles, 5,760 derivatives snapshots, 66 events; integrity OK, FK check empty, no legacy duplicate rows discarded. Research branch runtime safe-default check uses 2% risk; this is not production and must never be confused with production 10%.
 - PR #21 — https://github.com/danil0555/gold-bot/pull/21  
   Draft reliability PR: atomic signal + audit writes, stale-signal expiry + audit transaction, fail-closed DB integrity/foreign-key validation before backup/migration. No strategy/risk/order behavior changes. No production DB opened/migrated; no deployment. Verify exact-head CI before further work.
 - PR #22 — https://github.com/danil0555/gold-bot/pull/22  
-  Draft API telemetry PR: clear stale BingX API error on valid successful response, record/display last successful response timestamp. Exact-head CI run `45891145506` passed; 22 addon/reliability/API tests + 59 signal/balance/sizing/portfolio tests (81 total). Safe defaults confirmed: real trading OFF, add-ons OFF, risk 10%, leverage 5x. Base was older `a863b12...`; review for conflicts/current base before merge. No deployment.
+  Merged to production `main`, squash SHA `f7f4c97ed099bef3dc20984fd7793e42c12dda04`. Clears stale BingX API error on valid successful response, records/displays last successful response timestamp. Exact-head CI run `45891145506` passed; 22 addon/reliability/API tests + 59 signal/balance/sizing/portfolio tests (81 total). Safe defaults confirmed: real trading OFF, add-ons OFF, risk 10%, leverage 5x. No DB migration, strategy or risk changes. FadeHost deployment is NOT verified.
 - Check whether any newer PRs exist; this list is a dated snapshot.
 
 ## Market-data capture research
@@ -99,12 +102,19 @@ Five separate 4-hour windows (not continuous coverage) were collected from BTC-U
 
 Capture #5 DB integrity check OK, foreign-key check empty, both symbols had continuous 240-minute features/candles, clean stop event. Event-study outputs are exploratory only: every event/horizon had just one independent 24-hour cluster and was labelled `insufficient_independent_clusters`. Some attractive small-sample statistics are not validated edge, not trade recommendations, and must not be promoted into live signals.
 
-### Capture #8 / next workflow run (state must be refreshed)
+### Capture #8 — completed and independently inspected
 
-- GitHub Actions run ID `46029620348`, branch `research/capture-v2-multiday-merge-v1`, head commit `8d40c3bb6029e99df1fd9e6929751286dffa0681`.
-- Latest recheck at 2026-11-27 19:32 UTC: workflow and job `capture` are still `in_progress`; job started `2026-11-27T15:58:53Z`. Expected four-hour capture completion around 19:58:53 UTC. No artifacts were published at the 19:32 UTC check. Re-query after expected completion; do not assume it finished.
-- If completed, inspect uploaded SQLite DB and event-study artifact; verify integrity, foreign keys, session duration, symbol coverage, minute completeness, derivatives, collector events, report caveats. Compare with prior sessions.
-- Do not infer completion from elapsed time or fabricate artifacts if none are present.
+- GitHub Actions run `46029620348`, branch `research/capture-v2-multiday-merge-v1`, head `8d40c3bb6029e99df1fd9e6929751286dffa0681`; completed successfully.
+- Artifacts: DB `15227733846`, event study `15227813816`.
+- Session `2026-11-27T15:59:06Z`–`19:59:06Z`, BTC-USDT and ETH-USDT. 1,923 provenance observations, 480 features, 482 candles, 960 derivatives snapshots, 11 collector events; all 6 WS subscription acknowledgements and clean stop.
+- Independent SQLite check: integrity `ok`, FK check empty; both symbols have uninterrupted 240-minute feature sequences. Depth samples were zero in 2 BTC minutes (0.83%) and 3 ETH minutes (1.25%).
+- Event study: four event hypotheses, 1m/5m/15m horizons; all had only one independent 24h cluster vs required minimum 4. With fixed 12 bps costs all four hypotheses had negative mean net returns at all horizons. No strategy signal is approved.
+
+### Six-capture merge validation and next capture
+
+- PR #20 research-only merge passed exact-head PR validation run `46061627933` and six-artifact push integration run `46061621061` on head `a0ffde2a1fdd5933c57fad15d4639c1985be5bad`; merge SHA into research base `3c9abdb9191640676a20a6db5ea0b4460c6860c6`.
+- Merged artifact `15229047580`: 6 sessions, 11,532 observations, 2,878 features, 2,888 candles, 5,760 derivatives snapshots, 66 events; integrity `ok`, FK check empty, zero legacy duplicates.
+- A follow-up capture on the PR head (`46061621136`) was cancelled during the research PR merge. Merge into `research/capture-v2-4h-run` triggered a new capture workflow `46061878586`, which was pending at last check. Refresh it; do not assume it has started or completed.
 
 ## Scan diagnostics — current interpretation
 
@@ -116,11 +126,12 @@ Capture #5 DB integrity check OK, foreign-key check empty, both symbols had cont
 
 ## Planned work and next actions
 
-1. Refresh GitHub Actions run `46029620348`; inspect artifacts if completed.
-2. Review exact-head CI and diffs for open PRs #20, #21, #22; keep research branch isolated and do not merge any PR without user permission.
-3. Ask user for a fresh FadeHost Console SHA when deployment status matters. Do not deploy unless user explicitly authorizes it and quota/action are available.
-4. Continue collecting independent capture windows only if useful; do not overstate a small or discontinuous sample.
-5. Keep BOT_CONTEXT.md updated after each meaningful milestone.
+1. Refresh capture workflow run `46061878586` and inspect artifacts if it completes.
+2. Keep PR #21 on hold until production SQLite integrity and foreign-key checks can be verified; do not let fail-closed startup guard surprise the running bot.
+3. Verify PR #22's API-success timestamp in Telegram only after the new `main` commit is deployed; merge does not equal deployment.
+4. Confirm FadeHost's deployed SHA and current deploy quota with the user before recommending a redeploy; latest verified deployed SHA remains `f077413...`.
+5. Continue collecting independent capture windows and require multiple independent time clusters, untouched holdouts and realistic cost/execution simulation before strategy consideration.
+6. Keep BOT_CONTEXT.md updated after each meaningful milestone.
 
 ## Permission ledger
 
@@ -129,11 +140,13 @@ Capture #5 DB integrity check OK, foreign-key check empty, both symbols had cont
 - PR #24: user authorized merge and deployment; merged and deployed.
 - PR #25: merge authorized and merged; deployment not verified.
 - PR #26: merge authorized and merged; deployment NOT authorized/verified.
-- PR #20: no merge authorization; Draft research-only.
-- PR #21: no merge authorization; Draft.
-- PR #22: no merge authorization; Draft.
+- PR #20: broad user permission covered routine research work; six-artifact integration passed and it was merged only into `research/capture-v2-4h-run`; no production `main` changes.
+- PR #21: remains Draft; not merged because fail-closed startup behavior depends on the real production DB passing integrity/FK checks, which has not been inspected. Keep it separate until production DB health is verified.
+- PR #22: merged to `main` after exact-head CI passed; no deployment permission inferred.
 - PR #27: explicitly authorized by user's broad approval and merged; documentation-only.
 - PR #28: explicitly authorized by user's broad approval and merged; documentation-only.
+- PR #29: explicitly authorized by user's broad approval and merged; documentation-only.
+- PR #30: update this context after six-capture integration and PR #22 merge; documentation-only.
 - Any future merge, FadeHost redeploy/restart, database migration, credential change, or live order action requires explicit user authorization.
 
 ## End-of-stage handoff

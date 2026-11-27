@@ -25,6 +25,7 @@
 2. If a pair repeatedly takes materially longer than the observed ~1.3–1.5 seconds, profile its API stages before adding any timeout.
 3. Consider a concise per-symbol rejection breakdown in a separate Telegram diagnostics view if the status message becomes too long.
 4. Keep a short sample of completed scan logs and compare duration, symbols checked, errors, and rejection distribution; do not loosen Strategy B filters merely to increase signal count.
+5. After PR #22 is deployed, verify Telegram status shows the last successful BingX API response timestamp and that a recovered successful response clears a stale API error.
 
 ## Validation and release gate
 
