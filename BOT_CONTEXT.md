@@ -1,6 +1,6 @@
 # Trading Bot — canonical project context
 
-> Last updated: 2026-11-27  
+> Last updated: 2026-11-27 (after PR #27 merge)  
 > Repository: https://github.com/danil0555/gold-bot  
 > Default branch: `main`  
 > Purpose: persistent handoff record across ChatGPT conversations. This file is a project-state snapshot, not a substitute for checking the live repository, open PRs, CI, deployment console, or the latest user instructions.
@@ -53,7 +53,12 @@ At the start of every new Trading Bot conversation:
 
 ## Main branch — verified state
 
-Latest known `main` SHA: `179a7d23ee3fedbc35ea3e79f0893594d810c1d9` (PR #26 squash merge).
+Latest known `main` SHA: `58550ee9e513c7cc2e5d1c1da425f2392e6573d8` (PR #27 squash merge).
+
+### Merged documentation PR
+
+- PR #27 — https://github.com/danil0555/gold-bot/pull/27  
+  Added this canonical context file and reconciled `planned_tasks/production-scan-diagnostics.md`. Documentation-only; exact-head CI run `46057225162` passed. Squash merge SHA `58550ee9e513c7cc2e5d1c1da425f2392e6573d8`. No runtime or deployment changes.
 
 ### Merged production PRs
 
@@ -95,7 +100,7 @@ Capture #5 DB integrity check OK, foreign-key check empty, both symbols had cont
 ### Capture #8 / next workflow run (state must be refreshed)
 
 - GitHub Actions run ID `46029620348`, branch `research/capture-v2-multiday-merge-v1`, head commit `8d40c3bb6029e99df1fd9e6929751286dffa0681`.
-- Last observed state: workflow event push, capture job `140609819523` was `in_progress`, started `2026-11-27T15:58:00Z`. Expected capture duration 4 hours. This is a stale checkpoint; first re-query the run before stating whether it finished.
+- Latest recheck at 2026-11-27 19:32 UTC: workflow and job `capture` are still `in_progress`; job started `2026-11-27T15:58:53Z`. Expected four-hour capture completion around 19:58:53 UTC. No artifacts were published at the 19:32 UTC check. Re-query after expected completion; do not assume it finished.
 - If completed, inspect uploaded SQLite DB and event-study artifact; verify integrity, foreign keys, session duration, symbol coverage, minute completeness, derivatives, collector events, report caveats. Compare with prior sessions.
 - Do not infer completion from elapsed time or fabricate artifacts if none are present.
 
@@ -125,6 +130,7 @@ Capture #5 DB integrity check OK, foreign-key check empty, both symbols had cont
 - PR #20: no merge authorization; Draft research-only.
 - PR #21: no merge authorization; Draft.
 - PR #22: no merge authorization; Draft.
+- PR #27: explicitly authorized by user's broad approval and merged; documentation-only.
 - Any future merge, FadeHost redeploy/restart, database migration, credential change, or live order action requires explicit user authorization.
 
 ## End-of-stage handoff
