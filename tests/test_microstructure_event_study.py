@@ -150,6 +150,6 @@ def test_oi_changes_and_rolling_thresholds_reset_after_capture_gap():
     assert pd.notna(result.loc[15, "oi_change_5m"])
 
     # Rolling thresholds need three observations from the new segment.
-    assert result.loc[10:11, "taker_q20"].isna().all()
-    assert result.loc[12, "taker_q20"] == 0.9
+    assert result.loc[10:12, "taker_q20"].isna().all()
+    assert result.loc[13, "taker_q20"] == 0.9
     assert result["segment_id"].nunique() == 2
