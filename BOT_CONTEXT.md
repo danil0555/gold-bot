@@ -1,6 +1,6 @@
 # Trading Bot — canonical project context
 
-> Last updated: 2026-11-27 (PR #22 and research PR #20 merged)  
+> Last updated: 2026-11-27 (PR #30 and research PR #31 merged)  
 > Repository: https://github.com/danil0555/gold-bot  
 > Default branch: `main`  
 > Purpose: persistent handoff record across ChatGPT conversations. This file is a project-state snapshot, not a substitute for checking the live repository, open PRs, CI, deployment console, or the latest user instructions.
@@ -53,7 +53,7 @@ At the start of every new Trading Bot conversation:
 
 ## Main branch — verified state
 
-Latest known `main` SHA: `f7f4c97ed099bef3dc20984fd7793e42c12dda04` (PR #22 squash merge; documentation PR #29 is `4ce5d348b2ed81c8ee50dd5ccdff2a6ac4118cae`).
+Latest known `main` SHA: `ace34ea42312755c55b7628beab96cf84a9fc8df` (PR #30 squash merge; PR #22 code merge is `f7f4c97ed099bef3dc20984fd7793e42c12dda04`).
 
 ### Merged documentation PRs
 
@@ -63,6 +63,8 @@ Latest known `main` SHA: `f7f4c97ed099bef3dc20984fd7793e42c12dda04` (PR #22 squa
   Recorded PR #27 merge and refreshed the capture #8 checkpoint. Documentation-only; exact-head CI run `46057434710` passed. Squash merge SHA `3b85d7d1019bc63e7dad4b543fb0b81c7fbc6e75`. No runtime or deployment changes.
 - PR #29 — https://github.com/danil0555/gold-bot/pull/29  
   Recorded PR #28 merge and the capture #8 checkpoint. Documentation-only; exact-head CI run `46057681405` passed. Squash merge SHA `4ce5d348b2ed81c8ee50dd5ccdff2a6ac4118cae`. No runtime or deployment changes.
+- PR #30 — https://github.com/danil0555/gold-bot/pull/30  
+  Recorded six-capture integration validation, PR #22 merge and the pending capture checkpoint; added API telemetry deployment verification to planned tasks. Documentation-only; exact-head CI run `46062030832` passed. Squash merge SHA `ace34ea42312755c55b7628beab96cf84a9fc8df`. No runtime or deployment changes.
 
 ### Merged production PRs
 
@@ -110,11 +112,14 @@ Capture #5 DB integrity check OK, foreign-key check empty, both symbols had cont
 - Independent SQLite check: integrity `ok`, FK check empty; both symbols have uninterrupted 240-minute feature sequences. Depth samples were zero in 2 BTC minutes (0.83%) and 3 ETH minutes (1.25%).
 - Event study: four event hypotheses, 1m/5m/15m horizons; all had only one independent 24h cluster vs required minimum 4. With fixed 12 bps costs all four hypotheses had negative mean net returns at all horizons. No strategy signal is approved.
 
-### Six-capture merge validation and next capture
+### Six-capture merge validation and pooled event study
 
 - PR #20 research-only merge passed exact-head PR validation run `46061627933` and six-artifact push integration run `46061621061` on head `a0ffde2a1fdd5933c57fad15d4639c1985be5bad`; merge SHA into research base `3c9abdb9191640676a20a6db5ea0b4460c6860c6`.
 - Merged artifact `15229047580`: 6 sessions, 11,532 observations, 2,878 features, 2,888 candles, 5,760 derivatives snapshots, 66 events; integrity `ok`, FK check empty, zero legacy duplicates.
-- A follow-up capture on the PR head (`46061621136`) was cancelled during the research PR merge. Merge into `research/capture-v2-4h-run` triggered a new capture workflow `46061878586`, which was pending at last check. Refresh it; do not assume it has started or completed.
+- PR #31 — https://github.com/danil0555/gold-bot/pull/31 — merged only into `research/capture-v2-4h-run`, merge SHA `eec54ba3df345e33bafd42cade43b7c99b62d610`. Exact-head CI run `46062576165` passed after fixing a test expectation. It added gap-aware segment resets to the event-study pipeline and a six-capture pooled report.
+- Pooled artifact `15228738674` from run `46062576165`: 2,876 matched symbol/minute rows across 12 continuous segments (six capture sessions × two symbols). The analysis now resets rolling thresholds, returns, OI deltas and forward labels at each missing/non-consecutive minute.
+- Every event/horizon has only 3 independent 24h clusters, below the minimum 4. Every result remains `insufficient_independent_clusters`. After 12 bps costs, mean net returns were negative for all four hypotheses at 1m/5m/15m. No signal is approved.
+- A capture workflow triggered by the PR #20 merge (`46061878586`) was cancelled during the next research branch update. PR #31 merge triggered run `46062718647`, pending at last check. Refresh; do not assume capture has started or completed.
 
 ## Scan diagnostics — current interpretation
 
@@ -126,7 +131,7 @@ Capture #5 DB integrity check OK, foreign-key check empty, both symbols had cont
 
 ## Planned work and next actions
 
-1. Refresh capture workflow run `46061878586` and inspect artifacts if it completes.
+1. Refresh capture workflow run `46062718647` and inspect artifacts if it completes.
 2. Keep PR #21 on hold until production SQLite integrity and foreign-key checks can be verified; do not let fail-closed startup guard surprise the running bot.
 3. Verify PR #22's API-success timestamp in Telegram only after the new `main` commit is deployed; merge does not equal deployment.
 4. Confirm FadeHost's deployed SHA and current deploy quota with the user before recommending a redeploy; latest verified deployed SHA remains `f077413...`.
@@ -146,7 +151,9 @@ Capture #5 DB integrity check OK, foreign-key check empty, both symbols had cont
 - PR #27: explicitly authorized by user's broad approval and merged; documentation-only.
 - PR #28: explicitly authorized by user's broad approval and merged; documentation-only.
 - PR #29: explicitly authorized by user's broad approval and merged; documentation-only.
-- PR #30: update this context after six-capture integration and PR #22 merge; documentation-only.
+- PR #30: explicitly authorized by user's broad approval and merged; documentation-only.
+- PR #31: broad user permission covered routine research work; gap-aware pooled event-study validation passed and it was merged only into `research/capture-v2-4h-run`; no production `main` changes.
+- PR #32: update context after PR #30 and PR #31 merges; documentation-only.
 - Any future merge, FadeHost redeploy/restart, database migration, credential change, or live order action requires explicit user authorization.
 
 ## End-of-stage handoff
