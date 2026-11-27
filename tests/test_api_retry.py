@@ -69,3 +69,31 @@ def test_api_get_does_not_retry_non_retryable_http_status(monkeypatch):
         raise AssertionError("HTTP 400 must fail without retry")
 
     assert session.calls == 1
+
+
+
+def test_api_get_success_clears_stale_error_and_records_last_success(monkeypatch):
+    expected_success_time = "2026-11-26T20:00:00+00:00"
+    monkeypatch.setattr(main, "_last_api_request", 0.0)
+    monkeypatch.setattr(main, "_api_cooldown_until", 0.0)
+    monkeypatch.setattr(main, "utc_text", lambda *args, **kwargs: expected_success_time)
+
+    for payload in (
+        {"code": 0, "data": {"ok": True}},
+        ["ok", "raw-payload"],
+    ):
+        status = {
+            "api_status": "Ошибка сети",
+            "last_error": "stale previous failure",
+            "api_last_success_at": None,
+        }
+        monkeypatch.setattr(main, "system_status", status)
+        session = FakeSession([FakeResponse(200, payload=payload)])
+
+        result = asyncio.run(main.api_get(session, "/test", {}))
+
+        assert result == payload
+        assert status["api_status"] == "OK"
+        assert status["last_error"] is None
+        assert status["api_last_success_at"] == expected_success_time
+        assert session.calls == 1
