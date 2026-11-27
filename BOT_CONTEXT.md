@@ -110,11 +110,10 @@ Capture #5 DB integrity check OK, foreign-key check empty, both symbols had cont
 ## Planned work and next actions
 
 1. Refresh GitHub Actions run `46029620348`; inspect artifacts if completed.
-2. Reconcile/update `planned_tasks/production-scan-diagnostics.md` because its old first two “next tasks” were implemented in PR #26.
-3. Review exact-head CI and diffs for open PRs #20, #21, #22; keep research branch isolated and do not merge any PR without user permission.
-4. Ask user for a fresh FadeHost Console SHA when deployment status matters. Do not deploy unless user explicitly authorizes it and quota/action are available.
-5. Continue collecting independent capture windows only if useful; do not overstate a small or discontinuous sample.
-6. Keep BOT_CONTEXT.md updated after each meaningful milestone.
+2. Review exact-head CI and diffs for open PRs #20, #21, #22; keep research branch isolated and do not merge any PR without user permission.
+3. Ask user for a fresh FadeHost Console SHA when deployment status matters. Do not deploy unless user explicitly authorizes it and quota/action are available.
+4. Continue collecting independent capture windows only if useful; do not overstate a small or discontinuous sample.
+5. Keep BOT_CONTEXT.md updated after each meaningful milestone.
 
 ## Permission ledger
 
