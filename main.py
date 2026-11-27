@@ -135,7 +135,7 @@ ALLOWED_DIAG_USER_IDS: set[int] = {6322560261}
 SYMBOLS = [
     "BTC-USDT", "ETH-USDT", "BNB-USDT", "SOL-USDT", "XRP-USDT",
     "DOGE-USDT", "ADA-USDT", "AVAX-USDT", "LINK-USDT", "LTC-USDT",
-    "TRX-USDT", "DOT-USDT", "BCH-USDT", "SUI-USDT", "TON-USDT",
+    "TRX-USDT", "DOT-USDT", "BCH-USDT", "SUI-USDT",
 ]
 
 
@@ -198,7 +198,6 @@ def utc_now() -> datetime:
 def utc_text(dt: datetime | None = None) -> str:
     target = dt if dt is not None else utc_now()
     return target.strftime("%Y-%m-%d %H:%M:%S")
-
 def parse_utc_text(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -397,8 +396,7 @@ def init_db() -> None:
             spread_pct REAL, price_updated_at TEXT, expires_at TEXT,
             entry_mode TEXT DEFAULT 'market',
             entry_zone_low REAL, entry_zone_high REAL,
-            confirmation_rule TEXT, quality_score REAL,
-            market_regime TEXT, estimated_fee_pct REAL,
+            confirmation_rule TEXT, quality_score REAL,            market_regime TEXT, estimated_fee_pct REAL,
             estimated_slippage_pct REAL, net_rr REAL,
             cancel_reason TEXT
         )""")
@@ -597,8 +595,7 @@ def normalize_candles(payload: Any, interval: str, min_rows: int = MIN_CANDLE_RO
     return df
 
 def _is_cached_frame_fresh(market: str, symbol: str, interval: str, min_rows: int) -> pd.DataFrame | None:
-    cached = candle_cache.get((market, symbol, interval))
-    if cached is None or cached.empty or len(cached) < min_rows:
+    cached = candle_cache.get((market, symbol, interval))    if cached is None or cached.empty or len(cached) < min_rows:
         return None
     last_close = int(cached.iloc[-1]["close_time"])
     tf_ms = TF_MS.get(interval, 60_000)
@@ -797,8 +794,7 @@ async def bingx_kline_websocket_loop() -> None:
                         continue
                     data = payload.get("data")
                     if not isinstance(data, list):
-                        continue
-                    data_type = str(payload.get("dataType", ""))
+                        continue                    data_type = str(payload.get("dataType", ""))
                     channel_symbol = data_type.split("@", 1)[0] if "@" in data_type else ""
                     for trade in data:
                         if isinstance(trade, dict):
@@ -997,8 +993,7 @@ def build_signal_b(market, symbol, frames, quote=None, diagnostics=None):
             score += 1.5; structural = True; reasons.append("15м: пробой структуры вверх (BOS)")
         elif range_low > 0 and low15 < range_low and close15 > range_low:
             score += 1.5; structural = True; reasons.append("15м: sweep вниз и возврат над уровнем")
-    else:
-        if prev_sl > 0 and close15 < prev_sl:
+    else:        if prev_sl > 0 and close15 < prev_sl:
             score += 1.5; structural = True; reasons.append("15м: пробой структуры вниз (BOS)")
         elif range_high > 0 and high15 > range_high and close15 < range_high:
             score += 1.5; structural = True; reasons.append("15м: sweep вверх и возврат под уровень")
@@ -1197,8 +1192,7 @@ def build_signal_d_impulse(symbol: str, frames: dict[str, pd.DataFrame],
         return _addon_reject(diagnostics, "5m_adx_below_15")
     if price > safe_float(cur["open"]) and safe_float(ctx["close"]) > safe_float(ctx["ema20"]) > safe_float(ctx["ema50"]):
         side = "BUY"
-    elif price < safe_float(cur["open"]) and safe_float(ctx["close"]) < safe_float(ctx["ema20"]) < safe_float(ctx["ema50"]):
-        side = "SELL"
+    elif price < safe_float(cur["open"]) and safe_float(ctx["close"]) < safe_float(ctx["ema20"]) < safe_float(ctx["ema50"]):        side = "SELL"
     else:
         return _addon_reject(diagnostics, "1m_impulse_not_aligned_with_5m_ema")
     ctx_atr = safe_float(ctx["atr"])
@@ -1397,8 +1391,7 @@ def enrich_signal_with_live_data(sig: dict[str, Any], snapshot: dict[str, Any] |
             # кандидата в _make_addon_signal. Формула B ниже остаётся неизменной.
             enriched["quality_score"] = round(min(
                 100.0, 62.0 + base_score * 5.0 - spread_pct * 10.0
-            ), 1)
-        else:
+            ), 1)        else:
             enriched["quality_score"] = round(min(100.0, 60.0 + base_score * 4.0
                 + (5.0 if enriched["net_rr"] >= 2.0 else 0.0)
                 - spread_pct * 20.0), 1)
@@ -1597,8 +1590,7 @@ def position_size_text(signal, balance_usdt: float | None) -> str:
 
     symbol = str(signal.get("symbol") or "").upper()
     spec = contract_specs_cache.get(symbol)
-    fresh = bool(spec) and contract_specs_updated_at > 0 and time.time() - contract_specs_updated_at <= CONTRACT_SPECS_MAX_AGE_SEC
-    contract_note = ""
+    fresh = bool(spec) and contract_specs_updated_at > 0 and time.time() - contract_specs_updated_at <= CONTRACT_SPECS_MAX_AGE_SEC    contract_note = ""
     if fresh:
         checked = apply_bingx_contract_constraints(sizing, spec, str(signal.get("side") or ""), FUTURES_LEVERAGE)
         if checked.get("validated"):
@@ -1797,8 +1789,7 @@ async def analyze_market_symbol(market, symbol, strategy_version=DEFAULT_STRATEG
 
     if diagnostics is not None:
         diagnostics["stage"] = "strategy_filter"
-    signal = build_signal_b(market, symbol, candles, quote=None, diagnostics=diagnostics)
-    if not signal:
+    signal = build_signal_b(market, symbol, candles, quote=None, diagnostics=diagnostics)    if not signal:
         if diagnostics is not None and not diagnostics.get("reason"):
             diagnostics["reason"] = "сетап не прошёл фильтры стратегии"
         return None
@@ -1997,8 +1988,7 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
                         found.append(addon_signal)
                         log.info("SCAN #%s %s ACCEPT strategy=%s side=%s quality=%.1f net_rr=%.2f",
                                  scan_no, symbol, addon_signal.get("strategy_version"),
-                                 addon_signal.get("side"), safe_float(addon_signal.get("quality_score")),
-                                 safe_float(addon_signal.get("net_rr")))
+                                 addon_signal.get("side"), safe_float(addon_signal.get("quality_score")),                                 safe_float(addon_signal.get("net_rr")))
                     else:
                         log.info("SCAN #%s %s ADDON_NOT_SAVED strategy=%s (duplicate/cooldown)",
                                  scan_no, symbol, addon_signal.get("strategy_version"))
@@ -2196,7 +2186,6 @@ def format_scan_rejection_summary(rejections: Any, limit: int = 5) -> str:
     return "\n".join(
         f"{count}× {reason}" for reason, count in items[:max(1, limit)] if count > 0
     ) or "—"
-
 
 @router.message(F.text == "🖥 Статус системы")
 async def system_status_handler(message: Message):
@@ -2397,8 +2386,7 @@ async def on_shutdown() -> None:
 async def main_async() -> None:
     global bot
     dp.include_router(router)
-    await on_startup()
-    background_tasks.append(asyncio.create_task(contract_specs_refresh_loop()))
+    await on_startup()    background_tasks.append(asyncio.create_task(contract_specs_refresh_loop()))
     background_tasks.append(asyncio.create_task(bingx_kline_websocket_loop()))
     background_tasks.append(asyncio.create_task(background_scan()))
     try:
