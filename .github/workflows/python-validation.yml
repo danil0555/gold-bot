@@ -134,7 +134,7 @@ jobs:
           if-no-files-found: warn
 
   real-capture-merge-integration:
-    if: github.ref == 'refs/heads/research/capture-v2-multiday-merge-v1' && (github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'Run real-artifact merge integration')
+    if: (github.ref == 'refs/heads/research/capture-v2-multiday-merge-v1' && (github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'Run real-artifact merge integration')) || (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'research/capture-v2-4h-run')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -145,7 +145,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install validator dependencies
-        run: python -m pip install --disable-pip-version-check pytest
+        run: python -m pip install --disable-pip-version-check pytest numpy pandas
       - name: Download first real four-hour capture artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -223,11 +223,18 @@ jobs:
           }
           print(json.dumps({"status": "ok", "capture_sessions": 6, "capture_row_counts": counts}, indent=2))
           PY
-      - name: Upload real-artifact merge output and report
+      - name: Run exploratory event study across all six merged captures
+        run: |
+          python -m scripts.microstructure_event_study \
+            --db /tmp/merged-real-captures.sqlite3 \
+            --cost-bps 12 \
+            --output /tmp/six-capture-microstructure-event-study.json
+      - name: Upload real-artifact merge output, merge report and pooled event study
         uses: actions/upload-artifact@v4
         with:
           name: capture-v2-real-artifact-merge-integration
           path: |
             /tmp/merged-real-captures.sqlite3
             /tmp/real-capture-merge-report.json
+            /tmp/six-capture-microstructure-event-study.json
           retention-days: 14
