@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 def test_futures_symbol_universe_excludes_unavailable_ton_contract():
+    # Parse the source instead of importing main.py (which requires BOT_TOKEN).
     source = Path(__file__).resolve().parents[1] / "main.py"
     tree = ast.parse(source.read_text(encoding="utf-8"))
 
