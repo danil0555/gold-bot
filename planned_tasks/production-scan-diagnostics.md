@@ -16,9 +16,11 @@
 - Database schema and production SQLite data are untouched.
 
 ## Next planned diagnostics
-1. Observe the live progress fields after the patch is deployed.
-2. If a pair repeatedly takes materially longer than the observed ~1.3–1.5 seconds, profile its API stages before adding any timeout.
-3. Consider a concise per-symbol rejection breakdown in a separate Telegram diagnostics view if the status message becomes too long.
+1. Preserve the previous completed scan duration while a new scan is running.
+2. Clear active-scan state and retain partial per-symbol results if symbol analysis is cancelled.
+3. Observe the live progress fields after the patch is deployed.
+4. If a pair repeatedly takes materially longer than the observed ~1.3–1.5 seconds, profile its API stages before adding any timeout.
+5. Consider a concise per-symbol rejection breakdown in a separate Telegram diagnostics view if the status message becomes too long.
 
 ## Validation gate
 - Run compile/import/safe-default checks and deterministic scan diagnostics tests on the exact PR head.
