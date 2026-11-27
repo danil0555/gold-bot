@@ -4,11 +4,15 @@ concurrency:
   group: addon-validation-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  actions: read
+
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model, research/market-feature-ablation, research/market-walkforward-regimes, research/directional-microstructure-scoring, research/market-discovery-engine-v1, research/multiday-coverage-gate-v2, research/capture-observation-provenance-v1, research/capture-scoped-storage-v2, research/capture-v2-shutdown-hardening]
+    branches: [fix/addon-strategies-diagnostics-20261121, research/spot-futures-arbitrage, research/futures-scalping-100-usdt, research/market-discovery-engine, research/bingx-only-market-model, research/market-feature-ablation, research/market-walkforward-regimes, research/directional-microstructure-scoring, research/market-discovery-engine-v1, research/multiday-coverage-gate-v2, research/capture-observation-provenance-v1, research/capture-scoped-storage-v2, research/capture-v2-shutdown-hardening, research/capture-v2-multiday-merge-v1]
   pull_request:
-    branches: [main, research/multiday-coverage-gate-v2, research/capture-observation-provenance-v1]
+    branches: [main, research/multiday-coverage-gate-v2, research/capture-observation-provenance-v1, research/capture-v2-4h-run]
   workflow_dispatch:
 
 jobs:
@@ -33,7 +37,7 @@ jobs:
           BACKUP_DIR: /tmp/trading_bot_ci_backups
         run: python -c "import main; assert main.REAL_TRADING_ENABLED is False; assert main.ENABLE_ADDON_STRATEGIES is False; assert main.RISK_PERCENT == 2.0; assert main.FUTURES_LEVERAGE == 5; print('runtime import OK; real orders OFF; add-ons OFF')"
       - name: Run deterministic strategy and research tests
-        run: python -m pytest -q tests/test_addon_strategies.py tests/test_spot_futures_arb.py tests/test_backtest_spot_futures_arb.py tests/test_scalping_100.py tests/test_market_research.py tests/test_market_walkforward.py tests/test_market_data_collector.py tests/test_microstructure_event_study.py tests/test_microstructure_data_quality.py tests/test_microstructure_discovery.py tests/test_market_move_discovery.py tests/test_market_pattern_mining.py tests/test_market_pattern_holdout.py tests/test_merge_microstructure_databases.py tests/test_multiday_coverage_gate.py tests/test_validate_capture_db.py
+        run: python -m pytest -q tests/test_addon_strategies.py tests/test_spot_futures_arb.py tests/test_backtest_spot_futures_arb.py tests/test_scalping_100.py tests/test_market_research.py tests/test_market_walkforward.py tests/test_market_data_collector.py tests/test_microstructure_event_study.py tests/test_microstructure_data_quality.py tests/test_microstructure_discovery.py tests/test_market_move_discovery.py tests/test_market_pattern_mining.py tests/test_market_pattern_holdout.py tests/test_merge_microstructure_databases.py tests/test_multiday_coverage_gate.py tests/test_validate_capture_db.py tests/test_merge_capture_v2_databases.py
       - name: Run read-only public BingX spot-perpetual smoke scan
         if: (github.event_name == 'pull_request' && github.base_ref == 'main') || github.ref == 'refs/heads/research/spot-futures-arbitrage'
         run: python -m scripts.spot_futures_arb --symbols BTC-USDT,ETH-USDT,SOL-USDT,XRP-USDT,ADA-USDT,DOGE-USDT,LINK-USDT,LTC-USDT --notional 1000 --funding-periods 3
@@ -128,3 +132,102 @@ jobs:
           name: market-research-180d
           path: research-output/market_research_180d.json
           if-no-files-found: warn
+
+  real-capture-merge-integration:
+    if: github.ref == 'refs/heads/research/capture-v2-multiday-merge-v1' && (github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'Run real-artifact merge integration')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out research branch
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install validator dependencies
+        run: python -m pip install --disable-pip-version-check pytest
+      - name: Download first real four-hour capture artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 45705897076 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-1 --repo "$GITHUB_REPOSITORY"
+      - name: Download second real four-hour capture artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 45770189126 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-2 --repo "$GITHUB_REPOSITORY"
+      - name: Download third real four-hour capture artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 45877940222 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-3 --repo "$GITHUB_REPOSITORY"
+      - name: Download fourth real four-hour capture artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 45954722301 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-4 --repo "$GITHUB_REPOSITORY"
+      - name: Download fifth real four-hour capture artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 45987872452 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-5 --repo "$GITHUB_REPOSITORY"
+      - name: Download sixth real four-hour capture artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 46029620348 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-6 --repo "$GITHUB_REPOSITORY"
+      - name: Run the exact PR merger against all six real artifacts
+        run: |
+          set -euo pipefail
+          first="$(find /tmp/capture-1 -type f -name '*.sqlite3' -print -quit)"
+          second="$(find /tmp/capture-2 -type f -name '*.sqlite3' -print -quit)"
+          third="$(find /tmp/capture-3 -type f -name '*.sqlite3' -print -quit)"
+          fourth="$(find /tmp/capture-4 -type f -name '*.sqlite3' -print -quit)"
+          fifth="$(find /tmp/capture-5 -type f -name '*.sqlite3' -print -quit)"
+          sixth="$(find /tmp/capture-6 -type f -name '*.sqlite3' -print -quit)"
+          test -n "$first"
+          test -n "$second"
+          test -n "$third"
+          test -n "$fourth"
+          test -n "$fifth"
+          test -n "$sixth"
+          python -m scripts.merge_capture_v2_databases \
+            --inputs "$first" "$second" "$third" "$fourth" "$fifth" "$sixth" \
+            --output /tmp/merged-real-captures.sqlite3 \
+            --report /tmp/real-capture-merge-report.json
+      - name: Reopen and validate merged database
+        run: |
+          python -m scripts.validate_capture_db --db /tmp/merged-real-captures.sqlite3
+          python - <<'PY'
+          import json
+          import sqlite3
+          from contextlib import closing
+
+          path = "/tmp/merged-real-captures.sqlite3"
+          with closing(sqlite3.connect(path)) as db:
+              assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+              assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+              assert db.execute("SELECT COUNT(*) FROM collector_sessions").fetchone()[0] == 6
+              counts = {
+                  table: db.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                  for table in (
+                      "capture_observations",
+                      "capture_minute_features",
+                      "capture_minute_candles",
+                      "capture_derivatives_snapshots",
+                  )
+              }
+          with open("/tmp/real-capture-merge-report.json", encoding="utf-8") as handle:
+              report = json.load(handle)
+          assert report["capture_sessions"] == 6
+          assert report["decision"] == "merged_research_data_only_no_strategy_approved"
+          assert counts == {
+              "capture_observations": 11532,
+              "capture_minute_features": 2878,
+              "capture_minute_candles": 2888,
+              "capture_derivatives_snapshots": 5760,
+          }
+          print(json.dumps({"status": "ok", "capture_sessions": 6, "capture_row_counts": counts}, indent=2))
+          PY
+      - name: Upload real-artifact merge output and report
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-v2-real-artifact-merge-integration
+          path: |
+            /tmp/merged-real-captures.sqlite3
+            /tmp/real-capture-merge-report.json
+          retention-days: 14
