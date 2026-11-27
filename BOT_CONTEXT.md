@@ -1,6 +1,6 @@
 # Trading Bot — canonical project context
 
-> Last updated: 2026-11-27 (after PR #27 merge)  
+> Last updated: 2026-11-27 (PR #28 merged) (after PR #27 merge)  
 > Repository: https://github.com/danil0555/gold-bot  
 > Default branch: `main`  
 > Purpose: persistent handoff record across ChatGPT conversations. This file is a project-state snapshot, not a substitute for checking the live repository, open PRs, CI, deployment console, or the latest user instructions.
@@ -53,12 +53,14 @@ At the start of every new Trading Bot conversation:
 
 ## Main branch — verified state
 
-Latest known `main` SHA: `58550ee9e513c7cc2e5d1c1da425f2392e6573d8` (PR #27 squash merge).
+Latest known `main` SHA: `3b85d7d1019bc63e7dad4b543fb0b81c7fbc6e75` (PR #28 squash merge).
 
-### Merged documentation PR
+### Merged documentation PRs
 
 - PR #27 — https://github.com/danil0555/gold-bot/pull/27  
   Added this canonical context file and reconciled `planned_tasks/production-scan-diagnostics.md`. Documentation-only; exact-head CI run `46057225162` passed. Squash merge SHA `58550ee9e513c7cc2e5d1c1da425f2392e6573d8`. No runtime or deployment changes.
+- PR #28 — https://github.com/danil0555/gold-bot/pull/28  
+  Recorded PR #27 merge and refreshed the capture #8 checkpoint. Documentation-only; exact-head CI run `46057434710` passed. Squash merge SHA `3b85d7d1019bc63e7dad4b543fb0b81c7fbc6e75`. No runtime or deployment changes.
 
 ### Merged production PRs
 
@@ -131,6 +133,7 @@ Capture #5 DB integrity check OK, foreign-key check empty, both symbols had cont
 - PR #21: no merge authorization; Draft.
 - PR #22: no merge authorization; Draft.
 - PR #27: explicitly authorized by user's broad approval and merged; documentation-only.
+- PR #28: explicitly authorized by user's broad approval and merged; documentation-only.
 - Any future merge, FadeHost redeploy/restart, database migration, credential change, or live order action requires explicit user authorization.
 
 ## End-of-stage handoff
