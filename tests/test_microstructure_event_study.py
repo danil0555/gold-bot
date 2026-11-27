@@ -134,3 +134,22 @@ def test_event_summary_keeps_long_hypotheses_in_forward_direction():
     assert long["hypothesis_direction"] == "LONG"
     assert long["horizons"]["15m"]["mean_gross_bps"] == 20.0
     assert long["horizons"]["15m"]["mean_net_bps"] == 8.0
+
+
+def test_oi_changes_and_rolling_thresholds_reset_after_capture_gap():
+    panel = synthetic_panel(30)
+    panel.loc[10:, "minute_ts"] += 60_000
+    panel.loc[10:, "open_interest_base"] *= 2.0
+    panel.loc[10:, "taker_imbalance"] = 0.9
+
+    result = add_past_only_events(panel, lookback=3, min_periods=3)
+
+    # The first five-minute OI delta in a new segment must not compare with
+    # the previous capture, even though the previous capture has enough rows.
+    assert result.loc[10:14, "oi_change_5m"].isna().all()
+    assert pd.notna(result.loc[15, "oi_change_5m"])
+
+    # Rolling thresholds need three observations from the new segment.
+    assert result.loc[10:12, "taker_q20"].isna().all()
+    assert result.loc[13, "taker_q20"] == 0.9
+    assert result["segment_id"].nunique() == 2

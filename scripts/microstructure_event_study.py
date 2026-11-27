@@ -60,8 +60,13 @@ def load_panel(db_path: str) -> pd.DataFrame:
 
 def add_past_only_events(panel: pd.DataFrame, lookback: int = 120, min_periods: int = 60) -> pd.DataFrame:
     out = panel.copy()
-    out["ret_1m"] = out.groupby("symbol", sort=False)["close"].pct_change()
-    grouped = out.groupby("symbol", sort=False)
+    # Captures are intentionally discontinuous. Never let rolling thresholds,
+    # OI deltas, or forward labels bridge a missing minute / session boundary.
+    minute_delta = out.groupby("symbol", sort=False)["minute_ts"].diff()
+    starts_segment = minute_delta.ne(MINUTE_MS)
+    out["segment_id"] = starts_segment.groupby(out["symbol"], sort=False).cumsum().astype(int)
+    grouped = out.groupby(["symbol", "segment_id"], sort=False)
+    out["ret_1m"] = grouped["close"].pct_change()
     for col in ("taker_imbalance", "avg_book_imbalance20", "avg_microprice_offset_bps",
                 "avg_spread_bps", "open_interest_base"):
         if col not in out:
@@ -187,6 +192,7 @@ def summarize_events(panel: pd.DataFrame, cost_bps: float = 12.0, gap_minutes: i
         "cost_bps": cost_bps,
         "lookback_minutes": 120,
         "min_history_minutes": 60,
+        "gap_handling": "rolling thresholds, OI deltas and forward labels reset at every missing/non-consecutive minute",
         "events": results,
         "warning": "Exploratory event study only. Direction labels are hypotheses, not validated trade instructions. Do not trade these events. Require multiple independent time clusters, multiple-regime holdouts, and execution simulation before strategy consideration.",
     }
@@ -198,6 +204,7 @@ def run(args):
     report = summarize_events(panel, args.cost_bps, args.event_gap_minutes)
     report["symbols"] = sorted(panel["symbol"].dropna().unique().tolist())
     report["rows"] = int(len(panel))
+    report["continuous_segments"] = int(panel[["symbol", "segment_id"]].drop_duplicates().shape[0])
     report["period_utc_ms"] = [
         int(panel["minute_ts"].min()), int(panel["minute_ts"].max())
     ]
