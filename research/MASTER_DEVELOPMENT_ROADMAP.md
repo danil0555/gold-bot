@@ -902,3 +902,11 @@
 - The full syntax/deterministic test job for the same latest head was still running at this check; only the real-artifact integration job is confirmed green. Await exact-head CI before claiming the whole workflow passed.
 - Next capture run [45954722301](https://github.com/danil0555/gold-bot/actions/runs/45954722301) is active on the same research head, with the four-hour collector step running. Expected collection end is approximately 10:53 UTC on 2026-11-27. Do not start a duplicate. After completion inspect DB and event-study artifact as before.
 - PR #20 remains Draft/open/unmerged. PR #21 and #22 remain Draft/open/unmerged. Production `main` unchanged; no production DB, live bot, credentials, risk, Strategy B, deployment or orders changed.
+
+
+## 2026-11-27 — PR #20 exact-head CI and three-artifact integration both green
+
+- Exact current PR #20 head `66633ecaed4109a22cb8dc750cde981ce81ee5f8` passed full GitHub Actions run [45954722384](https://github.com/danil0555/gold-bot/actions/runs/45954722384): repository compilation/import passed, **130 deterministic tests passed**, and the three-real-artifact integration job passed. The merged output artifact [15177769065](https://github.com/danil0555/gold-bot/actions/runs/45954722384/artifacts/15177769065) was independently rechecked as described above.
+- Important branch-scope caveat: this research branch's safe-default smoke test asserts inherited `RISK_PERCENT=2.0` and 5x leverage, because the research lineage predates the production 10% change. This is not a production-main test and must not be interpreted as a change to or validation of the production risk setting. Production `main` remains at 10% risk / 5x as recorded in PR #16.
+- Capture run [45954722301](https://github.com/danil0555/gold-bot/actions/runs/45954722301) is still running the four-hour collector step at this check; no validator or event-study result exists yet for capture #4. Expected end approximately 10:53 UTC. Do not start another run.
+- PR #20 remains Draft/open/unmerged despite green validation; PR #21 and #22 remain Draft/open/unmerged. No production changes or deployments.
