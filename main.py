@@ -1893,9 +1893,11 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
         scan_started_utc = utc_text()
         found = []
         checked = 0
+        completed = 0
         skipped_unavailable = 0
         reason_counts: dict[str, int] = {}
         stage_counts: dict[str, int] = {}
+        symbol_results: dict[str, str] = {}
         addon_stats: dict[str, Any] = {
             name: {"checked": 0, "candidate": 0, "rejected": 0, "errors": 0, "reasons": {}}
             for name in ADDON_STRATEGIES
@@ -1909,7 +1911,11 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
         system_status["last_scan_finished"] = None
         system_status["last_scan_duration_sec"] = None
         system_status["last_scan_checked"] = 0
+        system_status["last_scan_completed"] = 0
         system_status["last_scan_planned"] = len(SYMBOLS)
+        system_status["last_scan_current_symbol"] = None
+        system_status["last_scan_symbol_results_live"] = {}
+        system_status["last_scan_started_monotonic"] = scan_started
         system_status["last_scan_summary"] = "Сканирование выполняется"
         active_strategies = "B,C,D,E" if ENABLE_ADDON_STRATEGIES else "B"
         log.info("SCAN #%s START market=USDT-M Futures planned=%s strategies=%s",
@@ -1918,17 +1924,25 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
 
         for symbol in SYMBOLS:
             key = ("swap", symbol)
+            system_status["last_scan_current_symbol"] = symbol
             if key in _unavailable_symbols:
                 skipped_unavailable += 1
+                completed += 1
                 reason = "контракт ранее отмечен как недоступный"
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                symbol_results[symbol] = f"пропущена: {reason}"
+                system_status["last_scan_completed"] = completed
+                system_status["last_scan_symbol_results_live"] = dict(symbol_results)
                 log.info("SCAN #%s %s SKIP: %s", scan_no, symbol, reason)
+                system_status["last_scan_current_symbol"] = None
                 continue
 
             checked += 1
             diag: dict[str, str] = {"stage": "starting", "reason": "анализ не завершён"}
             shared_frames: dict[str, pd.DataFrame] = {}
             try:
+                log.info("SCAN #%s %s ANALYSIS_START progress=%s/%s",
+                         scan_no, symbol, completed + 1, len(SYMBOLS))
                 signal = await analyze_market_symbol(
                     "swap", symbol, STRATEGY_B, diagnostics=diag, frames_out=shared_frames
                 )
@@ -1938,6 +1952,7 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
                     stage = diag.get("stage", "unknown")
                     reason_counts[reason] = reason_counts.get(reason, 0) + 1
                     stage_counts[stage] = stage_counts.get(stage, 0) + 1
+                    symbol_results[symbol] = reason
                     log.info("SCAN #%s %s B_REJECT stage=%s reason=%s",
                              scan_no, symbol, stage, reason)
                 else:
@@ -1945,6 +1960,7 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
                     if signal_id:
                         signal["id"] = signal_id
                         found.append(signal)
+                        symbol_results[symbol] = f"принят сигнал {signal.get('side', '—')}"
                         log.info("SCAN #%s %s B_ACCEPT side=%s quality=%.1f net_rr=%.2f",
                                  scan_no, symbol, signal.get("side"),
                                  safe_float(signal.get("quality_score")), safe_float(signal.get("net_rr")))
@@ -1960,17 +1976,28 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
                     else:
                         reason = "B: сигнал прошёл анализ, но не сохранён (дубликат/cooldown)"
                         reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                        symbol_results[symbol] = reason
                         log.info("SCAN #%s %s B_NOT_SAVED: %s", scan_no, symbol, reason)
             except asyncio.CancelledError:
                 raise
             except MarketError as exc:
                 reason = f"ошибка BingX/API: {exc}"
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                symbol_results[symbol] = reason
                 log.warning("SCAN #%s %s API_ERROR: %s", scan_no, symbol, exc)
             except Exception as exc:
                 reason = f"внутренняя ошибка: {type(exc).__name__}: {exc}"
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                symbol_results[symbol] = reason
                 log.exception("SCAN #%s %s INTERNAL_ERROR", scan_no, symbol)
+            finally:
+                completed += 1
+                system_status["last_scan_checked"] = checked
+                system_status["last_scan_completed"] = completed
+                system_status["last_scan_symbol_results_live"] = dict(symbol_results)
+                system_status["last_scan_current_symbol"] = None
+                log.info("SCAN #%s %s ANALYSIS_FINISH progress=%s/%s elapsed=%.2fs",
+                         scan_no, symbol, completed, len(SYMBOLS), time.monotonic() - scan_started)
 
         # C/D/E получают те же свечи — второй раз REST-данные не запрашиваются.
         # Эти модули выключены по умолчанию: 7-дневная проверка показала
@@ -2013,6 +2040,11 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
         system_status["last_scan_finished"] = finished_utc
         system_status["last_scan_duration_sec"] = round(duration, 2)
         system_status["last_scan_checked"] = checked
+        system_status["last_scan_completed"] = completed
+        system_status["last_scan_current_symbol"] = None
+        system_status["last_scan_started_monotonic"] = None
+        system_status["last_scan_symbol_results"] = dict(symbol_results)
+        system_status["last_scan_symbol_results_live"] = dict(symbol_results)
         system_status["last_scan_skipped_unavailable"] = skipped_unavailable
         system_status["last_addon_stats"] = addon_stats
         summary = (f"checked={checked}/{len(SYMBOLS)}; unavailable_skipped={skipped_unavailable}; "
@@ -2198,12 +2230,51 @@ def format_scan_rejection_summary(rejections: Any, limit: int = 5) -> str:
     ) or "—"
 
 
+def format_scan_symbol_summary(results: Any, limit: int = 5) -> str:
+    """Return a compact per-symbol outcome list for scan diagnostics."""
+    if not isinstance(results, dict) or not results:
+        return "—"
+    return "\n".join(
+        f"{html.escape(str(symbol))}: {html.escape(str(reason))}"
+        for symbol, reason in list(results.items())[:max(1, limit)]
+    ) or "—"
+
+
 @router.message(F.text == "🖥 Статус системы")
 async def system_status_handler(message: Message):
     register_user(message.from_user)
+    scan_running = bool(
+        system_status.get("last_scan_started_monotonic") is not None
+        and system_status.get("last_scan_finished") is None
+    )
+    rejection_title = (
+        "Причины отказа предыдущего завершённого скана:"
+        if scan_running else "Основные причины отказа последнего скана:"
+    )
     rejection_summary = html.escape(
         format_scan_rejection_summary(system_status.get("last_scan_rejections"))
     )
+    symbol_results = format_scan_symbol_summary(
+        system_status.get("last_scan_symbol_results_live")
+        if scan_running else system_status.get("last_scan_symbol_results")
+    )
+    started_monotonic = system_status.get("last_scan_started_monotonic")
+    elapsed = (
+        max(0.0, time.monotonic() - started_monotonic)
+        if scan_running and isinstance(started_monotonic, (int, float)) else None
+    )
+    if scan_running:
+        progress_line = (
+            f"Прогресс сканирования: {system_status.get('last_scan_completed', 0)}/"
+            f"{system_status.get('last_scan_planned', len(SYMBOLS))} пар"
+            f" | сейчас: {html.escape(str(system_status.get('last_scan_current_symbol') or 'подготовка'))}"
+            + (f" | прошло: {elapsed:.1f} сек." if elapsed is not None else "")
+        )
+    else:
+        progress_line = (
+            f"Проверено пар: {system_status.get('last_scan_checked', 0)}/"
+            f"{system_status.get('last_scan_planned', len(SYMBOLS))}"
+        )
     await message.answer(
         f"🖥 <b>Trading Bot v{BOT_VERSION}</b>\n\n"
         "Режим: <b>USDT-M Futures Scalping</b>\n"
@@ -2215,9 +2286,10 @@ async def system_status_handler(message: Message):
         f"Отправлено сигналов: {system_status.get('signals_count', 0)}\n"
         f"Последний скан (UTC): {system_status.get('last_scan') or '—'}\n"
         f"Последний цикл: {html.escape(str(system_status.get('last_scan_summary') or '—'))}\n"
-        f"Основные причины отказа последнего скана:\n<code>{rejection_summary}</code>\n"
-        f"Проверено пар: {system_status.get('last_scan_checked', 0)}/{system_status.get('last_scan_planned', len(SYMBOLS))}\n"
-        f"Длительность: {system_status.get('last_scan_duration_sec') if system_status.get('last_scan_duration_sec') is not None else '—'} сек.\n"
+        f"{progress_line}\n"
+        f"{rejection_title}\n<code>{rejection_summary}</code>\n"
+        f"Результаты по монетам ({'текущий скан' if scan_running else 'последний скан'}):\n<code>{symbol_results}</code>\n"
+        f"Длительность последнего завершённого скана: {system_status.get('last_scan_duration_sec') if system_status.get('last_scan_duration_sec') is not None else '—'} сек.\n"
         f"Недоступных контрактов: {len(_unavailable_symbols)}\n"
         f"WebSocket 1m: {'подключён' if ws_status.get('connected') else 'ожидание/переподключение'}\n"
         f"Последнее WS-сообщение: {ws_status.get('last_message') or '—'}\n"
