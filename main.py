@@ -2190,7 +2190,7 @@ def format_scan_rejection_summary(rejections: Any, limit: int = 5) -> str:
     if not isinstance(rejections, dict) or not rejections:
         return "—"
     items = sorted(
-        ((str(reason), safe_int(count, 0)) for reason, count in rejections.items()),
+        ((str(reason), int(safe_float(count, 0))) for reason, count in rejections.items()),
         key=lambda item: (-item[1], item[0]),
     )
     return "\n".join(
