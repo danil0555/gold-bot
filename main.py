@@ -2018,6 +2018,8 @@ async def scan_market(strategy_version=DEFAULT_STRATEGY):
         summary = (f"checked={checked}/{len(SYMBOLS)}; unavailable_skipped={skipped_unavailable}; "
                    f"accepted={len(found)}; duration={duration:.1f}s")
         system_status["last_scan_summary"] = summary
+        system_status["last_scan_rejections"] = dict(reason_counts)
+        system_status["last_scan_stages"] = dict(stage_counts)
         log.info("SCAN #%s FINISH started=%s finished=%s %s",
                  scan_no, scan_started_utc, finished_utc, summary)
         for strategy_name in ADDON_STRATEGIES:
@@ -2183,9 +2185,25 @@ async def settings_handler(message: Message):
 
 
 
+def format_scan_rejection_summary(rejections: Any, limit: int = 5) -> str:
+    """Return the most common rejection reasons from the latest completed scan."""
+    if not isinstance(rejections, dict) or not rejections:
+        return "—"
+    items = sorted(
+        ((str(reason), int(safe_float(count, 0))) for reason, count in rejections.items()),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return "\n".join(
+        f"{count}× {reason}" for reason, count in items[:max(1, limit)] if count > 0
+    ) or "—"
+
+
 @router.message(F.text == "🖥 Статус системы")
 async def system_status_handler(message: Message):
     register_user(message.from_user)
+    rejection_summary = html.escape(
+        format_scan_rejection_summary(system_status.get("last_scan_rejections"))
+    )
     await message.answer(
         f"🖥 <b>Trading Bot v{BOT_VERSION}</b>\n\n"
         "Режим: <b>USDT-M Futures Scalping</b>\n"
@@ -2197,6 +2215,7 @@ async def system_status_handler(message: Message):
         f"Отправлено сигналов: {system_status.get('signals_count', 0)}\n"
         f"Последний скан (UTC): {system_status.get('last_scan') or '—'}\n"
         f"Последний цикл: {html.escape(str(system_status.get('last_scan_summary') or '—'))}\n"
+        f"Основные причины отказа последнего скана:\n<code>{rejection_summary}</code>\n"
         f"Проверено пар: {system_status.get('last_scan_checked', 0)}/{system_status.get('last_scan_planned', len(SYMBOLS))}\n"
         f"Длительность: {system_status.get('last_scan_duration_sec') if system_status.get('last_scan_duration_sec') is not None else '—'} сек.\n"
         f"Недоступных контрактов: {len(_unavailable_symbols)}\n"

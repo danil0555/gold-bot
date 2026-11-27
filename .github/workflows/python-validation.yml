@@ -6,7 +6,7 @@ concurrency:
 
 on:
   push:
-    branches: [fix/addon-strategies-diagnostics-20261121, release/v10.2.3-candidate]
+    branches: [fix/addon-strategies-diagnostics-20261121, fix/scan-silence-diagnostics, release/v10.2.3-candidate]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -32,8 +32,8 @@ jobs:
           DB_PATH: /tmp/trading_bot_ci_smoke.db
           BACKUP_DIR: /tmp/trading_bot_ci_backups
         run: python -c "import main; assert main.REAL_TRADING_ENABLED is False; assert main.ENABLE_ADDON_STRATEGIES is False; assert main.RISK_PERCENT == 10.0; assert main.FUTURES_LEVERAGE == 5; print('runtime import OK; real orders OFF; add-ons OFF')"
-      - name: Run deterministic addon strategy tests
-        run: python -m pytest -q tests/test_addon_strategies.py tests/test_reliability.py tests/test_api_retry.py
+      - name: Run deterministic addon, reliability, API and scan-diagnostics tests
+        run: python -m pytest -q tests/test_addon_strategies.py tests/test_reliability.py tests/test_api_retry.py tests/test_scan_diagnostics.py
       - name: Run signal, balance persistence and position-sizing tests
         run: python -m pytest -q tests/test_signal_header.py tests/test_position_sizing.py tests/test_portfolio_risk.py
       - name: Run read-only BingX historical backtest (7 days)
