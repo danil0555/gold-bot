@@ -965,3 +965,13 @@
 - The research-lineage import smoke test still asserts its inherited `RISK_PERCENT=2.0`; this is not production `main`. Production branch remains `a863b12de1f4017daad38744717ac7bc0a1d7fc4` with 10% risk and 5x leverage.
 - PR #23 exact-head CI remains green but the PR is Draft/open/unmerged. Do not merge or deploy without explicit approval.
 - Next concrete development task remains an isolated historical Strategy B comparison: use the exact production builder fingerprint, identical multi-timeframe closed-candle snapshots, preserve baseline rules, and evaluate carefully scoped near-miss variants under conservative costs and out-of-sample splits. Existing generic comparison utilities do not themselves generate these Strategy B variants; do not claim this experiment exists until the signal-stream generator and tests are implemented.
+
+
+## 2026-11-27 — PR #23 approved by user and squash-merged to production main
+
+- User explicitly authorized merging PR #23. Draft was marked ready and PR [#23](https://github.com/danil0555/gold-bot/pull/23) was squash-merged successfully.
+- Merge commit / current `main` SHA: `78971d053e7c5c51e7332e92b1559b237424fd0a`. PR head was pinned to expected SHA `d6ae366bc1240ecd1e190d8b9a7fcf392bda3caf`; GitHub confirmed merged. Exact-head PR CI [45994444015](https://github.com/danil0555/gold-bot/actions/runs/45994444015) passed before merge.
+- Production change is observability only: latest completed scan rejection counters are retained in process memory and top five reasons are exposed in Telegram system status. It does not create signals or change Strategy B filters, entry/exit logic, 10% risk, 5x leverage, TP/SL, cooldowns, database schema, credentials, or order execution.
+- No deployment, hosting restart, production DB access/migration, or credential action was performed. The new status fields will only appear after the user separately deploys/restarts the bot; counters will represent scans since that process start, not historical scans.
+- Next operational step requires separate user authorization: deploy/restart the production bot to activate this diagnostic display. Until then, production source is merged in GitHub but the running host may still be on the previous code.
+- Research-only tasks and Strategy B shadow comparison remain separate; no strategy loosening or addon enablement is approved.
