@@ -154,15 +154,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh run download 45770189126 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-2 --repo "$GITHUB_REPOSITORY"
-      - name: Run the exact PR merger against both real artifacts
+      - name: Download third real four-hour capture artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 45877940222 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-3 --repo "$GITHUB_REPOSITORY"
+      - name: Run the exact PR merger against all three real artifacts
         run: |
           set -euo pipefail
           first="$(find /tmp/capture-1 -type f -name '*.sqlite3' -print -quit)"
           second="$(find /tmp/capture-2 -type f -name '*.sqlite3' -print -quit)"
+          third="$(find /tmp/capture-3 -type f -name '*.sqlite3' -print -quit)"
           test -n "$first"
           test -n "$second"
+          test -n "$third"
           python -m scripts.merge_capture_v2_databases \
-            --inputs "$first" "$second" \
+            --inputs "$first" "$second" "$third" \
             --output /tmp/merged-real-captures.sqlite3 \
             --report /tmp/real-capture-merge-report.json
       - name: Reopen and validate merged database
@@ -177,7 +183,7 @@ jobs:
           with closing(sqlite3.connect(path)) as db:
               assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
               assert db.execute("PRAGMA foreign_key_check").fetchall() == []
-              assert db.execute("SELECT COUNT(*) FROM collector_sessions").fetchone()[0] == 2
+              assert db.execute("SELECT COUNT(*) FROM collector_sessions").fetchone()[0] == 3
               counts = {
                   table: db.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
                   for table in (
@@ -189,9 +195,15 @@ jobs:
               }
           with open("/tmp/real-capture-merge-report.json", encoding="utf-8") as handle:
               report = json.load(handle)
-          assert report["capture_sessions"] == 2
+          assert report["capture_sessions"] == 3
           assert report["decision"] == "merged_research_data_only_no_strategy_approved"
-          print(json.dumps({"status": "ok", "capture_sessions": 2, "capture_row_counts": counts}, indent=2))
+          assert counts == {
+              "capture_observations": 5765,
+              "capture_minute_features": 1438,
+              "capture_minute_candles": 1444,
+              "capture_derivatives_snapshots": 2880,
+          }
+          print(json.dumps({"status": "ok", "capture_sessions": 3, "capture_row_counts": counts}, indent=2))
           PY
       - name: Upload real-artifact merge output and report
         uses: actions/upload-artifact@v4
