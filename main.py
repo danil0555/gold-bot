@@ -2193,7 +2193,7 @@ def format_scan_rejection_summary(rejections: Any, limit: int = 5) -> str:
         ((str(reason), safe_int(count, 0)) for reason, count in rejections.items()),
         key=lambda item: (-item[1], item[0]),
     )
-    return "\\n".join(
+    return "\n".join(
         f"{count}× {reason}" for reason, count in items[:max(1, limit)] if count > 0
     ) or "—"
 
@@ -2215,7 +2215,7 @@ async def system_status_handler(message: Message):
         f"Отправлено сигналов: {system_status.get('signals_count', 0)}\n"
         f"Последний скан (UTC): {system_status.get('last_scan') or '—'}\n"
         f"Последний цикл: {html.escape(str(system_status.get('last_scan_summary') or '—'))}\n"
-        f"Основные причины отказа последнего скана:\\n<code>{rejection_summary}</code>\\n"
+        f"Основные причины отказа последнего скана:\n<code>{rejection_summary}</code>\n"
         f"Проверено пар: {system_status.get('last_scan_checked', 0)}/{system_status.get('last_scan_planned', len(SYMBOLS))}\n"
         f"Длительность: {system_status.get('last_scan_duration_sec') if system_status.get('last_scan_duration_sec') is not None else '—'} сек.\n"
         f"Недоступных контрактов: {len(_unavailable_symbols)}\n"
