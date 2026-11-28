@@ -1,6 +1,6 @@
 # Trading Bot — canonical project context
 
-> Last updated: 2026-11-27 (PR #30 and research PR #31 merged)  
+> Last updated: 2026-11-28 (PR #32 and research captures #9/#12 verified)  
 > Repository: https://github.com/danil0555/gold-bot  
 > Default branch: `main`  
 > Purpose: persistent handoff record across ChatGPT conversations. This file is a project-state snapshot, not a substitute for checking the live repository, open PRs, CI, deployment console, or the latest user instructions.
@@ -53,7 +53,7 @@ At the start of every new Trading Bot conversation:
 
 ## Main branch — verified state
 
-Latest known `main` SHA: `ace34ea42312755c55b7628beab96cf84a9fc8df` (PR #30 squash merge; PR #22 code merge is `f7f4c97ed099bef3dc20984fd7793e42c12dda04`).
+Latest verified `main` SHA: `d1a54d8cfa38b3bf8d64282fa5fe9b74b3582b7c` (PR #32 squash merge). PR #22 code merge is `f7f4c97ed099bef3dc20984fd7793e42c12dda04`.
 
 ### Merged documentation PRs
 
@@ -119,7 +119,7 @@ Capture #5 DB integrity check OK, foreign-key check empty, both symbols had cont
 - PR #31 — https://github.com/danil0555/gold-bot/pull/31 — merged only into `research/capture-v2-4h-run`, merge SHA `eec54ba3df345e33bafd42cade43b7c99b62d610`. Exact-head CI run `46062576165` passed after fixing a test expectation. It added gap-aware segment resets to the event-study pipeline and a six-capture pooled report.
 - Pooled artifact `15228738674` from run `46062576165`: 2,876 matched symbol/minute rows across 12 continuous segments (six capture sessions × two symbols). The analysis now resets rolling thresholds, returns, OI deltas and forward labels at each missing/non-consecutive minute.
 - Every event/horizon has only 3 independent 24h clusters, below the minimum 4. Every result remains `insufficient_independent_clusters`. After 12 bps costs, mean net returns were negative for all four hypotheses at 1m/5m/15m. No signal is approved.
-- A capture workflow triggered by the PR #20 merge (`46061878586`) was cancelled during the next research branch update. PR #31 merge triggered run `46062718647`, pending at last check. Refresh; do not assume capture has started or completed.
+- The two next scheduled capture workflows have now completed successfully; see the verified #9/#12 checkpoint below.
 
 ## Scan diagnostics — current interpretation
 
@@ -131,12 +131,22 @@ Capture #5 DB integrity check OK, foreign-key check empty, both symbols had cont
 
 ## Planned work and next actions
 
-1. Refresh capture workflow run `46062718647` and inspect artifacts if it completes.
+1. Preserve capture #9/#12 as separate provenance sessions; next research step is a deliberate pooled analysis that retains all capture/segment boundaries and only reports inference when independent-cluster requirements are met.
 2. Keep PR #21 on hold until production SQLite integrity and foreign-key checks can be verified; do not let fail-closed startup guard surprise the running bot.
 3. Verify PR #22's API-success timestamp in Telegram only after the new `main` commit is deployed; merge does not equal deployment.
 4. Confirm FadeHost's deployed SHA and current deploy quota with the user before recommending a redeploy; latest verified deployed SHA remains `f077413...`.
 5. Continue collecting independent capture windows and require multiple independent time clusters, untouched holdouts and realistic cost/execution simulation before strategy consideration.
 6. Keep BOT_CONTEXT.md updated after each meaningful milestone.
+
+### Captures #9 and #12 — completed and independently inspected (2026-11-28)
+
+- Capture #9: Actions run `46061561700`, branch `research/capture-v2-multiday-merge-v1`, head `517c2fcf31435f69bb4bbc475056c10ac544dab1`; success. Four-hour session `2026-11-27T20:08:52.982Z`–`2026-11-28T00:08:52.984Z`. DB artifact `15239625601`; event-study artifact `15239555778`.
+- Capture #12: Actions run `46062718647`, branch `research/capture-v2-4h-run`, head `eec54ba3df345e33bafd42cade43b7c99b62d610`; success. Four-hour session `2026-11-28T00:09:23.387Z`–`2026-11-28T04:09:23.388Z`. DB artifact `15247044348`; event-study artifact `15247812336`.
+- Both DB artifacts independently inspected: SQLite `integrity_check=ok`, `foreign_key_check` empty. Each has one capture session, 1,923 provenance observations, 480 features (240 per symbol), 482 candles, 960 derivatives snapshots, and 11 collector events; both BTC-USDT and ETH-USDT present, six WS subscription acknowledgements, clean stop.
+- Capture #9 depth samples were zero in 1 BTC feature minute and 2 ETH feature minutes; #12 had zero in 1 BTC minute and 1 ETH minute. These are isolated sparse-depth minutes, not missing feature rows.
+- The two four-hour windows are adjacent but not continuous: #9's last feature minute is 00:07 UTC, #12's first is 00:09 UTC. Preserve this one-minute gap as a segment boundary; do not calculate rolling features or forward labels across it.
+- Both event studies use a fixed 12 bps round-trip cost. All four hypotheses have negative mean net returns at all 1m/5m/15m horizons in both captures. #9 has only 1–2 independent 24h clusters per horizon; #12 has one. All remain `insufficient_independent_clusters` (minimum required: 4). Results are exploratory and must not be used as trade instructions or production signals.
+- No production code, strategy, risk, leverage, DB, credentials, or deployment changed.
 
 ## Permission ledger
 
