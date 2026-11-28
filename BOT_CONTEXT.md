@@ -25,6 +25,20 @@ At the start of every new Trading Bot conversation:
 8. Never claim access to every past chat. Use available conversation context, this file, GitHub and connected sources; if something cannot be retrieved, say so and do not invent it.
 9. After every substantial milestone, update this file in a branch/PR with verified facts, changed files, commits, tests, remaining tasks, and permissions. Do not write secrets, API keys, tokens, or private credentials here.
 
+## Mandatory continuation-time rule for ChatGPT
+
+For **every user-facing assistant message in a Trading Bot work conversation**, including short milestone reports, continuation handoffs, and restored-context sessions, finish with one final line in this exact style:
+
+`Когда продолжить: через N минут` or `Когда продолжить: через N часов`.
+
+Rules for choosing the interval:
+- Give a concrete, realistic estimate based on the next useful checkpoint: expected GitHub Actions completion, research capture completion, artifact availability, test duration, or the next point at which a fresh status check is worthwhile.
+- If there is no meaningful reason to wait, say `Когда продолжить: можешь написать «Продолжай» сейчас`.
+- If progress depends on a user action (for example, checking FadeHost or providing a screenshot/log), state that dependency in the same final line rather than inventing a wait time.
+- Do not repeatedly ask the user to type «Продолжай» after every tiny subtask; batch the work within the active turn and report only meaningful checkpoints.
+- Never imply that ChatGPT continues running, monitors GitHub, or will send a message in the background after the response ends. A suggested interval is only the best time for the user to return and request the next check; it is not a background-job guarantee.
+- This rule applies even when the answer is that work is complete, blocked, or awaiting user approval. In those cases, make clear whether the user can continue immediately or must first perform the named action.
+
 ## Product and production invariants
 
 - Telegram market-scanning/signal bot for BingX USDT-M Futures.
