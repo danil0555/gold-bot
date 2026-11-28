@@ -170,7 +170,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh run download 46029620348 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-6 --repo "$GITHUB_REPOSITORY"
-      - name: Run the exact PR merger against all six real artifacts
+      - name: Download seventh real four-hour capture artifact
+        env:
+          GH_TOKEN: \${{ github.token }}
+        run: gh run download 46061561700 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-7 --repo "$GITHUB_REPOSITORY"
+      - name: Download eighth real four-hour capture artifact
+        env:
+          GH_TOKEN: \${{ github.token }}
+        run: gh run download 46062718647 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-8 --repo "$GITHUB_REPOSITORY"
+      - name: Run the exact PR merger against all eight real artifacts
         run: |
           set -euo pipefail
           first="$(find /tmp/capture-1 -type f -name '*.sqlite3' -print -quit)"
@@ -179,14 +187,18 @@ jobs:
           fourth="$(find /tmp/capture-4 -type f -name '*.sqlite3' -print -quit)"
           fifth="$(find /tmp/capture-5 -type f -name '*.sqlite3' -print -quit)"
           sixth="$(find /tmp/capture-6 -type f -name '*.sqlite3' -print -quit)"
+          seventh="$(find /tmp/capture-7 -type f -name '*.sqlite3' -print -quit)"
+          eighth="$(find /tmp/capture-8 -type f -name '*.sqlite3' -print -quit)"
           test -n "$first"
           test -n "$second"
           test -n "$third"
           test -n "$fourth"
           test -n "$fifth"
           test -n "$sixth"
+          test -n "$seventh"
+          test -n "$eighth"
           python -m scripts.merge_capture_v2_databases \
-            --inputs "$first" "$second" "$third" "$fourth" "$fifth" "$sixth" \
+            --inputs "$first" "$second" "$third" "$fourth" "$fifth" "$sixth" "$seventh" "$eighth" \
             --output /tmp/merged-real-captures.sqlite3 \
             --report /tmp/real-capture-merge-report.json
       - name: Reopen and validate merged database
@@ -201,7 +213,7 @@ jobs:
           with closing(sqlite3.connect(path)) as db:
               assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
               assert db.execute("PRAGMA foreign_key_check").fetchall() == []
-              assert db.execute("SELECT COUNT(*) FROM collector_sessions").fetchone()[0] == 6
+              assert db.execute("SELECT COUNT(*) FROM collector_sessions").fetchone()[0] == 8
               counts = {
                   table: db.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
                   for table in (
@@ -213,28 +225,42 @@ jobs:
               }
           with open("/tmp/real-capture-merge-report.json", encoding="utf-8") as handle:
               report = json.load(handle)
-          assert report["capture_sessions"] == 6
+          assert report["capture_sessions"] == 8
           assert report["decision"] == "merged_research_data_only_no_strategy_approved"
           assert counts == {
-              "capture_observations": 11532,
-              "capture_minute_features": 2878,
-              "capture_minute_candles": 2888,
-              "capture_derivatives_snapshots": 5760,
+              "capture_observations": 15378,
+              "capture_minute_features": 3838,
+              "capture_minute_candles": 3852,
+              "capture_derivatives_snapshots": 7680,
           }
-          print(json.dumps({"status": "ok", "capture_sessions": 6, "capture_row_counts": counts}, indent=2))
+          print(json.dumps({"status": "ok", "capture_sessions": 8, "capture_row_counts": counts}, indent=2))
           PY
-      - name: Run exploratory event study across all six merged captures
+      - name: Run exploratory event study across all eight merged captures
         run: |
           python -m scripts.microstructure_event_study \
             --db /tmp/merged-real-captures.sqlite3 \
             --cost-bps 12 \
-            --output /tmp/six-capture-microstructure-event-study.json
-      - name: Upload real-artifact merge output, merge report and pooled event study
+            --output /tmp/eight-capture-microstructure-event-study.json
+      - name: Assert eight-capture event-study guardrails
+        run: |
+          python - <<'PY'
+          import json
+          with open("/tmp/eight-capture-microstructure-event-study.json", encoding="utf-8") as handle:
+              report = json.load(handle)
+          assert report["rows"] == 3836, report["rows"]
+          assert report["continuous_segments"] == 16, report["continuous_segments"]
+          for event, result in report["events"].items():
+              for horizon, metrics in result["horizons"].items():
+                  assert metrics["cluster_count_24h"] == 4, (event, horizon, metrics)
+                  assert metrics["mean_net_bps"] < 0, (event, horizon, metrics)
+          print("Eight-capture event study guardrails passed: 3,836 rows, 16 segments, 4 clusters, all net means negative.")
+          PY
+      - name: Upload eight-capture merge output, merge report and pooled event study
         uses: actions/upload-artifact@v4
         with:
-          name: capture-v2-real-artifact-merge-integration
+          name: capture-v2-eight-artifact-merge-integration
           path: |
             /tmp/merged-real-captures.sqlite3
             /tmp/real-capture-merge-report.json
-            /tmp/six-capture-microstructure-event-study.json
+            /tmp/eight-capture-microstructure-event-study.json
           retention-days: 14
