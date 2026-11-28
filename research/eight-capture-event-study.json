@@ -1,1 +1,193 @@
-__REPORT_JSON__
+{
+  "study": "gap-aware pooled microstructure event study",
+  "scope": {
+    "sessions": 8,
+    "symbols": [
+      "BTC-USDT",
+      "ETH-USDT"
+    ],
+    "capture_start_utc": "2026-11-25T21:36:49Z",
+    "capture_end_utc": "2026-11-28T04:09:23Z",
+    "capture_hours": 32,
+    "elapsed_hours": 54.5,
+    "continuous_segments": 16,
+    "segments_per_symbol": 8,
+    "minute_gaps_per_symbol": 7,
+    "panel_rows": 3836
+  },
+  "method": {
+    "lookback_minutes": 120,
+    "min_history_minutes": 60,
+    "event_thinning_minutes": 5,
+    "round_trip_cost_bps": 12,
+    "cluster_hours": 24,
+    "minimum_independent_clusters": 4,
+    "reset_rolling_oi_and_forward_labels_at_every_gap": true
+  },
+  "data_validation": {
+    "capture_observations": 15378,
+    "capture_minute_features": 3838,
+    "capture_minute_candles": 3852,
+    "capture_derivatives_snapshots": 7680,
+    "collector_events": 88,
+    "sqlite_integrity": "ok",
+    "foreign_key_errors": 0,
+    "missing_provenance_links": 0,
+    "orphan_provenance_links": 0,
+    "cleanly_stopped_sessions": 8,
+    "zero_depth_feature_minutes": 37,
+    "depth_feature_minutes_total": 3838
+  },
+  "sources": {
+    "six_capture_merged_database_artifact": 15229047580,
+    "capture9_database_artifact": 15239625601,
+    "capture9_event_study_artifact": 15239555778,
+    "capture12_database_artifact": 15247044348,
+    "capture12_event_study_artifact": 15247812336,
+    "six_capture_pooled_event_study_artifact": 15228738674
+  },
+  "results": {
+    "event_sell_absorption": {
+      "direction": "LONG",
+      "raw_events": 404,
+      "thinned_events": 259,
+      "horizons": {
+        "1m": {
+          "observations": 258,
+          "mean_gross_bps": -0.572,
+          "mean_net_bps": -12.572,
+          "positive_net_pct": 1.16,
+          "profit_factor": 0.0063,
+          "clusters_24h": 4,
+          "clustered_se_bps": 0.227
+        },
+        "5m": {
+          "observations": 250,
+          "mean_gross_bps": -1.715,
+          "mean_net_bps": -13.715,
+          "positive_net_pct": 10,
+          "profit_factor": 0.067,
+          "clusters_24h": 4,
+          "clustered_se_bps": 0.675
+        },
+        "15m": {
+          "observations": 236,
+          "mean_gross_bps": -3.151,
+          "mean_net_bps": -15.151,
+          "positive_net_pct": 17.37,
+          "profit_factor": 0.165,
+          "clusters_24h": 4,
+          "clustered_se_bps": 3.629
+        }
+      }
+    },
+    "event_buy_absorption": {
+      "direction": "SHORT",
+      "raw_events": 393,
+      "thinned_events": 255,
+      "horizons": {
+        "1m": {
+          "observations": 255,
+          "mean_gross_bps": -0.028,
+          "mean_net_bps": -12.028,
+          "positive_net_pct": 2.35,
+          "profit_factor": 0.0184,
+          "clusters_24h": 4,
+          "clustered_se_bps": 0.26
+        },
+        "5m": {
+          "observations": 247,
+          "mean_gross_bps": 1.663,
+          "mean_net_bps": -10.337,
+          "positive_net_pct": 13.77,
+          "profit_factor": 0.1508,
+          "clusters_24h": 4,
+          "clustered_se_bps": 1.303
+        },
+        "15m": {
+          "observations": 237,
+          "mean_gross_bps": 3.255,
+          "mean_net_bps": -8.745,
+          "positive_net_pct": 21.1,
+          "profit_factor": 0.3996,
+          "clusters_24h": 4,
+          "clustered_se_bps": 2.569
+        }
+      }
+    },
+    "event_bid_support": {
+      "direction": "LONG",
+      "raw_events": 161,
+      "thinned_events": 108,
+      "horizons": {
+        "1m": {
+          "observations": 107,
+          "mean_gross_bps": -0.13,
+          "mean_net_bps": -12.13,
+          "positive_net_pct": 0.93,
+          "profit_factor": 0.0004,
+          "clusters_24h": 4,
+          "clustered_se_bps": 0.266
+        },
+        "5m": {
+          "observations": 106,
+          "mean_gross_bps": 0.761,
+          "mean_net_bps": -11.239,
+          "positive_net_pct": 14.15,
+          "profit_factor": 0.0884,
+          "clusters_24h": 4,
+          "clustered_se_bps": 0.353
+        },
+        "15m": {
+          "observations": 98,
+          "mean_gross_bps": -1.683,
+          "mean_net_bps": -13.683,
+          "positive_net_pct": 16.33,
+          "profit_factor": 0.1469,
+          "clusters_24h": 4,
+          "clustered_se_bps": 2.154
+        }
+      }
+    },
+    "event_oi_expansion_sell_pressure": {
+      "direction": "SHORT",
+      "raw_events": 131,
+      "thinned_events": 77,
+      "horizons": {
+        "1m": {
+          "observations": 77,
+          "mean_gross_bps": 0.57,
+          "mean_net_bps": -11.43,
+          "positive_net_pct": 2.6,
+          "profit_factor": 0.0265,
+          "clusters_24h": 4,
+          "clustered_se_bps": 0.462
+        },
+        "5m": {
+          "observations": 75,
+          "mean_gross_bps": 2.636,
+          "mean_net_bps": -9.364,
+          "positive_net_pct": 18.67,
+          "profit_factor": 0.1212,
+          "clusters_24h": 4,
+          "clustered_se_bps": 0.889
+        },
+        "15m": {
+          "observations": 74,
+          "mean_gross_bps": 5.269,
+          "mean_net_bps": -6.731,
+          "positive_net_pct": 28.38,
+          "profit_factor": 0.509,
+          "clusters_24h": 4,
+          "clustered_se_bps": 5.471
+        }
+      }
+    }
+  },
+  "caveats": [
+    "All 12 event/horizon combinations have negative mean net returns after the fixed 12 bps cost.",
+    "Four independent 24h blocks are exactly the minimum, not a robust multi-regime validation sample.",
+    "Only BTC-USDT and ETH-USDT; no order-book replay, exchange fill simulation, funding, or portfolio sizing.",
+    "Exploratory research only; no production signal or strategy approval."
+  ]
+}
