@@ -172,11 +172,11 @@ jobs:
         run: gh run download 46029620348 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-6 --repo "$GITHUB_REPOSITORY"
       - name: Download seventh real four-hour capture artifact
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: gh run download 46061561700 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-7 --repo "$GITHUB_REPOSITORY"
       - name: Download eighth real four-hour capture artifact
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: gh run download 46062718647 --name bingx-microstructure-v2-four-hour --dir /tmp/capture-8 --repo "$GITHUB_REPOSITORY"
       - name: Run the exact PR merger against all eight real artifacts
         run: |
